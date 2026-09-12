@@ -1,0 +1,37 @@
+[build-system]
+requires = ["setuptools>=75"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "repo-atlas"
+version = "1.0.0"
+description = "Build a semantic atlas of a GitHub portfolio"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+license = { text = "MIT" }
+dependencies = [
+  "hdbscan>=0.8.40",
+  "httpx>=0.28",
+  "networkx>=3.4",
+  "numpy>=2.0",
+  "openai>=1.70",
+  "pydantic>=2.10",
+  "scikit-image>=0.25",
+  "scikit-learn>=1.6",
+  "typer>=0.15",
+  "umap-learn>=0.5.7",
+]
+
+[project.optional-dependencies]
+local = ["sentence-transformers>=3.4"]
+dev = ["pytest>=8.3", "pytest-cov>=6"]
+
+[project.scripts]
+atlas = "repo_atlas.cli:app"
+
+[tool.setuptools]
+packages = ["repo_atlas", "config"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"
