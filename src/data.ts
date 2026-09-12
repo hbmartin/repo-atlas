@@ -16,7 +16,7 @@ export function validateAtlas(value: unknown): AtlasData {
 }
 
 export async function loadAtlas(): Promise<AtlasData> {
-  const response = await fetch('/atlas.json', { cache: 'no-cache' })
+  const response = await fetch('/atlas.json')
   if (!response.ok) throw new Error(`Atlas request failed (${response.status})`)
   return validateAtlas(await response.json())
 }
