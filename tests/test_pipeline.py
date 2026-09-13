@@ -434,7 +434,7 @@ def test_duplicate_labels_get_stable_bounded_suffixes():
 
 
 def test_label_stage_uses_deterministic_fallback_after_model_failures(tmp_path, monkeypatch):
-    pipeline = AtlasPipeline(tmp_path, None)
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
     insert_repo(pipeline, "owner/repo")
     insert_summary_and_fallback(pipeline, "owner/repo")
     pipeline.analysis = {
@@ -448,7 +448,159 @@ def test_label_stage_uses_deterministic_fallback_after_model_failures(tmp_path, 
     monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: BrokenLabeler())
     pipeline.label()
     assert pipeline.labels[0].label == "Developer Tools"
-    assert pipeline.cache.rows("SELECT * FROM stage_cache WHERE stage='label'") == []
+    cached = pipeline.cache.rows("SELECT * FROM stage_cache WHERE stage='label'")
+    assert json.loads(cached[0]["payload_json"])["source"] == "fallback"
+    resumed = AtlasPipeline(tmp_path, None, best_effort=True)
+    resumed._restore_labels(pipeline.analysis)
+    resumed._require_complete_labels(pipeline.analysis)
+    assert resumed.labels == pipeline.labels
+    assert resumed.fallback_label_ids == {0}
+    strict = AtlasPipeline(tmp_path, None)
+    with pytest.raises(RuntimeError, match="requires --best-effort"):
+        strict._restore_labels(pipeline.analysis)
+
+    recovered = pipeline_module.ClusterLabel(label="AI Tools", gloss="Model-generated label.")
+    resumed.analysis = pipeline.analysis
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: SimpleNamespace(
+        label=lambda *_a, **_k: recovered,
+    ))
+    resumed.label()
+    strict._restore_labels(pipeline.analysis)
+    assert strict.labels[0] == recovered
+    assert not resumed.fallback_label_ids
+    assert not strict.fallback_label_ids
+
+
+@pytest.mark.parametrize(("best_effort", "error", "expected"), [
+    (False, RuntimeError("request failed"), RuntimeError),
+    (True, FileNotFoundError("codex"), SummarizerConfigurationError),
+    (True, SummarizerConfigurationError("configuration"), SummarizerConfigurationError),
+])
+def test_label_failures_do_not_silently_publish(tmp_path, monkeypatch, best_effort, error, expected):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=best_effort)
+    insert_repo(pipeline, "owner/repo")
+    insert_summary_and_fallback(pipeline, "owner/repo")
+    pipeline.analysis = {"names": ["owner/repo"], "cluster_ids": [0]}
+    def fail(*_args, **_kwargs):
+        raise error
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: SimpleNamespace(label=fail))
+    with pytest.raises(expected):
+        pipeline.label()
+    assert not pipeline.labels
+    assert not pipeline.cache.rows("SELECT * FROM stage_cache WHERE stage='label'")
+
+
+@pytest.mark.parametrize("domain", ["AI", "iOS", "developer's tools"])
+def test_fallback_labels_preserve_domain_spelling(domain):
+    summary = SUMMARY.model_copy(update={"domain": domain})
+    value = AtlasPipeline._fallback_cluster_label(0, ["owner/repo"], {"owner/repo": summary})
+    assert value.label == {"developer's tools": "Developer's Tools"}.get(domain, domain)
+    assert domain in value.gloss
+
+
+def test_fallback_labels_resume_through_project_and_emit(tmp_path, monkeypatch):
+    (tmp_path / "public").mkdir()
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True, allow_fallback=True)
+    insert_repo(pipeline, "owner/repo")
+    insert_summary_and_fallback(pipeline, "owner/repo")
+    names, _vectors, key = pipeline._vectors()
+    analysis = {"key": key, "names": names, "cluster_ids": [0], "algorithm": "none"}
+    pipeline.cache.set_stage("cluster", key, analysis, pipeline_module.now())
+    def fail(*_args, **_kwargs):
+        raise RuntimeError("synthetic provider failure")
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: SimpleNamespace(label=fail))
+    pipeline.run(start="label")
+    output = tmp_path / "public" / "atlas.json"
+    expected = json.loads(output.read_text())
+    assert expected["fallback_label_ids"] == [0]
+    for start, only in [("project", None), ("discover", {"emit"})]:
+        resumed = AtlasPipeline(tmp_path, None, best_effort=True, allow_fallback=True)
+        resumed.run(start=start, only=only)
+        assert json.loads(output.read_text()) == expected
+        assert "Fallback labels: 0" in (tmp_path / "reports" / f"run-{resumed.run_id}.md").read_text()
+
+
+@pytest.mark.parametrize("dimensions", [2, 3])
+def test_fallback_rebuild_drops_excluded_vectors_before_resume(tmp_path, monkeypatch, dimensions):
+    pipeline = AtlasPipeline(tmp_path, None, allow_fallback=True, best_effort=True)
+    for name in ("owner/a", "owner/b", "owner/skipped"):
+        insert_repo(pipeline, name)
+        insert_summary_and_fallback(pipeline, name)
+    pipeline._best_effort_excluded.add("owner/skipped")
+    def quota(_texts):
+        raise RuntimeError("insufficient_quota")
+    monkeypatch.setattr(pipeline_module, "get_embedder", lambda _name: SimpleNamespace(
+        model_id="hosted-test", embed=quota,
+    ))
+    calls = []
+    def fallback(_self, texts):
+        calls.append(len(texts))
+        return np.full((len(texts), dimensions), len(texts), dtype=np.float32)
+    monkeypatch.setattr(OfflineFallbackEmbedder, "embed", fallback)
+    pipeline.embed()
+    assert pipeline._vectors()[0] == ["owner/a", "owner/b"]
+    assert not pipeline.cache.rows("SELECT * FROM embeddings WHERE full_name='owner/skipped'")
+    resumed = AtlasPipeline(tmp_path, None, allow_fallback=True)
+    with pytest.raises(RuntimeError, match="incomplete"):
+        resumed._vectors()
+    resumed.embed()
+    names, vectors, _key = resumed._vectors()
+    assert len(names) == 3
+    assert np.all(vectors == 3)
+    assert calls == [2, 3]
+
+
+def test_fallback_replacement_rolls_back_if_insert_fails(tmp_path, monkeypatch):
+    import sqlite3
+
+    pipeline = AtlasPipeline(tmp_path, None, allow_fallback=True, best_effort=True)
+    for name in ("owner/a", "owner/b", "owner/skipped"):
+        insert_repo(pipeline, name)
+        insert_summary_and_fallback(pipeline, name)
+    pipeline._best_effort_excluded.add("owner/skipped")
+    before = [tuple(row) for row in pipeline.cache.rows("SELECT * FROM embeddings ORDER BY full_name")]
+    pipeline.cache.execute("""CREATE TRIGGER fail_embedding BEFORE INSERT ON embeddings
+        WHEN NEW.full_name='owner/b' BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END""")
+    def quota(_texts):
+        raise RuntimeError("insufficient_quota")
+    monkeypatch.setattr(pipeline_module, "get_embedder", lambda _name: SimpleNamespace(
+        model_id="hosted-test", embed=quota,
+    ))
+    monkeypatch.setattr(OfflineFallbackEmbedder, "embed", lambda _self, texts: np.ones((len(texts), 3)))
+    with pytest.raises(sqlite3.IntegrityError, match="synthetic failure"):
+        pipeline.embed()
+    assert [tuple(row) for row in pipeline.cache.rows("SELECT * FROM embeddings ORDER BY full_name")] == before
+
+
+def test_secret_is_redacted_in_repairs_logs_and_failure_cache(tmp_path, monkeypatch, capsys):
+    import subprocess
+
+    from repo_atlas.summarizers import ClaudeSummarizer
+
+    secret = "synthetic1credential"
+    monkeypatch.setenv("CLAUDE_CODE_USE_BEDROCK", "1")
+    monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", secret)
+    monkeypatch.setenv("ATLAS_SUMMARY_WORKERS", "1")
+    prompts = []
+    class FailedProcess:
+        pid = 1234
+        returncode = 1
+        def communicate(self, **_kwargs):
+            return "", f"authentication failed: {secret}"
+    def start(command, **_kwargs):
+        prompts.append(command[-1])
+        return FailedProcess()
+    monkeypatch.setattr(subprocess, "Popen", start)
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: ClaudeSummarizer())
+    pipeline = AtlasPipeline(tmp_path, None, summarizer="claude", allow_agent_summarizer=True)
+    insert_repo(pipeline, "owner/repo")
+    with pytest.raises(RuntimeError, match="Summarization failed"):
+        pipeline.summarize()
+    failure = pipeline.cache.rows("SELECT error_message FROM summary_failures")[0][0]
+    assert len(prompts) == 3
+    assert "[redacted]" in prompts[1]
+    assert "[redacted]" in failure
+    assert secret not in failure + capsys.readouterr().err + " ".join(prompts)
 
 
 def test_legacy_locked_label_overrides_are_normalized(tmp_path):

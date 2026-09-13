@@ -60,3 +60,5 @@ jobs:
         run: pnpm exec tsc -b
       - name: Build production bundle
         run: pnpm run build
+      - name: Validate Cloudflare deployment without publishing
+        run: pnpm exec wrangler deploy --dry-run

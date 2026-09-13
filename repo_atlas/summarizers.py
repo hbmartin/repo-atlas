@@ -50,6 +50,17 @@ PROVIDER_CONFIG_ENV = {
         "GOOGLE_GENAI_USE_GCA", "GOOGLE_GENAI_USE_VERTEXAI", "GOOGLE_VERTEX_BASE_URL",
     },
 }
+# Configuration switches, region names and paths are not credential values.
+# Endpoints/proxies are included because URLs can embed authentication.
+SECRET_ENV_KEYS = {
+    "CODEX_ACCESS_TOKEN", "CODEX_API_KEY", "OPENAI_API_KEY",
+    "ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "AWS_ACCESS_KEY_ID",
+    "AWS_BEARER_TOKEN_BEDROCK", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+    "CLAUDE_CODE_OAUTH_TOKEN", "GEMINI_API_KEY", "GOOGLE_API_KEY",
+}
+PROXY_ENV_KEYS = {
+    "ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy",
+}
 
 
 class SummarizerConfigurationError(RuntimeError):
@@ -77,14 +88,34 @@ def safe_subprocess_env(provider: str) -> dict[str, str]:
 
 def safe_stderr_detail(provider: str, stderr: str) -> str:
     detail = " ".join(stderr.strip().split())
-    sensitive = PROVIDER_CONFIG_ENV.get(provider, set()) | {
-        "ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy",
+    provider_keys = PROVIDER_CONFIG_ENV.get(provider, set())
+    sensitive = (provider_keys & SECRET_ENV_KEYS) | PROXY_ENV_KEYS | {
+        key for key in provider_keys if key.endswith("_BASE_URL")
     }
+    intervals: list[tuple[int, int]] = []
     for key in sensitive:
-        value = os.environ.get(key)
-        if value:
-            detail = detail.replace(value, "[redacted]")
-    return detail[-1000:]
+        value = " ".join(os.environ.get(key, "").split())
+        if not value:
+            continue
+        start = detail.find(value)
+        while start >= 0:
+            intervals.append((start, start + len(value)))
+            start = detail.find(value, start + 1)
+    # Find matches in the original text and merge even crossing overlaps.
+    # Replacements must never modify another match or the replacement marker.
+    merged: list[tuple[int, int]] = []
+    for start, end in sorted(intervals):
+        if merged and start < merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(end, merged[-1][1]))
+        else:
+            merged.append((start, end))
+    parts: list[str] = []
+    offset = 0
+    for start, end in merged:
+        parts.extend((detail[offset:start], "[redacted]"))
+        offset = end
+    parts.append(detail[offset:])
+    return "".join(parts)[-1000:]
 
 
 SUMMARY_PROMPT = """You normalize repository evidence for semantic comparison.
@@ -186,16 +217,24 @@ class Summarizer(ABC):
             schema_path.write_text(json.dumps(model.model_json_schema()), encoding="utf-8")
             with self._process_lock:
                 self._raise_if_cancelled()
-                process = subprocess.Popen(
-                    self.command(prompt, schema_path),
-                    stdin=subprocess.PIPE if self.name == "codex" else subprocess.DEVNULL,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.PIPE,
-                    cwd=root,
-                    env=safe_subprocess_env(self.name),
-                    text=True,
-                    start_new_session=os.name == "posix",
-                )
+                command = self.command(prompt, schema_path)
+                self._raise_if_cancelled()
+                try:
+                    process = subprocess.Popen(
+                        command,
+                        stdin=subprocess.PIPE if self.name == "codex" else subprocess.DEVNULL,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        cwd=root,
+                        env=safe_subprocess_env(self.name),
+                        text=True,
+                        start_new_session=os.name == "posix",
+                    )
+                except OSError as exc:
+                    raise SummarizerConfigurationError(
+                        f"Cannot start {self.name} CLI ({type(exc).__name__}); "
+                        "check its installation and executable permissions."
+                    ) from exc
                 self._active_processes.add(process)
             try:
                 stdout, _stderr = process.communicate(
@@ -213,16 +252,6 @@ class Summarizer(ABC):
             self._raise_if_cancelled()
             if process.returncode != 0:
                 detail = safe_stderr_detail(self.name, _stderr)
-                lowered = detail.casefold()
-                if self.name == "codex" and any(marker in lowered for marker in (
-                    "unknown feature", "unknown config", "unknown field `web_search`",
-                    "unexpected argument '--disable'", "unrecognized option '--disable'",
-                    "unexpected argument '--strict-config'",
-                    "unrecognized option '--strict-config'",
-                )):
-                    raise SummarizerConfigurationError(
-                        "The installed Codex CLI cannot disable all required tools; update Codex."
-                    )
                 suffix = f": {detail}" if detail else ""
                 raise RuntimeError(
                     f"{self.name} failed with exit code {process.returncode}{suffix}"
@@ -263,16 +292,98 @@ class Summarizer(ABC):
 
 class CodexSummarizer(Summarizer):
     name = "codex"
+    required_features = frozenset({
+        "shell_tool", "browser_use", "apps", "computer_use", "in_app_browser",
+        "image_generation", "browser_use_external", "multi_agent", "unified_exec",
+        "plugins", "hooks",
+    })
+
+    def __init__(self) -> None:
+        super().__init__()
+        self._disabled_features: tuple[str, ...] | None = None
+
+    def _preflight(self) -> tuple[str, ...]:
+        if self._disabled_features is not None:
+            return self._disabled_features
+        # These probes never start a model or receive repository evidence. A
+        # clean config root prevents user settings from influencing discovery.
+        with tempfile.TemporaryDirectory(prefix="repo-atlas-codex-probe-") as directory:
+            environment = {
+                key: value for key, value in safe_subprocess_env(self.name).items()
+                if key in SAFE_ENV_KEYS
+            }
+            environment["CODEX_HOME"] = directory
+
+            def probe(arguments: list[str]) -> str:
+                self._raise_if_cancelled()
+                try:
+                    result = subprocess.run(
+                        ["codex", *arguments], stdin=subprocess.DEVNULL,
+                        capture_output=True, text=True, check=False, timeout=10,
+                        cwd=directory, env=environment,
+                    )
+                except (OSError, subprocess.TimeoutExpired) as exc:
+                    raise SummarizerConfigurationError(
+                        f"Cannot inspect Codex CLI ({type(exc).__name__}); check its installation."
+                    ) from exc
+                if result.returncode:
+                    detail = safe_stderr_detail(self.name, result.stderr)
+                    raise SummarizerConfigurationError(
+                        f"Codex compatibility check failed; update Codex. {detail}"
+                    )
+                return result.stdout
+
+            help_text = probe(["exec", "--help"])
+            required_options = {
+                "--sandbox", "--ephemeral", "--ignore-user-config", "--ignore-rules",
+                "--strict-config", "--disable", "--output-schema", "--skip-git-repo-check",
+            }
+            if not required_options.issubset(set(re.findall(r"--[a-z][a-z-]+", help_text))):
+                raise SummarizerConfigurationError(
+                    "Codex is missing required isolation options; update Codex."
+                )
+
+            def features(text: str) -> dict[str, bool]:
+                parsed: dict[str, bool] = {}
+                seen: set[str] = set()
+                for line in text.splitlines():
+                    if not line.strip():
+                        continue
+                    match = re.fullmatch(r"(\w+)\s+(.+?)\s+(true|false)\s*", line)
+                    if not match or match[1] in seen:
+                        raise SummarizerConfigurationError(
+                            "Cannot interpret Codex feature controls; update Codex."
+                        )
+                    seen.add(match[1])
+                    if match[2] != "removed":
+                        parsed[match[1]] = match[3] == "true"
+                return parsed
+
+            advertised = features(probe(["features", "list"]))
+            if not self.required_features.issubset(advertised):
+                raise SummarizerConfigurationError(
+                    "Codex did not report the required feature controls; update Codex."
+                )
+            disabled = tuple(sorted(advertised))
+            overrides = [argument for feature in disabled for argument in ("--disable", feature)]
+            effective = features(probe([
+                "features", "list", "-c", 'web_search="disabled"', *overrides,
+            ]))
+            if effective.keys() != advertised.keys() or any(effective.values()):
+                raise SummarizerConfigurationError(
+                    "Codex could not disable all configurable features; update Codex."
+                )
+            self._disabled_features = disabled
+        return disabled
 
     def command(self, prompt: str, schema_path: Path) -> list[str]:
+        disabled = self._preflight()
         return [
             "codex", "exec", "-", "--sandbox", "read-only", "--ephemeral",
             "--ignore-user-config", "--ignore-rules", "--strict-config",
             "--skip-git-repo-check",
             "-c", 'web_search="disabled"',
-            "--disable", "shell_tool", "--disable", "browser_use", "--disable", "apps",
-            "--disable", "computer_use", "--disable", "in_app_browser",
-            "--disable", "image_generation",
+            *[argument for feature in disabled for argument in ("--disable", feature)],
             "--output-schema", str(schema_path), "--color", "never",
         ]
 

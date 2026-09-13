@@ -64,10 +64,41 @@ describe('MapView', () => {
     )).toBe(selected)
   })
 
+  it('prefers the drawn selected circle over a neighbors padded target', () => {
+    const selected = makeAtlas().repos[0]
+    const neighbor = { ...selected, full_name: 'owner/neighbor', x: 522 }
+    const visible = new Set([selected.full_name, neighbor.full_name])
+    for (const repos of [[selected, neighbor], [neighbor, selected]]) {
+      expect(nearestRepoAtPoint(
+        repos, visible, 516, 500, 22, false,
+        (repo) => repo.full_name === selected.full_name ? 18 : 3, selected.full_name,
+      )).toBe(selected)
+      expect(nearestRepoAtPoint(
+        repos, visible, 522, 500, 22, false,
+        (repo) => repo.full_name === selected.full_name ? 18 : 3, selected.full_name,
+      )).toBe(neighbor)
+    }
+  })
+
   it('shows region glosses on ordinary desktop maps', () => {
     expect(clusterGlossesVisible(1, 800)).toBe(true)
     expect(clusterGlossesVisible(1, 600)).toBe(false)
     expect(clusterGlossesVisible(2, 800)).toBe(false)
+    expect(clusterGlossesVisible(1, 800, true)).toBe(false)
+    expect(clusterLabelX(80, 'AI', 'A'.repeat(100), clusterGlossesVisible(1, 800, true))).toBe(80)
+  })
+
+  it('omits invisible tablet glosses and their positioning space', () => {
+    const data = makeAtlas()
+    data.clusters[0].label = 'AI'
+    data.clusters[0].label_anchor.x = 80
+    data.clusters[0].gloss = 'A'.repeat(100)
+    const { container } = render(
+      <MapView data={data} view={view} visible={new Set(data.repos.map((repo) => repo.full_name))}
+        selected={null} onSelect={vi.fn()} />,
+    )
+    expect(container.querySelector('.cluster-gloss')).toBeNull()
+    expect(container.querySelector('.cluster-label')?.getAttribute('transform')).toContain('translate(80 ')
   })
 
   it('uses map-level hit testing instead of overlapping transparent circles', () => {

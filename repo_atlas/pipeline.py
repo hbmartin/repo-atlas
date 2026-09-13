@@ -102,6 +102,7 @@ class AtlasPipeline:
         self.started_at = now()
         self.analysis: dict | None = None
         self.labels: dict[int, ClusterLabel] = {}
+        self.fallback_label_ids: set[int] = set()
         self.final_payload: dict | None = None
         self.effective_embedder_id: str | None = None
         self._summary_snapshot: list[sqlite3.Row] | None = None
@@ -113,6 +114,7 @@ class AtlasPipeline:
         self._vector_snapshot = None
         self.analysis = None
         self.labels = {}
+        self.fallback_label_ids.clear()
         self.final_payload = None
         self.effective_embedder_id = None
 
@@ -327,18 +329,16 @@ class AtlasPipeline:
             else:
                 current.append(summary)
         if stale:
+            sample = ", ".join(stale[:3])
+            suffix = "…" if len(stale) > 3 else ""
             if self.best_effort:
                 self._best_effort_excluded.update(stale)
-                sample = ", ".join(stale[:3])
-                suffix = "…" if len(stale) > 3 else ""
                 print(
                     f"[summarize] best-effort mode omitted {len(stale)} repositories without "
                     f"current summaries ({sample}{suffix})",
                     file=sys.stderr,
                 )
             else:
-                sample = ", ".join(stale[:3])
-                suffix = "…" if len(stale) > 3 else ""
                 raise RuntimeError(
                     f"{len(stale)} repositories lack a current successful summary "
                     f"({sample}{suffix}). Run the summarize stage first."
@@ -428,6 +428,7 @@ class AtlasPipeline:
                         )
             except BaseException:
                 provider.cancel()
+                executor.shutdown(wait=False, cancel_futures=True)
                 raise
         if failures:
             if not self.best_effort:
@@ -484,15 +485,20 @@ class AtlasPipeline:
             missing = rows
             vectors = embedder.embed([row["embed_text"] for row in rows])
             print(f"[embed] hosted quota unavailable; rebuilt complete {embedder.model_id} corpus")
-        self.effective_embedder_id = embedder.model_id
-        for row, vector in zip(missing, vectors, strict=True):
-            self.cache.execute(
-                "INSERT OR REPLACE INTO embeddings VALUES (?,?,?,?,?,?)",
-                (
-                    row["full_name"], row["embed_text_hash"], embedder.model_id,
-                    int(vector.shape[0]), vector.astype(np.float32).tobytes(), now(),
-                ),
+        records = [
+            (
+                row["full_name"], row["embed_text_hash"], embedder.model_id,
+                int(vector.shape[0]), vector.astype(np.float32).tobytes(), now(),
             )
+            for row, vector in zip(missing, vectors, strict=True)
+        ]
+        # A fallback fit defines one shared vocabulary and coordinate system.
+        # Replace its entire corpus atomically, including previously skipped repos.
+        with self.cache.connect() as con:
+            if embedder.model_id == OfflineFallbackEmbedder.model_id:
+                con.execute("DELETE FROM embeddings WHERE model_id=?", (embedder.model_id,))
+            con.executemany("INSERT OR REPLACE INTO embeddings VALUES (?,?,?,?,?,?)", records)
+        self.effective_embedder_id = embedder.model_id
         print(f"[embed] wrote {len(missing)} vectors using {embedder.model_id}")
 
     def _vectors(self) -> tuple[list[str], np.ndarray, str]:
@@ -617,6 +623,7 @@ class AtlasPipeline:
         provider = None
         used: set[str] = set()
         self.labels = {}
+        self.fallback_label_ids.clear()
         signatures, overrides, reserved = self._locked_override_values(members)
         label_cache = {
             row["cache_key"]: json.loads(row["payload_json"])
@@ -630,7 +637,7 @@ class AtlasPipeline:
             value: ClusterLabel | None = None
             if override:
                 value = override
-            elif cached:
+            elif cached and not (isinstance(cached, dict) and cached.get("source") == "fallback"):
                 try:
                     value = ClusterLabel.model_validate(cached)
                 except ValidationError as exc:
@@ -648,8 +655,21 @@ class AtlasPipeline:
                     self.cache.set_stage("label", stage_key, value.model_dump(), now())
                 except (SummarizerConfigurationError, SummarizerCancelledError):
                     raise
-                except (OSError, RuntimeError, ValueError) as exc:
+                except OSError as exc:
+                    raise SummarizerConfigurationError(
+                        f"Could not run {self.summarizer_name} labeling: {type(exc).__name__}."
+                    ) from exc
+                except (RuntimeError, ValueError) as exc:
+                    if not self.best_effort:
+                        raise RuntimeError(
+                            f"Labeling failed for cluster {cluster_id}: {exc}. "
+                            "Rerun with --best-effort to permit fallback labels."
+                        ) from exc
                     value = self._fallback_cluster_label(cluster_id, members[cluster_id], summaries)
+                    self.fallback_label_ids.add(cluster_id)
+                    self.cache.set_stage("label", stage_key, {
+                        "source": "fallback", "value": value.model_dump(),
+                    }, now())
                     print(
                         f"[label] warning: model labeling failed for cluster {cluster_id}; "
                         f"using {value.label!r}: {type(exc).__name__}: {exc}",
@@ -668,14 +688,17 @@ class AtlasPipeline:
         summaries: dict[str, RepoSummary],
     ) -> ClusterLabel:
         domains = [
-            summaries[name].domain.strip().casefold()
+            summaries[name].domain.strip()
             for name in names
-            if summaries[name].domain.strip().casefold() not in {"unclear", "unclustered"}
+            if summaries[name].domain.strip().casefold() not in {"unclear", UNCLUSTERED_LABEL.casefold()}
         ]
         if domains:
-            counts = Counter(domains)
-            candidate = min(counts, key=lambda value: (-counts[value], value)).title()
-            gloss = f"Repositories focused on {candidate.lower()}."
+            counts = Counter(domain.casefold() for domain in domains)
+            winner = min(counts, key=lambda value: (-counts[value], value))
+            original = min(domain for domain in domains if domain.casefold() == winner)
+            candidate = " ".join(word[:1].upper() + word[1:] if word.islower() else word
+                                 for word in original.split())
+            gloss = f"Repositories focused on {original}."
             if len(gloss) > 100:
                 gloss = "Repositories with related technical goals."
         else:
@@ -743,6 +766,7 @@ class AtlasPipeline:
                 members[int(cluster_id)].append(name)
         used: set[str] = set()
         self.labels = {}
+        self.fallback_label_ids.clear()
         signatures, overrides, reserved = self._locked_override_values(members)
         for cluster_id, names in sorted(members.items()):
             signature = signatures[cluster_id]
@@ -753,6 +777,14 @@ class AtlasPipeline:
             if override:
                 value = override
             elif cached:
+                if isinstance(cached, dict) and cached.get("source") == "fallback":
+                    if not self.best_effort:
+                        raise RuntimeError(
+                            "Restoring fallback labels requires --best-effort. "
+                            "Run the label stage to retry model labeling."
+                        )
+                    self.fallback_label_ids.add(cluster_id)
+                    cached = cached.get("value")
                 try:
                     value = ClusterLabel.model_validate(cached)
                 except ValidationError:
@@ -807,7 +839,10 @@ class AtlasPipeline:
     def _project_cache_key(self, vector_key: str, names: list[str]) -> tuple[str, list[int | None]]:
         label_key = {cluster_id: label.model_dump() for cluster_id, label in self.labels.items()}
         file_counts = self._file_counts(names)
-        return content_hash(vector_key, label_key, file_counts), file_counts
+        parts = (vector_key, label_key, file_counts)
+        if self.fallback_label_ids:
+            parts += (sorted(self.fallback_label_ids),)
+        return content_hash(*parts), file_counts
 
     def project(self) -> None:
         analysis = self._load_analysis()
@@ -935,6 +970,7 @@ class AtlasPipeline:
         self.final_payload = {
             "analysis_key": key, "layout": chosen, "layout_alt": alternate,
             "embedding_model": self.effective_embedder_id,
+            "fallback_label_ids": sorted(self.fallback_label_ids),
             "selection_rule": fired, "metrics": metric_values, "names": names,
             "cluster_ids": labels, "coordinates": chosen_xy.tolist(),
             "coordinates_alt": alternate_xy.tolist(), "neighbors": [
@@ -966,6 +1002,8 @@ class AtlasPipeline:
 
     def emit(self) -> None:
         projected = self._load_project()
+        if projected.get("fallback_label_ids") and not self.best_effort:
+            raise RuntimeError("Publishing fallback labels requires --best-effort.")
         if projected.get("embedding_model") == OfflineFallbackEmbedder.model_id and not self.allow_fallback:
             raise RuntimeError(
                 "Refusing to publish fallback embeddings without --allow-fallback."
@@ -1031,6 +1069,7 @@ class AtlasPipeline:
             "schema_version": 1, "generated_at": now(),
             "owner": names[0].split("/", 1)[0],
             "embedding_model": projected.get("embedding_model", self.effective_embedder_id),
+            "fallback_label_ids": projected.get("fallback_label_ids", []),
             "layout": projected["layout"], "layout_alt": projected["layout_alt"],
             "bounds": {"x": [0, 1000], "y": [0, 1000]},
             "stats": {
@@ -1116,6 +1155,10 @@ class AtlasPipeline:
         if self._best_effort_excluded:
             lines[6:6] = [
                 f"- Best-effort omissions: {len(self._best_effort_excluded)}",
+            ]
+        if projected.get("fallback_label_ids"):
+            lines[6:6] = [
+                f"- Fallback labels: {', '.join(map(str, projected['fallback_label_ids']))}",
             ]
         for layout in ("umap", "force"):
             value = metrics[layout]

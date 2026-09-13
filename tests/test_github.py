@@ -67,11 +67,12 @@ def test_rate_limit_uses_one_delay_before_retry(monkeypatch):
         client.close()
 
 
-def test_successful_response_waits_before_quota_is_exhausted(monkeypatch):
-    client = GitHubClient("token")
+@pytest.mark.parametrize("maximum", [0, 60, 3660])
+def test_successful_response_returns_immediately_with_low_quota(monkeypatch, maximum):
+    client = GitHubClient("token", max_rate_limit_wait=maximum)
     response = SimpleNamespace(
         status_code=200,
-        headers={"X-RateLimit-Remaining": "99", "X-RateLimit-Reset": "110"},
+        headers={"X-RateLimit-Remaining": "99", "X-RateLimit-Reset": "3700"},
     )
     sleeps = []
     monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: response)
@@ -79,7 +80,7 @@ def test_successful_response_waits_before_quota_is_exhausted(monkeypatch):
     monkeypatch.setattr("repo_atlas.github.time.sleep", sleeps.append)
     try:
         assert client.get("/repos/owner/repo") is response
-        assert sleeps == [11]
+        assert sleeps == []
     finally:
         client.close()
 

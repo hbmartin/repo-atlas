@@ -16,6 +16,7 @@ import {
   nearestRepoAtPoint,
   nearestRepoInDirection,
   pointerToMapPoint,
+  useMediaQuery,
   useReducedMotion,
 } from '../view-utils'
 
@@ -45,6 +46,10 @@ export function MapView({
   const [svgSize, setSvgSize] = useState(1000)
   const pointerStart = useRef<{ x: number; y: number } | null>(null)
   const reduced = useReducedMotion()
+  const compact = useMediaQuery('(max-width: 1023px)')
+  const drawnRadius = (repo: AtlasRepo) => repo.size_r * (compact ? 0.8 : 1) * (
+    selected?.full_name === repo.full_name || hover?.full_name === repo.full_name ? 1.3 : 1
+  )
   const reposByName = useMemo(
     () => new Map(data.repos.map((repo) => [repo.full_name, repo])),
     [data.repos],
@@ -180,7 +185,7 @@ export function MapView({
     }
     return names
   }, [data.repos, pointX, pointY, transform, visible])
-  const showClusterGlosses = clusterGlossesVisible(transform.k, svgSize)
+  const showClusterGlosses = clusterGlossesVisible(transform.k, svgSize, compact)
 
   return (
     <div className="map-shell">
@@ -213,9 +218,7 @@ export function MapView({
             point.y,
             22 * point.unitsPerPixel,
             view.layoutAlt,
-            (repo) => repo.size_r * (
-              selected?.full_name === repo.full_name || hover?.full_name === repo.full_name ? 1.3 : 1
-            ),
+            drawnRadius,
             selected?.full_name,
           ))
         }}
@@ -233,9 +236,7 @@ export function MapView({
             point.y,
             22 * point.unitsPerPixel,
             view.layoutAlt,
-            (candidate) => candidate.size_r * (
-              selected?.full_name === candidate.full_name || hover?.full_name === candidate.full_name ? 1.3 : 1
-            ),
+            drawnRadius,
             selected?.full_name,
           )
           if (repo) centerRepo(repo, 2.6)
@@ -278,7 +279,7 @@ export function MapView({
             const isVisible = visible.has(repo.full_name)
             const isSelected = selected?.full_name === repo.full_name
             const isHover = hover?.full_name === repo.full_name
-            const radius = repo.size_r * (isSelected || isHover ? 1.3 : 1)
+            const radius = drawnRadius(repo)
             const showLabel = isSelected || isHover || placedLabels.has(repo.full_name)
             return (
               <g

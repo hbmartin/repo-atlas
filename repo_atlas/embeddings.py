@@ -52,7 +52,8 @@ class LocalEmbedder(Embedder):
 class OfflineFallbackEmbedder(Embedder):
     """Deterministic, credit-free fallback used only when hosted quota is exhausted."""
 
-    model_id = "tfidf-svd-v1-fallback"
+    # v2 invalidates caches that could combine independently fitted v1 corpora.
+    model_id = "tfidf-svd-v2-fallback"
 
     def embed(self, texts: list[str]) -> np.ndarray:
         from sklearn.decomposition import TruncatedSVD
