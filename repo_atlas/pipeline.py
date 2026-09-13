@@ -5,11 +5,8 @@ import html
 import json
 import math
 import os
-import shutil
 import sqlite3
-import subprocess
 import sys
-import time
 from collections import defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
@@ -17,18 +14,26 @@ from pathlib import Path
 from urllib.parse import quote
 
 import numpy as np
+from pydantic import ValidationError
 
 from .cache import Cache
 from .content import clean_readme, content_hash, tracked_file_count, tree_digest
 from .embeddings import OfflineFallbackEmbedder, get_embedder
+from .layouts import (
+    density_contours,
+    force_layout,
+    postprocess_layout,
+    projection_neighbor_counts,
+)
 from .models import ClusterLabel, RepoSummary
 from .summarizers import get_summarizer
 
-
 STAGES = ("discover", "acquire", "summarize", "embed", "cluster", "label", "project", "emit")
-PROMPT_VERSION = "summary-v1"
+PROMPT_VERSION = "summary-v2"
+LABEL_PROMPT_VERSION = "label-v1"
 TEMPLATE_VERSION = "embed-v1"
-ALGORITHM_VERSION = "analysis-v1"
+ALGORITHM_VERSION = "analysis-v2"
+ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
 
 LANGUAGE_COLORS = {
@@ -60,26 +65,49 @@ def month(value: str) -> str:
     return value[:10]
 
 
+def summarizer_cache_id(name: str) -> str:
+    if name == "openai":
+        model = os.environ.get("ATLAS_SUMMARY_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        return f"openai:{model}"
+    return name
+
+
 class AtlasPipeline:
     def __init__(
         self,
         root: Path,
         github,
-        summarizer: str = "codex",
+        summarizer: str = "openai",
         embedder: str = "hosted",
         yes: bool = False,
+        allow_fallback: bool = False,
+        allow_agent_summarizer: bool = False,
     ):
         self.root = root
         self.cache = Cache(root / ".atlas" / "cache.db")
         self.github = github
         self.summarizer_name = summarizer
+        self.summary_provider_id = summarizer_cache_id(summarizer)
         self.embedder_name = embedder
         self.yes = yes
+        self.allow_fallback = allow_fallback
+        self.allow_agent_summarizer = allow_agent_summarizer
         self.run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
+        self.started_at = now()
         self.analysis: dict | None = None
         self.labels: dict[int, ClusterLabel] = {}
         self.final_payload: dict | None = None
         self.effective_embedder_id: str | None = None
+        self._summary_snapshot: list[sqlite3.Row] | None = None
+        self._vector_snapshot: tuple[list[str], np.ndarray, str] | None = None
+
+    def _invalidate_snapshots(self) -> None:
+        self._summary_snapshot = None
+        self._vector_snapshot = None
+        self.analysis = None
+        self.labels = {}
+        self.final_payload = None
+        self.effective_embedder_id = None
 
     def run(self, start: str = "discover", only: set[str] | None = None) -> None:
         if start not in STAGES:
@@ -88,6 +116,8 @@ class AtlasPipeline:
         unknown = chosen.difference(STAGES)
         if unknown:
             raise ValueError(f"Unknown stages: {', '.join(sorted(unknown))}")
+        if "discover" not in chosen:
+            self._apply_cached_exclusions()
         for stage in STAGES:
             if stage in chosen:
                 print(f"[{stage}] starting", flush=True)
@@ -98,12 +128,32 @@ class AtlasPipeline:
         if not path.exists():
             return set()
         return {
-            line.strip() for line in path.read_text(encoding="utf-8").splitlines()
+            line.strip().casefold() for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
 
-    def discover(self) -> None:
+    def _apply_cached_exclusions(self) -> None:
         excluded = self._exclude_names()
+        if not excluded:
+            return
+        rows = self.cache.rows("SELECT full_name FROM repos ORDER BY full_name")
+        matched = [row["full_name"] for row in rows if row["full_name"].casefold() in excluded]
+        for full_name in matched:
+            self.cache.execute("DELETE FROM repos WHERE full_name=?", (full_name,))
+            print(f"[exclude] removed cached {full_name}")
+
+    def _summarizer(self):
+        if self.summarizer_name in {"codex", "claude", "gemini"} and not self.allow_agent_summarizer:
+            raise RuntimeError(
+                "Agent CLI summarizers can access local credentials and files. Use the default "
+                "structured-output OpenAI API adapter, or pass --allow-agent-summarizer to opt in."
+            )
+        return get_summarizer(self.summarizer_name)
+
+    def discover(self) -> None:
+        self._invalidate_snapshots()
+        excluded = self._exclude_names()
+        matched_exclusions: set[str] = set()
         seen: set[str] = set()
         items = list(self.github.paginate(
             "/user/repos", visibility="public", affiliation="owner", sort="full_name",
@@ -111,7 +161,10 @@ class AtlasPipeline:
         for index, repo in enumerate(sorted(items, key=lambda item: item["full_name"]), 1):
             full_name = repo["full_name"]
             print(f"[discover {index}/{len(items)}] {full_name}", flush=True)
-            if full_name in excluded or not repo.get("default_branch") or repo.get("size", 0) == 0:
+            if full_name.casefold() in excluded:
+                matched_exclusions.add(full_name.casefold())
+                continue
+            if not repo.get("default_branch") or repo.get("size", 0) == 0:
                 continue
             detail = repo
             parent_name = None
@@ -125,9 +178,16 @@ class AtlasPipeline:
                 compare = self.github.get(
                     f"/repos/{full_name}/compare/"
                     f"{quote(parent_name.split('/')[0])}:{quote(parent_branch)}..."
-                    f"{quote(detail['owner']['login'])}:{quote(detail['default_branch'])}"
+                    f"{quote(detail['owner']['login'])}:{quote(detail['default_branch'])}",
                 )
-                if compare.status_code == 404 or compare.status_code >= 400:
+                if compare.status_code in (404, 409, 422):
+                    continue
+                if compare.status_code >= 400:
+                    print(
+                        f"[discover] warning: skipped {full_name}; fork comparison returned "
+                        f"GitHub {compare.status_code}",
+                        file=sys.stderr,
+                    )
                     continue
                 if int(compare.json().get("ahead_by", 0)) <= 0:
                     continue
@@ -159,15 +219,22 @@ class AtlasPipeline:
                 )
             seen.add(full_name)
         with self.cache.connect() as con:
-            if seen:
-                placeholders = ",".join("?" for _ in seen)
-                con.execute(f"DELETE FROM repos WHERE full_name NOT IN ({placeholders})", tuple(sorted(seen)))
+            if not seen:
+                raise RuntimeError(
+                    "Discovery retained zero repositories; existing cache was left unchanged. "
+                    "Check authentication and exclusions."
+                )
+            placeholders = ",".join("?" for _ in seen)
+            con.execute(f"DELETE FROM repos WHERE full_name NOT IN ({placeholders})", tuple(sorted(seen)))
         print(f"[discover] retained {len(seen)} repositories")
+        for missing in sorted(excluded - matched_exclusions):
+            print(f"[discover] warning: exclusion did not match {missing}", file=sys.stderr)
 
     def acquire(self) -> None:
+        self._invalidate_snapshots()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         for index, repo in enumerate(rows, 1):
-            key = content_hash(repo["pushed_at"], repo["default_branch"])
+            key = content_hash(ACQUIRE_VERSION, repo["pushed_at"], repo["default_branch"])
             if repo["acquire_key"] == key and repo["content_hash"]:
                 print(f"[acquire {index}/{len(rows)}] cached {repo['full_name']}")
                 continue
@@ -203,75 +270,147 @@ class AtlasPipeline:
                 ),
             )
 
+    def _summary_context(self, repo: sqlite3.Row) -> tuple[dict, bool, str]:
+        low = not repo["readme_present"] or (repo["readme_word_count"] or 0) < 40
+        languages = json.loads(repo["languages_json"])
+        top_languages = sorted(languages.items(), key=lambda item: (-item[1], item[0]))[:3]
+        context = {
+            "full_name": repo["full_name"],
+            "description": repo["description"],
+            "topics": json.loads(repo["topics_json"]),
+            "primary_language": repo["primary_language"],
+            "top_languages": top_languages,
+            "readme": "" if low else (repo["readme_cleaned"] or "")[:24000],
+            "tree_digest": json.loads(repo["tree_digest_json"] or "{}"),
+        }
+        return context, low, content_hash(context, {"low_confidence": low})
+
+    def _current_summary_rows(self, *, require_provider: bool = False) -> list[sqlite3.Row]:
+        if self._summary_snapshot is not None and (
+            not require_provider
+            or all(row["provider"] == self.summary_provider_id for row in self._summary_snapshot)
+        ):
+            return self._summary_snapshot
+        repos = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
+        summaries = {
+            row["full_name"]: row for row in self.cache.rows("SELECT * FROM summaries")
+        }
+        stale: list[str] = []
+        current: list[sqlite3.Row] = []
+        for repo in repos:
+            _context, _low, context_key = self._summary_context(repo)
+            summary = summaries.get(repo["full_name"])
+            if not summary or any((
+                summary["status"] != "ok",
+                summary["content_hash"] != context_key,
+                summary["prompt_version"] != PROMPT_VERSION,
+                require_provider and summary["provider"] != self.summary_provider_id,
+                summary["template_version"] != TEMPLATE_VERSION,
+            )):
+                stale.append(repo["full_name"])
+            else:
+                current.append(summary)
+        if stale:
+            sample = ", ".join(stale[:3])
+            suffix = "…" if len(stale) > 3 else ""
+            raise RuntimeError(
+                f"{len(stale)} repositories lack a current successful summary ({sample}{suffix}). "
+                "Run the summarize stage first."
+            )
+        if not current:
+            raise RuntimeError("No current successful summaries are available.")
+        self._summary_snapshot = current
+        return current
+
     def summarize(self) -> None:
-        provider = get_summarizer(self.summarizer_name)
+        self._invalidate_snapshots()
+        provider = self._summarizer()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         cached_by_name = {
             row["full_name"]: row for row in self.cache.rows("SELECT * FROM summaries")
         }
-        pending: list[tuple[int, sqlite3.Row, dict, bool]] = []
+        pending: list[tuple[int, sqlite3.Row, dict, bool, str]] = []
         for index, repo in enumerate(rows, 1):
+            context, low, context_key = self._summary_context(repo)
             cached = cached_by_name.get(repo["full_name"])
-            if cached and cached["status"] == "ok" and cached["content_hash"] == repo["content_hash"] and cached["prompt_version"] == PROMPT_VERSION and cached["provider"] == self.summarizer_name:
-                print(f"[summarize {index}/{len(rows)}] cached {repo['full_name']}")
+            if cached and cached["status"] == "ok" and cached["content_hash"] == context_key and cached["prompt_version"] == PROMPT_VERSION and cached["provider"] == self.summary_provider_id:
+                if cached["template_version"] != TEMPLATE_VERSION:
+                    summary = RepoSummary.model_validate_json(cached["summary_json"])
+                    text = embedding_text(summary)
+                    self.cache.execute(
+                        """UPDATE summaries SET embed_text=?,embed_text_hash=?,template_version=?,
+                        low_confidence=?,created_at=? WHERE full_name=?""",
+                        (
+                            text, hashlib.sha256(text.encode()).hexdigest(), TEMPLATE_VERSION,
+                            low, now(), repo["full_name"],
+                        ),
+                    )
+                    print(f"[summarize {index}/{len(rows)}] refreshed embedding text {repo['full_name']}")
+                else:
+                    print(f"[summarize {index}/{len(rows)}] cached {repo['full_name']}")
+                self.cache.execute("DELETE FROM summary_failures WHERE full_name=?", (repo["full_name"],))
                 continue
-            low = not repo["readme_present"] or (repo["readme_word_count"] or 0) < 40
-            languages = json.loads(repo["languages_json"])
-            top_languages = sorted(languages.items(), key=lambda item: (-item[1], item[0]))[:3]
-            context = {
-                "full_name": repo["full_name"],
-                "description": repo["description"],
-                "topics": json.loads(repo["topics_json"]),
-                "primary_language": repo["primary_language"],
-                "top_languages": top_languages,
-                "readme": "" if low else (repo["readme_cleaned"] or "")[:24000],
-                "tree_digest": json.loads(repo["tree_digest_json"] or "{}"),
-            }
-            pending.append((index, repo, context, low))
+            pending.append((index, repo, context, low, context_key))
 
-        def work(item: tuple[int, sqlite3.Row, dict, bool]) -> tuple[int, str, tuple]:
-            index, repo, context, low = item
+        def work(item: tuple[int, sqlite3.Row, dict, bool, str]) -> tuple[int, str, tuple | None, tuple | None]:
+            index, repo, context, low, context_key = item
             print(f"[summarize {index}/{len(rows)}] {repo['full_name']}", flush=True)
             try:
                 summary = provider.summarize(context, low_confidence=low)
                 text = embedding_text(summary)
-                values = (
-                    repo["full_name"], repo["content_hash"], PROMPT_VERSION,
-                    self.summarizer_name, summary.model_dump_json(), text,
+                success = (
+                    repo["full_name"], context_key, PROMPT_VERSION,
+                    self.summary_provider_id, summary.model_dump_json(), text,
                     hashlib.sha256(text.encode()).hexdigest(), TEMPLATE_VERSION, low, "ok", now(),
                 )
-            except Exception as exc:
-                print(f"[summarize] failed {repo['full_name']}: {exc}", file=sys.stderr)
-                values = (
-                    repo["full_name"], repo["content_hash"], PROMPT_VERSION,
-                    self.summarizer_name, "{}", "", hashlib.sha256(b"").hexdigest(),
-                    TEMPLATE_VERSION, low, "failed", now(),
+                failure = None
+            except Exception as exc:  # noqa: BLE001 - isolate individual model failures
+                error_kind = type(exc).__name__
+                error_message = str(exc)
+                print(
+                    f"[summarize] failed {repo['full_name']}: "
+                    f"{error_kind}: {error_message}",
+                    file=sys.stderr,
                 )
-            return index, repo["full_name"], values
+                success = None
+                failure = (
+                    repo["full_name"], context_key, PROMPT_VERSION,
+                    self.summary_provider_id, error_kind, error_message[:1000], now(),
+                )
+            return index, repo["full_name"], success, failure
 
         workers = max(1, min(8, int(os.environ.get("ATLAS_SUMMARY_WORKERS", "4"))))
+        failures: list[str] = []
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            for _index, _name, values in executor.map(work, pending):
-                self.cache.execute(
-                    "INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", values,
-                )
+            try:
+                for _index, name, success, failure in executor.map(work, pending):
+                    if success:
+                        with self.cache.connect() as con:
+                            con.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", success)
+                            con.execute("DELETE FROM summary_failures WHERE full_name=?", (name,))
+                    else:
+                        failures.append(name)
+                        self.cache.execute(
+                            """INSERT OR REPLACE INTO summary_failures(
+                            full_name,content_hash,prompt_version,provider,error_kind,
+                            error_message,failed_at
+                            ) VALUES (?,?,?,?,?,?,?)""",
+                            failure,
+                        )
+            except BaseException:
+                provider.cancel()
+                raise
+        if failures:
+            raise RuntimeError(
+                f"Summarization failed for {len(failures)} repositories; last-known-good "
+                "summaries were preserved and downstream stages were not run."
+            )
+        self._current_summary_rows(require_provider=True)
 
     def embed(self) -> None:
+        self._invalidate_snapshots()
         embedder = get_embedder(self.embedder_name)
-        rows = self.cache.rows(
-            "SELECT * FROM summaries WHERE status='ok' ORDER BY full_name"
-        )
-        if self.embedder_name == "hosted":
-            fallback = OfflineFallbackEmbedder()
-            fallback_rows = self.cache.rows(
-                "SELECT full_name,embed_text_hash FROM embeddings WHERE model_id=? ORDER BY full_name",
-                (fallback.model_id,),
-            )
-            current_hashes = {row["full_name"]: row["embed_text_hash"] for row in rows}
-            if len(fallback_rows) == len(rows) and all(current_hashes.get(row["full_name"]) == row["embed_text_hash"] for row in fallback_rows):
-                self.effective_embedder_id = fallback.model_id
-                print(f"[embed] all vectors cached using {fallback.model_id}")
-                return
+        rows = self._current_summary_rows()
         missing = []
         for row in rows:
             cached = self.cache.rows(
@@ -280,10 +419,6 @@ class AtlasPipeline:
             )
             if not cached or cached[0][0] != row["embed_text_hash"]:
                 missing.append(row)
-        if missing and self.cache.rows("SELECT 1 FROM embeddings LIMIT 1") and not self.yes:
-            raise RuntimeError(
-                f"{len(missing)} vectors require recomputation; rerun with --yes to confirm."
-            )
         if not missing:
             self.effective_embedder_id = embedder.model_id
             print("[embed] all vectors cached")
@@ -294,10 +429,30 @@ class AtlasPipeline:
             message = str(exc).casefold()
             if self.embedder_name != "hosted" or not any(marker in message for marker in ("insufficient_quota", "credit_balance_exhausted", "no credits")):
                 raise
+            if not self.allow_fallback:
+                raise RuntimeError(
+                    "Hosted embedding quota is exhausted. Rerun with --allow-fallback to "
+                    "explicitly permit the lower-quality TF-IDF/SVD fallback."
+                ) from exc
             embedder = OfflineFallbackEmbedder()
+            fallback_rows = {
+                row["full_name"]: row["embed_text_hash"] for row in self.cache.rows(
+                    "SELECT full_name,embed_text_hash FROM embeddings WHERE model_id=?",
+                    (embedder.model_id,),
+                )
+            }
+            fallback_current = len(fallback_rows) == len(rows) and all(
+                fallback_rows.get(row["full_name"]) == row["embed_text_hash"] for row in rows
+            )
+            if fallback_current:
+                self.effective_embedder_id = embedder.model_id
+                print(f"[embed] hosted quota unavailable; reused complete {embedder.model_id} corpus")
+                return
+            # TF-IDF vocabulary and SVD axes depend on the whole corpus, so one
+            # changed summary requires recomputing every fallback vector.
             missing = rows
-            vectors = embedder.embed([row["embed_text"] for row in missing])
-            print(f"[embed] hosted quota unavailable; used {embedder.model_id}")
+            vectors = embedder.embed([row["embed_text"] for row in rows])
+            print(f"[embed] hosted quota unavailable; rebuilt complete {embedder.model_id} corpus")
         self.effective_embedder_id = embedder.model_id
         for row, vector in zip(missing, vectors, strict=True):
             self.cache.execute(
@@ -310,32 +465,58 @@ class AtlasPipeline:
         print(f"[embed] wrote {len(missing)} vectors using {embedder.model_id}")
 
     def _vectors(self) -> tuple[list[str], np.ndarray, str]:
+        if self._vector_snapshot is not None:
+            return self._vector_snapshot
         embedder = get_embedder(self.embedder_name)
-        model_id = self.effective_embedder_id or embedder.model_id
-        rows = self.cache.rows(
-            """SELECT e.full_name,e.dim,e.vector FROM embeddings e
-            JOIN summaries s ON s.full_name=e.full_name
-            WHERE e.model_id=? AND e.embed_text_hash=s.embed_text_hash AND s.status='ok'
-            ORDER BY e.full_name""",
-            (model_id,),
-        )
-        if not rows and self.embedder_name == "hosted":
-            model_id = OfflineFallbackEmbedder.model_id
-            rows = self.cache.rows(
-                """SELECT e.full_name,e.dim,e.vector FROM embeddings e
-                JOIN summaries s ON s.full_name=e.full_name
-                WHERE e.model_id=? AND e.embed_text_hash=s.embed_text_hash AND s.status='ok'
-                ORDER BY e.full_name""",
+        summaries = self._current_summary_rows()
+        expected = {row["full_name"]: row["embed_text_hash"] for row in summaries}
+
+        def complete_rows(model_id: str) -> list[sqlite3.Row] | None:
+            candidates = self.cache.rows(
+                "SELECT full_name,embed_text_hash,dim,vector FROM embeddings WHERE model_id=? ORDER BY full_name",
                 (model_id,),
             )
-        if not rows:
-            raise RuntimeError("No current embeddings. Run the embed stage first.")
+            current = [
+                row for row in candidates
+                if expected.get(row["full_name"]) == row["embed_text_hash"]
+            ]
+            if len(current) != len(expected) or {row["full_name"] for row in current} != set(expected):
+                return None
+            dimensions = {row["dim"] for row in current}
+            if len(dimensions) != 1 or any(len(row["vector"]) != row["dim"] * 4 for row in current):
+                raise RuntimeError(f"Embedding corpus {model_id} has inconsistent vector dimensions.")
+            return current
+
+        model_id = self.effective_embedder_id or embedder.model_id
+        rows = complete_rows(model_id)
+        fallback_available = False
+        if rows is None and self.embedder_name == "hosted":
+            fallback_available = complete_rows(OfflineFallbackEmbedder.model_id) is not None
+        if rows is None and self.embedder_name == "hosted" and self.allow_fallback:
+            model_id = OfflineFallbackEmbedder.model_id
+            rows = complete_rows(model_id)
+        if rows is None:
+            if fallback_available and not self.allow_fallback:
+                raise RuntimeError(
+                    "A complete fallback embeddings corpus exists, but using it requires "
+                    "--allow-fallback."
+                )
+            fallback_note = " A complete fallback corpus was not found." if self.allow_fallback else ""
+            raise RuntimeError(
+                f"Embedding corpus {model_id} is incomplete for the current summaries. "
+                f"Run the embed stage first.{fallback_note}"
+            )
+        if model_id == OfflineFallbackEmbedder.model_id and not self.allow_fallback:
+            raise RuntimeError(
+                "The current analysis uses fallback embeddings. Rerun with --allow-fallback."
+            )
         names = [row["full_name"] for row in rows]
         vectors = np.stack([np.frombuffer(row["vector"], dtype=np.float32) for row in rows])
         self.effective_embedder_id = model_id
         vector_digest = hashlib.sha256(vectors.round(7).tobytes()).hexdigest()
         key = content_hash(ALGORITHM_VERSION, model_id, names, vector_digest)
-        return names, vectors, key
+        self._vector_snapshot = (names, vectors, key)
+        return self._vector_snapshot
 
     def cluster(self) -> None:
         names, vectors, key = self._vectors()
@@ -402,134 +583,165 @@ class AtlasPipeline:
         for name, cluster_id in zip(analysis["names"], analysis["cluster_ids"], strict=True):
             if cluster_id is not None:
                 members[int(cluster_id)].append(name)
-        provider = get_summarizer(self.summarizer_name)
+        provider = None
         used: set[str] = set()
         self.labels = {}
-        overrides = {row["signature"]: row for row in self.cache.rows("SELECT * FROM label_overrides WHERE locked=1")}
+        signatures, overrides, reserved = self._locked_override_values(members)
         label_cache = {
             row["cache_key"]: json.loads(row["payload_json"])
             for row in self.cache.rows("SELECT cache_key,payload_json FROM stage_cache WHERE stage='label'")
         }
         for cluster_id in sorted(members):
-            signature = content_hash(sorted(members[cluster_id]))
-            override = overrides.get(signature)
-            stage_key = content_hash(signature, PROMPT_VERSION, self.summarizer_name)
+            signature = signatures[cluster_id]
+            override = overrides.get(cluster_id)
+            stage_key = content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id)
             cached = label_cache.get(stage_key)
             if override:
-                value = ClusterLabel(label=override["label"], gloss=override["gloss"] or "")
+                value = override
             elif cached:
                 value = ClusterLabel.model_validate(cached)
             else:
+                provider = provider or self._summarizer()
                 descriptions = [summaries[name].one_liner for name in members[cluster_id]][:40]
                 value = provider.label(descriptions)
-                if value.label.casefold() in used:
+                if value.label.casefold() in used | reserved:
                     value = provider.label(descriptions, collision=value.label)
-                if value.label.casefold() in used:
-                    dominant = summaries[members[cluster_id][0]].domain
-                    value.label = f"{value.label} — {dominant.title()}"
                 self.cache.set_stage("label", stage_key, value.model_dump(), now())
+            if not override:
+                value = self._deduplicate_label(value, cluster_id, used | reserved)
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
             print(f"[label] {cluster_id}: {value.label}")
+
+    def _validated_override(self, row: sqlite3.Row) -> ClusterLabel:
+        try:
+            return ClusterLabel(label=row["label"], gloss=row["gloss"] or "")
+        except ValidationError:
+            # Cache schema v1 allowed arbitrary override text. Preserve as much
+            # of that user choice as the current public-data contract permits.
+            words = str(row["label"] or "").strip().split()[:4]
+            value = ClusterLabel(
+                label=" ".join(words) or "Unlabeled",
+                gloss=str(row["gloss"] or "").strip()[:100],
+            )
+            self.cache.execute(
+                "UPDATE label_overrides SET label=?,gloss=?,updated_at=? WHERE signature=?",
+                (value.label, value.gloss, now(), row["signature"]),
+            )
+            print(
+                f"[label] normalized legacy override {row['signature'][:10]} to "
+                f"{value.label!r}",
+                file=sys.stderr,
+            )
+            return value
+
+    def _locked_override_values(
+        self,
+        members: dict[int, list[str]],
+    ) -> tuple[dict[int, str], dict[int, ClusterLabel], set[str]]:
+        signatures = {
+            cluster_id: content_hash(sorted(names))
+            for cluster_id, names in members.items()
+        }
+        rows = {
+            row["signature"]: row
+            for row in self.cache.rows("SELECT * FROM label_overrides WHERE locked=1")
+        }
+        overrides = {
+            cluster_id: self._validated_override(rows[signature])
+            for cluster_id, signature in signatures.items()
+            if signature in rows
+        }
+        by_label: dict[str, list[int]] = defaultdict(list)
+        for cluster_id, value in overrides.items():
+            by_label[value.label.casefold()].append(cluster_id)
+        collisions = [ids for ids in by_label.values() if len(ids) > 1]
+        if collisions:
+            clusters = ", ".join(str(value) for ids in collisions for value in ids)
+            raise RuntimeError(
+                f"Locked label overrides must be unique; resolve clusters {clusters}."
+            )
+        return signatures, overrides, set(by_label)
 
     def _restore_labels(self, analysis: dict) -> None:
         members: dict[int, list[str]] = defaultdict(list)
         for name, cluster_id in zip(analysis["names"], analysis["cluster_ids"], strict=True):
             if cluster_id is not None:
                 members[int(cluster_id)].append(name)
-        for cluster_id, names in members.items():
-            signature = content_hash(sorted(names))
-            override = self.cache.rows(
-                "SELECT label,gloss FROM label_overrides WHERE signature=? AND locked=1",
-                (signature,),
-            )
+        used: set[str] = set()
+        self.labels = {}
+        signatures, overrides, reserved = self._locked_override_values(members)
+        for cluster_id, names in sorted(members.items()):
+            signature = signatures[cluster_id]
+            override = overrides.get(cluster_id)
             cached = self.cache.get_stage(
-                "label", content_hash(signature, PROMPT_VERSION, self.summarizer_name),
+                "label", content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id),
             )
             if override:
-                self.labels[cluster_id] = ClusterLabel(
-                    label=override[0]["label"], gloss=override[0]["gloss"] or "",
-                )
+                value = override
             elif cached:
-                self.labels[cluster_id] = ClusterLabel.model_validate(cached)
+                value = ClusterLabel.model_validate(cached)
+            else:
+                continue
+            if not override:
+                value = self._deduplicate_label(value, cluster_id, used | reserved)
+            used.add(value.label.casefold())
+            self.labels[cluster_id] = value
 
     @staticmethod
-    def _postprocess(values: np.ndarray, labels: list[int | None], label_names: dict[int, str]) -> np.ndarray:
-        from sklearn.decomposition import PCA
-
-        rotated = PCA(n_components=2, svd_solver="full").fit_transform(values)
-        cluster_order = sorted(label_names, key=lambda value: label_names[value].casefold())
-        if cluster_order:
-            target = cluster_order[0]
-            xs = [rotated[i, 0] for i, value in enumerate(labels) if value == target]
-            if xs and float(np.mean(xs)) > float(np.mean(rotated[:, 0])):
-                rotated[:, 0] *= -1
-        mins, maxs = rotated.min(axis=0), rotated.max(axis=0)
-        span = np.maximum(maxs - mins, 1e-9)
-        scale = 900 / max(span)
-        scaled = (rotated - mins) * scale
-        used = span * scale
-        scaled += (1000 - used) / 2
-        return np.round(scaled, 2)
+    def _deduplicate_label(
+        value: ClusterLabel,
+        cluster_id: int,
+        used: set[str],
+    ) -> ClusterLabel:
+        if value.label.casefold() not in used:
+            return value
+        words = value.label.split()[:3]
+        candidate = " ".join([*words, str(cluster_id + 1)])
+        counter = 2
+        while candidate.casefold() in used:
+            candidate = " ".join([*words[:2], f"{cluster_id + 1}-{counter}"])
+            counter += 1
+        return value.model_copy(update={"label": candidate})
 
     @staticmethod
-    def _force(vectors: np.ndarray) -> np.ndarray:
-        import networkx as nx
-        from sklearn.metrics.pairwise import cosine_similarity
+    def _cluster_ids(analysis: dict) -> set[int]:
+        return {int(value) for value in analysis["cluster_ids"] if value is not None}
 
-        similarity = cosine_similarity(vectors)
-        graph = nx.Graph()
-        graph.add_nodes_from(range(len(vectors)))
-        for index in range(len(vectors)):
-            neighbors = [i for i in np.argsort(-similarity[index]) if i != index][:8]
-            for rank, other in enumerate(neighbors):
-                score = float(similarity[index, other])
-                if score >= 0.55 or rank < 2:
-                    graph.add_edge(index, int(other), weight=max(0.01, (score - 0.55) / 0.45))
-        positions = nx.spring_layout(graph, seed=42, iterations=500, weight="weight")
-        return np.asarray([positions[index] for index in range(len(vectors))], dtype=float)
+    def _require_complete_labels(self, analysis: dict) -> None:
+        expected = self._cluster_ids(analysis)
+        missing = expected.difference(self.labels)
+        if missing:
+            raise RuntimeError(
+                f"Labels are incomplete for clusters: {', '.join(map(str, sorted(missing)))}. "
+                "Run the label stage first."
+            )
 
-    @staticmethod
-    def _contours(points: np.ndarray) -> tuple[dict[str, list], dict[str, float], np.ndarray]:
-        from sklearn.neighbors import KernelDensity
-        from sklearn.metrics import pairwise_distances
-        from skimage.measure import approximate_polygon, find_contours
+    def _file_counts(self, names: list[str]) -> list[int | None]:
+        placeholders = ",".join("?" for _ in names)
+        rows = self.cache.rows(
+            f"SELECT full_name,file_count FROM repos WHERE full_name IN ({placeholders})",
+            tuple(names),
+        )
+        counts = {row["full_name"]: row["file_count"] for row in rows}
+        if set(counts) != set(names):
+            raise RuntimeError("Repository metadata is incomplete for the current vector corpus.")
+        return [counts[name] for name in names]
 
-        if len(points) < 3:
-            anchor = {"x": round(float(points[:, 0].mean()), 2), "y": round(float(points[:, 1].mean()), 2)}
-            return {"outer": [], "inner": []}, anchor, np.zeros((256, 256), dtype=bool)
-        distances = pairwise_distances(points)
-        distances[distances == 0] = np.inf
-        bandwidth = max(20.0, 0.6 * float(np.mean(np.min(distances, axis=1))))
-        axis = np.linspace(0, 1000, 256)
-        xx, yy = np.meshgrid(axis, axis)
-        samples = np.column_stack([xx.ravel(), yy.ravel()])
-        density = np.exp(KernelDensity(bandwidth=bandwidth).fit(points).score_samples(samples)).reshape(256, 256)
-        peak = np.unravel_index(int(np.argmax(density)), density.shape)
-        anchor = {"x": round(float(axis[peak[1]]), 2), "y": round(float(axis[peak[0]]), 2)}
-
-        def rings(level: float) -> list[list[list[float]]]:
-            result = []
-            for contour in find_contours(density, level):
-                simplified = approximate_polygon(contour, tolerance=0.51)
-                ring = [[round(float(axis[min(255, max(0, round(col)))]), 2), round(float(axis[min(255, max(0, round(row)))]), 2)] for row, col in simplified]
-                if len(ring) >= 4:
-                    if ring[0] != ring[-1]:
-                        ring.append(ring[0])
-                    result.append(ring)
-            return result
-
-        return {"outer": rings(float(density.max() * 0.18)), "inner": rings(float(density.max() * 0.42))}, anchor, density >= density.max() * 0.18
+    def _project_cache_key(self, vector_key: str, names: list[str]) -> tuple[str, list[int | None]]:
+        label_key = {cluster_id: label.model_dump() for cluster_id, label in self.labels.items()}
+        file_counts = self._file_counts(names)
+        return content_hash(vector_key, label_key, file_counts), file_counts
 
     def project(self) -> None:
         analysis = self._load_analysis()
         names, vectors, key = self._vectors()
+        if analysis["names"] != names or analysis["key"] != key:
+            raise RuntimeError("Cluster assignment does not match the current vector corpus.")
         if not self.labels:
             self._restore_labels(analysis)
-        if not self.labels and any(value is not None for value in analysis["cluster_ids"]):
-            raise RuntimeError("No labels available in this process. Run from label or earlier.")
-        label_key = {cluster_id: label.model_dump() for cluster_id, label in self.labels.items()}
-        project_key = content_hash(key, label_key)
+        self._require_complete_labels(analysis)
+        project_key, file_counts = self._project_cache_key(key, names)
         cached_project = self.cache.get_stage("project", project_key)
         if cached_project:
             self.final_payload = cached_project
@@ -541,24 +753,35 @@ class AtlasPipeline:
         labels = analysis["cluster_ids"]
         label_names = {key: value.label for key, value in self.labels.items()}
         n_neighbors = 15 if len(names) >= 100 else max(5, len(names) // 10)
-        if len(names) < 3:
-            umap_values = np.column_stack([np.linspace(250, 750, len(names)), np.full(len(names), 500)])
+        if len(names) <= 3:
+            small_layouts = {
+                1: [[500.0, 500.0]],
+                2: [[300.0, 500.0], [700.0, 500.0]],
+                3: [[300.0, 650.0], [700.0, 650.0], [500.0, 300.0]],
+            }
+            umap_values = np.asarray(small_layouts[len(names)])
         else:
             umap_values = UMAP(
                 n_components=2, n_neighbors=min(n_neighbors, len(names) - 1), min_dist=0.10,
                 metric="cosine", random_state=42, transform_seed=42,
             ).fit_transform(vectors)
-        force_values = self._force(vectors)
-        umap_xy = self._postprocess(umap_values, labels, label_names)
-        force_xy = self._postprocess(force_values, labels, label_names)
+        force_values = force_layout(vectors)
+        umap_xy = postprocess_layout(umap_values, labels, label_names)
+        force_xy = postprocess_layout(force_values, labels, label_names)
 
         high = pairwise_distances(vectors, metric="cosine")
-        high_knn = np.argsort(high, axis=1)[:, 1:11]
+        knn_k, trust_k = projection_neighbor_counts(len(names))
+        high_knn = np.argsort(high, axis=1)[:, 1:knn_k + 1]
 
         def knn_preservation(xy: np.ndarray) -> float:
+            if knn_k == 0:
+                return 1.0
             low = pairwise_distances(xy)
-            low_knn = np.argsort(low, axis=1)[:, 1:11]
-            return float(np.mean([len(set(a).intersection(b)) / 10 for a, b in zip(high_knn, low_knn, strict=True)]))
+            low_knn = np.argsort(low, axis=1)[:, 1:knn_k + 1]
+            return float(np.mean([
+                len(set(a).intersection(b)) / knn_k
+                for a, b in zip(high_knn, low_knn, strict=True)
+            ]))
 
         contours_by_layout: dict[str, dict[int, tuple[dict, dict, np.ndarray]]] = {}
         metric_values = {}
@@ -566,7 +789,7 @@ class AtlasPipeline:
             contour_data = {}
             for cluster_id in sorted(self.labels):
                 cluster_points = np.asarray([xy[i] for i, value in enumerate(labels) if value == cluster_id])
-                contour_data[cluster_id] = self._contours(cluster_points)
+                contour_data[cluster_id] = density_contours(cluster_points)
             contours_by_layout[layout] = contour_data
             masks = [value[2] for value in contour_data.values()]
             if masks:
@@ -578,13 +801,19 @@ class AtlasPipeline:
             boxes = []
             collisions = 0
             for cluster_id, (_rings, anchor, _mask) in contour_data.items():
-                width = max(70, len(self.labels[cluster_id].label) * 9)
-                box = (anchor["x"] - width / 2, anchor["y"] - 14, anchor["x"] + width / 2, anchor["y"] + 14)
+                label = self.labels[cluster_id]
+                width = max(70, len(label.label) * 9, len(label.gloss) * 5.5)
+                box = (anchor["x"] - width / 2, anchor["y"] - 16, anchor["x"] + width / 2, anchor["y"] + 28)
                 collisions += sum(not (box[2] < other[0] or box[0] > other[2] or box[3] < other[1] or box[1] > other[3]) for other in boxes)
                 boxes.append(box)
             metric_values[layout] = {
                 "knn_10_preservation": round(knn_preservation(xy), 4),
-                "trustworthiness": round(float(trustworthiness(vectors, xy, n_neighbors=min(10, len(names) - 1), metric="cosine")), 4) if len(names) > 2 else 1.0,
+                "trustworthiness": round(float(trustworthiness(
+                    vectors,
+                    xy,
+                    n_neighbors=trust_k,
+                    metric="cosine",
+                )), 4) if len(names) > 2 else 1.0,
                 "contour_overlap": round(overlap, 4),
                 "label_collisions": collisions,
             }
@@ -606,7 +835,6 @@ class AtlasPipeline:
         similarity = vectors @ vectors.T
         np.fill_diagonal(similarity, -1)
         nearest = np.argsort(-similarity, axis=1)[:, : min(5, len(names) - 1)]
-        file_counts = [row["file_count"] for row in self.cache.rows("SELECT file_count FROM repos WHERE full_name IN (%s) ORDER BY full_name" % ",".join("?" for _ in names), tuple(names))]
         valid_counts = np.asarray([value for value in file_counts if value is not None], dtype=float)
         p5, p95 = (np.percentile(valid_counts, [5, 95]) if len(valid_counts) else (0, 1))
 
@@ -621,7 +849,6 @@ class AtlasPipeline:
         alternate_contours = contours_by_layout[alternate]
         for cluster_id, label in sorted(self.labels.items()):
             members = [name for name, value in zip(names, labels, strict=True) if value == cluster_id]
-            signature = content_hash(sorted(members))
             rings, anchor, _mask = selected_contours[cluster_id]
             alt_rings, alt_anchor, _alt_mask = alternate_contours[cluster_id]
             clusters.append({
@@ -646,19 +873,35 @@ class AtlasPipeline:
     def _load_project(self) -> dict:
         if self.final_payload:
             return self.final_payload
-        rows = self.cache.rows("SELECT payload_json FROM stage_cache WHERE stage='project' ORDER BY created_at DESC LIMIT 1")
-        if not rows:
-            raise RuntimeError("No projection available. Run the project stage first.")
-        self.final_payload = json.loads(rows[0][0])
+        analysis = self._load_analysis()
+        names, _vectors, vector_key = self._vectors()
+        if analysis["names"] != names or analysis["key"] != vector_key:
+            raise RuntimeError("Cluster assignment does not match the current vector corpus.")
+        if not self.labels:
+            self._restore_labels(analysis)
+        self._require_complete_labels(analysis)
+        project_key, _file_counts = self._project_cache_key(vector_key, names)
+        self.final_payload = self.cache.get_stage("project", project_key)
+        if not self.final_payload:
+            raise RuntimeError("No current projection is available. Run the project stage first.")
+        if self.final_payload.get("names") != names:
+            raise RuntimeError("Cached projection does not match the current repository corpus.")
         return self.final_payload
 
     def emit(self) -> None:
         projected = self._load_project()
+        if projected.get("embedding_model") == OfflineFallbackEmbedder.model_id and not self.allow_fallback:
+            raise RuntimeError(
+                "Refusing to publish fallback embeddings without --allow-fallback."
+            )
         names = projected["names"]
+        self._current_summary_rows()
         repo_rows = self.cache.rows(
-            "SELECT r.*,s.summary_json,s.low_confidence FROM repos r JOIN summaries s USING(full_name) WHERE s.status='ok' ORDER BY r.full_name"
+            "SELECT r.*,s.summary_json,s.low_confidence FROM repos r JOIN summaries s USING(full_name) ORDER BY r.full_name"
         )
         rows_by_name = {row["full_name"]: row for row in repo_rows}
+        if set(rows_by_name) != set(names):
+            raise RuntimeError("Projection repository set does not match current summaries.")
         primary_counts: dict[str, int] = defaultdict(int)
         for name in names:
             primary_counts[rows_by_name[name]["primary_language"] or "Unknown"] += 1
@@ -700,11 +943,13 @@ class AtlasPipeline:
                 "size_r": projected["radii"][index], "created_at": month(row["created_at"]),
                 "pushed_at": month(row["pushed_at"]), "archived": bool(row["archived"]),
                 "is_fork": bool(row["is_fork"]), "parent_full_name": row["parent_full_name"],
-                "low_confidence": bool(row["low_confidence"] or row["tree_truncated"]),
+                "low_confidence": bool(row["low_confidence"]),
+                "tree_truncated": bool(row["tree_truncated"]),
                 "neighbors": projected["neighbors"][index],
             })
         payload = {
-            "schema_version": 1, "generated_at": now(), "owner": "hbmartin",
+            "schema_version": 1, "generated_at": now(),
+            "owner": names[0].split("/", 1)[0],
             "embedding_model": projected.get("embedding_model", self.effective_embedder_id),
             "layout": projected["layout"], "layout_alt": projected["layout_alt"],
             "bounds": {"x": [0, 1000], "y": [0, 1000]},
@@ -750,12 +995,12 @@ class AtlasPipeline:
         (self.root / "public" / "atlas-list.html").write_text(document, encoding="utf-8")
 
     def _record_run(self, payload: dict, projected: dict) -> None:
-        started = now()
+        finished = now()
         with self.cache.connect() as con:
             con.execute(
                 "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?)",
                 (
-                    self.run_id, started, started, self.summarizer_name, projected.get("embedding_model", self.embedder_name),
+                    self.run_id, self.started_at, finished, self.summary_provider_id, projected.get("embedding_model", self.embedder_name),
                     projected["layout"], json.dumps(projected["metrics"], sort_keys=True),
                     len(payload["repos"]), projected["analysis_key"],
                 ),

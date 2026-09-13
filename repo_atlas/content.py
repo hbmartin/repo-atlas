@@ -8,13 +8,22 @@ from collections import Counter
 from pathlib import PurePosixPath
 from typing import Any
 
-from config.exclusions import DIRECTORY_PREFIXES, EXTENSIONS, GENERATED_PATTERNS, NAMED_FILES
+from config.exclusions import (
+    DIRECTORY_PREFIXES,
+    EXTENSIONS,
+    GENERATED_PATTERNS,
+    NAMED_FILES,
+)
 
-
-BADGE_LINE = re.compile(r"^\s*(?:\[?!?\[.*?(?:badge|shield).*?$|<img[^>]+(?:badge|shield))", re.I)
+BADGE_LINE = re.compile(r"^\s*(?:\[?!?\[.*?(?:badge|shield).*?$|<img[^>]+(?:badge|shield))", re.IGNORECASE)
 HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.I)
+SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.IGNORECASE)
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
+NAMED_FILES_CASEFOLDED = frozenset(value.casefold() for value in NAMED_FILES)
+DIRECTORY_PREFIXES_CASEFOLDED = tuple(value.casefold() for value in DIRECTORY_PREFIXES)
+EXTENSIONS_CASEFOLDED = tuple(value.casefold() for value in EXTENSIONS)
+GENERATED_PATTERNS_CASEFOLDED = tuple(value.casefold() for value in GENERATED_PATTERNS)
 
 
 def clean_readme(markdown: str | None) -> str:
@@ -24,9 +33,37 @@ def clean_readme(markdown: str | None) -> str:
     lines = text.splitlines()
     output: list[str] = []
     skip_level: int | None = None
-    in_fence = False
+    fence_marker: tuple[str, int] | None = None
     fence_lines = 0
     for line in lines:
+        fence = FENCE.match(line)
+        if fence_marker is None and fence:
+            marker = fence.group(1)
+            fence_marker = (marker[0], len(marker))
+            fence_lines = 0
+            if skip_level is None:
+                output.append(line)
+            continue
+        if fence_marker is not None and fence:
+            marker = fence.group(1)
+            if (
+                marker[0] == fence_marker[0]
+                and len(marker) >= fence_marker[1]
+                and not fence.group(2).strip()
+            ):
+                fence_marker = None
+                fence_lines = 0
+                if skip_level is None:
+                    output.append(line)
+                continue
+        if fence_marker is not None:
+            if skip_level is None:
+                fence_lines += 1
+                if fence_lines <= 20:
+                    output.append(line)
+                elif fence_lines == 21:
+                    output.append("…")
+            continue
         heading = HEADING.match(line)
         if heading:
             level = len(heading.group(1))
@@ -39,37 +76,25 @@ def clean_readme(markdown: str | None) -> str:
             continue
         if BADGE_LINE.match(line) or "shields.io" in line.lower():
             continue
-        if line.lstrip().startswith("```") or line.lstrip().startswith("~~~"):
-            if not in_fence:
-                in_fence = True
-                fence_lines = 0
-                output.append(line)
-            else:
-                in_fence = False
-                output.append(line)
-            continue
-        if in_fence:
-            fence_lines += 1
-            if fence_lines <= 20:
-                output.append(line)
-            elif fence_lines == 21:
-                output.append("…")
-            continue
         output.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
 
 
 def excluded_path(path: str) -> bool:
-    normalized = path.lstrip("./")
+    normalized = path.removeprefix("./").casefold()
     parts = PurePosixPath(normalized).parts
     basename = parts[-1] if parts else normalized
-    if basename in NAMED_FILES:
+    if basename in NAMED_FILES_CASEFOLDED:
         return True
-    if any(normalized.startswith(prefix) or f"/{prefix}" in f"/{normalized}" for prefix in DIRECTORY_PREFIXES):
+    if any(
+        normalized.startswith(prefix)
+        or f"/{prefix}" in f"/{normalized}"
+        for prefix in DIRECTORY_PREFIXES_CASEFOLDED
+    ):
         return True
-    if any(normalized.endswith(ext) for ext in EXTENSIONS):
+    if any(normalized.endswith(ext) for ext in EXTENSIONS_CASEFOLDED):
         return True
-    return any(fnmatch.fnmatch(basename, pattern) for pattern in GENERATED_PATTERNS)
+    return any(fnmatch.fnmatch(basename, pattern) for pattern in GENERATED_PATTERNS_CASEFOLDED)
 
 
 NOTABLE = (
@@ -100,4 +125,3 @@ def tracked_file_count(tree: list[dict[str, Any]]) -> int:
 def content_hash(*parts: Any) -> str:
     encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
-
