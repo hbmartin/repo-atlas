@@ -16,6 +16,9 @@ import { Loading } from './components/Loading'
 import { MapView } from './components/MapView'
 import { SearchBox } from './components/SearchBox'
 import { formatDate, toggleValue } from './view-utils'
+import { AtlasGuide } from './components/AtlasGuide'
+import { GuideDialog } from './components/GuideDialog'
+import { displayLanguage, knownLanguage, normalizeLanguages, languageCategories } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -25,10 +28,10 @@ const EMPTY_VIEW: ViewState = {
   since: null,
   layoutAlt: false,
 }
-const SOURCE_URL = 'https://github.com/hbmartin/repo-atlas'
 
 const FOCUSABLE = [
   'a[href]',
+  'summary',
   'button:not([disabled])',
   'input:not([disabled])',
   'select:not([disabled])',
@@ -41,8 +44,12 @@ export default function App() {
   const [error, setError] = useState<Error | null>(null)
   const [view, setViewState] = useState<ViewState>(EMPTY_VIEW)
   const [listMode, setListMode] = useState(false)
+  const [guideOpen, setGuideOpen] = useState(false)
+  const [highlightRegion, setHighlightRegion] = useState<number | null>(null)
+  const [regionRequest, setRegionRequest] = useState<{ label: string; nonce: number } | null>(null)
   const [mobileFilters, setMobileFilters] = useState(false)
   const [urlWarning, setUrlWarning] = useState<string[]>([])
+  const regionSequence = useRef(0)
   const viewRef = useRef(view)
   const filterButton = useRef<HTMLButtonElement>(null)
   const filterDialog = useRef<HTMLDivElement>(null)
@@ -52,23 +59,32 @@ export default function App() {
     loadAtlas()
       .then((atlas) => {
         setData(atlas)
-        setViewState(parseViewState(window.location.search, atlas))
-        setUrlWarning(unknownViewParameters(window.location.search, atlas))
+        const warning = unknownViewParameters(window.location.search, atlas)
+        const initial = parseViewState(window.location.search, atlas)
+        viewRef.current = initial
+        setViewState(initial)
+        window.history.replaceState(null, '', writeViewState(initial))
+        setUrlWarning(warning)
       })
       .catch((reason) => setError(reason instanceof Error ? reason : new Error(String(reason))))
   }, [])
 
   const setView = useCallback((next: ViewState) => {
-    viewRef.current = next
-    setViewState(next)
-    window.history.replaceState(null, '', writeViewState(next))
+    const normalized = { ...next, languages: normalizeLanguages(next.languages) }
+    viewRef.current = normalized
+    setViewState(normalized)
+    window.history.replaceState(null, '', writeViewState(normalized))
   }, [])
 
   useEffect(() => {
     if (!data) return
     const restore = () => {
-      setViewState(parseViewState(window.location.search, data))
-      setUrlWarning(unknownViewParameters(window.location.search, data))
+      const warning = unknownViewParameters(window.location.search, data)
+      const restored = parseViewState(window.location.search, data)
+      viewRef.current = restored
+      setViewState(restored)
+      setUrlWarning(warning)
+      window.history.replaceState(null, '', writeViewState(restored))
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
@@ -85,7 +101,7 @@ export default function App() {
     const previousOverflow = document.body.style.overflow
     document.body.style.overflow = 'hidden'
     const focusables = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)]
-      .filter((element) => !element.closest('details:not([open])'))
+      .filter((element) => element.tagName === 'SUMMARY' || !element.closest('details:not([open])'))
     focusables()[0]?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
@@ -153,7 +169,7 @@ export default function App() {
         const regions = value.regions ?? current.regions
         const repo = value.repo === undefined ? current.repo : value.repo
         const since = value.since === undefined ? current.since : value.since
-        if (!languages.every((name) => data.languages.some((item) => item.name === name))) throw new Error('Unknown language filter.')
+        if (!languages.every((name) => knownLanguage(data, name))) throw new Error('Unknown language filter.')
         if (!regions.every((name) => name === 'Unclustered' || data.clusters.some((item) => item.label === name))) {
           throw new Error('Unknown region filter.')
         }
@@ -161,7 +177,7 @@ export default function App() {
         if (since && !validMonth(since)) throw new Error('since must use a valid YYYY-MM month.')
         const next = {
           repo,
-          languages,
+          languages: normalizeLanguages(languages),
           regions,
           since,
           layoutAlt: value.layoutAlt ?? current.layoutAlt,
@@ -193,13 +209,15 @@ export default function App() {
       maxMonth = Math.max(maxMonth, value)
     }
     const visible = new Set(data.repos.filter((repo) => {
-      const languageMatch = !view.languages.length || view.languages.includes(repo.primary_language)
+      const languageMatch = !view.languages.length || view.languages.includes(displayLanguage(repo.primary_language))
       const region = clusterNames.get(repo.cluster_id ?? -1) ?? 'Unclustered'
       const regionMatch = !view.regions.length || view.regions.includes(region)
       const dateMatch = !view.since || repo.pushed_at.slice(0, 7) >= view.since
       return languageMatch && regionMatch && dateMatch
     }).map((repo) => repo.full_name))
-    return { clusterNames, minMonth, maxMonth, reposByName, visible }
+    const matchingRegions = new Set(data.repos.filter(repo => visible.has(repo.full_name)).flatMap(repo => repo.cluster_id == null ? [] : [repo.cluster_id])).size
+    const matchingUnclustered = data.repos.filter(repo => visible.has(repo.full_name) && repo.cluster_id == null).length
+    return { clusterNames, minMonth, maxMonth, reposByName, visible, matchingRegions, matchingUnclustered, filterData: { ...data, languages: languageCategories(data) } }
   }, [data, view.languages, view.regions, view.since])
 
   if (error) return (
@@ -212,12 +230,26 @@ export default function App() {
   )
   if (!data || !derived) return <Loading />
 
-  const { minMonth, maxMonth, reposByName, visible } = derived
+  const { minMonth, maxMonth, reposByName, visible, matchingRegions, matchingUnclustered, filterData } = derived
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
-  const selectRepo = (repo: AtlasRepo | null) => setView({ ...view, repo: repo?.full_name ?? null })
-  const backgroundInert = mobileFilters ? true : undefined
+  const selectRepo = (repo: AtlasRepo | null) => {
+    setRegionRequest(null)
+    setView({ ...view, repo: repo?.full_name ?? null })
+  }
+  const backgroundInert = mobileFilters || guideOpen ? true : undefined
   const profileUrl = `https://github.com/${encodeURIComponent(data.owner)}`
+
+  const chooseRegion = (label: string) => {
+    setView({ ...view, repo: null, regions: [label] })
+    setRegionRequest({ label, nonce: ++regionSequence.current })
+    setListMode(false)
+    setGuideOpen(false)
+    setHighlightRegion(null)
+  }
+  const guide = <AtlasGuide data={data} view={view}
+    onLanguage={name => setView({ ...view, languages: toggleValue(view.languages, name) })}
+    onRegion={chooseRegion} onHighlight={setHighlightRegion} />
 
   return (
     <div className="app">
@@ -232,7 +264,9 @@ export default function App() {
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
             <h1>Repo Atlas</h1>
-            <p>{data.stats.repo_count} repositories · {data.stats.cluster_count} regions · rebuilt {formatDate(data.generated_at.slice(0, 10))}</p>
+            <p aria-live="polite">{filterCount
+              ? <>{visible.size} matching / {data.stats.repo_count} repositories · {matchingRegions} matching / {data.stats.cluster_count} regions{data.stats.noise_count > 0 && ` · ${matchingUnclustered} unclustered matches`}</>
+              : <>{data.stats.repo_count} repositories · {data.stats.cluster_count} regions · rebuilt {formatDate(data.generated_at.slice(0, 10))}</>}</p>
           </div>
         </div>
         <a href={profileUrl} target="_blank" rel="noreferrer">{data.owner.toLocaleUpperCase()} / GITHUB ↗</a>
@@ -240,7 +274,7 @@ export default function App() {
       <section className="controls" inert={backgroundInert}>
         <SearchBox repos={data.repos} onSelect={selectRepo} />
         <div className="desktop-filters">
-          <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
+          <Filters data={filterData} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
         </div>
         <button ref={filterButton} className="mobile-filter-button" onClick={() => setMobileFilters(true)}>
           Filters{filterCount ? ` · ${filterCount}` : ''}
@@ -249,12 +283,14 @@ export default function App() {
           <button aria-pressed={!listMode} className={!listMode ? 'active' : ''} onClick={() => setListMode(false)}>Map</button>
           <button aria-pressed={listMode} className={listMode ? 'active' : ''} onClick={() => setListMode(true)}>List</button>
         </div>
+        <button className="guide-trigger" onClick={() => setGuideOpen(true)}>Atlas guide</button>
         {filterCount > 0 && (
           <button className="clear-filters" onClick={() => setView({ ...EMPTY_VIEW, repo: view.repo, layoutAlt: view.layoutAlt })}>
-            Clear · {data.repos.length - visible.size} dimmed
+            Clear filters
           </button>
         )}
       </section>
+      {guideOpen && <GuideDialog onClose={() => { setGuideOpen(false); setHighlightRegion(null) }}>{guide}</GuideDialog>}
       {mobileFilters && (
         <div ref={filterDialog} className="mobile-filters" role="dialog" aria-modal="true" aria-labelledby="mobile-filter-title">
           <div>
@@ -262,7 +298,7 @@ export default function App() {
               <h2 id="mobile-filter-title">Filter the atlas</h2>
               <button onClick={closeMobileFilters}>Done</button>
             </header>
-            <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
+            <Filters data={filterData} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
           </div>
         </div>
       )}
@@ -270,46 +306,21 @@ export default function App() {
         {listMode ? (
           <ListView data={data} visible={visible} onSelect={(repo) => { selectRepo(repo); setListMode(false) }} />
         ) : (
-          <MapView data={data} view={view} visible={visible} selected={selected} onSelect={selectRepo} />
+          <MapView data={data} view={view} visible={visible} selected={selected} onSelect={selectRepo} regionRequest={regionRequest} highlightRegion={highlightRegion} onHighlight={setHighlightRegion} onRegion={chooseRegion} />
         )}
-        {!listMode && visible.size === 0 && (
-          <div className="no-results">No repositories match.{' '}<button onClick={() => setView({ ...EMPTY_VIEW, repo: null, layoutAlt: view.layoutAlt })}>Clear filters</button></div>
+        {visible.size === 0 && (
+          <div className="no-results" role="status">No repositories match.{' '}<button onClick={() => setView({ ...EMPTY_VIEW, repo: null, layoutAlt: view.layoutAlt })}>Clear filters</button></div>
         )}
-        <DetailPanel
+        {selected ? <DetailPanel
           repo={selected}
           cluster={selected?.cluster_id == null ? undefined : data.clusters.find((cluster) => cluster.id === selected.cluster_id)}
           reposByName={reposByName}
           onSelect={selectRepo}
-          onRegion={(label) => setView({ ...view, regions: [label] })}
+          onRegion={chooseRegion}
           onClose={() => selectRepo(null)}
-        />
+        /> : <aside className="guide-panel">{guide}</aside>}
       </div>
-      <section className="legend" inert={backgroundInert}>
-        <details open>
-          <summary>Language</summary>
-          <div>{data.languages.map((language) => (
-            <button
-              key={language.name}
-              aria-pressed={view.languages.includes(language.name)}
-              className={view.languages.includes(language.name) ? 'active' : ''}
-              onClick={() => setView({ ...view, languages: toggleValue(view.languages, language.name) })}
-            >
-              <i style={{ background: language.color }} />{language.name}<small>{language.count}</small>
-            </button>
-          ))}</div>
-        </details>
-        <div className="size-key"><span>Repository size</span><i className="dot small" /><i className="dot medium" /><i className="dot large" /><small>tracked files</small></div>
-        <span className="confidence-key"><i /> sparse README</span>
-      </section>
-      <footer inert={backgroundInert}>
-        <p>Each README is normalized to a fixed schema, embedded by meaning, clustered in full-dimensional space, then projected here. Distance is an approximation; nearest-neighbor lists use the original embeddings.</p>
-        <div>
-          <span>Generated {data.generated_at.slice(0, 10)}</span>
-          {data.embedding_model && <span title="Embedding model">{data.embedding_model}</span>}
-          <a href="/atlas-list.html">Plain HTML list</a>
-          <a href={SOURCE_URL}>Source & method ↗</a>
-        </div>
-      </footer>
+
     </div>
   )
 }

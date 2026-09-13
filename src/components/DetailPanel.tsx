@@ -22,14 +22,7 @@ export function DetailPanel({
   useEffect(() => {
     if (repo) panel.current?.focus({ preventScroll: true })
   }, [repo])
-  if (!repo) return (
-    <aside className="detail-panel empty">
-      <div className="empty-orbit" aria-hidden="true"><i /><i /><i /></div>
-      <h2>Select a repository</h2>
-      <p>Choose any point to see what it does and which projects live nearby.</p>
-      <span>Tip: press <kbd>/</kbd> to search</span>
-    </aside>
-  )
+  if (!repo) return null
   return (
     <aside
       ref={panel}
