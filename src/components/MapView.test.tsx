@@ -126,6 +126,33 @@ describe('MapView', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
+  it('double-clicks to zoom around the pointer without selecting a repository', () => {
+    const data = makeAtlas()
+    const onSelect = vi.fn()
+    const { container } = render(<MapView data={data} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={onSelect} />)
+    const svg = container.querySelector('svg')!
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({
+      left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700,
+      x: 0, y: 0, toJSON: () => ({}),
+    })
+    const pointer: [number, number] = [725, 275]
+    const initial = zoomTransform(svg)
+    const point = initial.invert(pointer)
+
+    fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
+
+    const zoomed = zoomTransform(svg)
+    expect(zoomed.k).toBeCloseTo(initial.k * 2)
+    expect(zoomed.apply(point)[0]).toBeCloseTo(pointer[0])
+    expect(zoomed.apply(point)[1]).toBeCloseTo(pointer[1])
+    expect(onSelect).not.toHaveBeenCalled()
+
+    for (let index = 0; index < 8; index += 1) {
+      fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
+    }
+    expect(zoomTransform(svg).k).toBeCloseTo(initial.k * 10)
+  })
+
   it('preserves an explicit region fit through the resize caused by wrapping filter counts', () => {
     let width = 390, height = 670
     let resize: (() => void) | undefined

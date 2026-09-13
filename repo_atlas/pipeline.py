@@ -143,10 +143,11 @@ class AtlasPipeline:
 
     def _apply_cached_exclusions(self) -> None:
         excluded = self._exclude_names()
-        if not excluded:
-            return
-        rows = self.cache.rows("SELECT full_name FROM repos ORDER BY full_name")
-        matched = [row["full_name"] for row in rows if row["full_name"].casefold() in excluded]
+        rows = self.cache.rows("SELECT full_name,archived FROM repos ORDER BY full_name")
+        matched = [
+            row["full_name"] for row in rows
+            if row["archived"] or row["full_name"].casefold() in excluded
+        ]
         for full_name in matched:
             self.cache.execute("DELETE FROM repos WHERE full_name=?", (full_name,))
             print(f"[exclude] removed cached {full_name}")
@@ -176,6 +177,8 @@ class AtlasPipeline:
             print(f"[discover {index}/{len(items)}] {full_name}", flush=True)
             if full_name.casefold() in excluded:
                 matched_exclusions.add(full_name.casefold())
+                continue
+            if repo.get("archived"):
                 continue
             if not repo.get("default_branch") or repo.get("size", 0) == 0:
                 continue
@@ -410,26 +413,28 @@ class AtlasPipeline:
 
         workers = max(1, min(8, int(os.environ.get("ATLAS_SUMMARY_WORKERS", "4"))))
         failures: list[str] = []
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            try:
-                for _index, name, success, failure in executor.map(work, pending):
-                    if success:
-                        with self.cache.connect() as con:
-                            con.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", success)
-                            con.execute("DELETE FROM summary_failures WHERE full_name=?", (name,))
-                    else:
-                        failures.append(name)
-                        self.cache.execute(
-                            """INSERT OR REPLACE INTO summary_failures(
-                            full_name,content_hash,prompt_version,provider,error_kind,
-                            error_message,failed_at
-                            ) VALUES (?,?,?,?,?,?,?)""",
-                            failure,
-                        )
-            except BaseException:
-                provider.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
+            for _index, name, success, failure in executor.map(work, pending):
+                if success:
+                    with self.cache.connect() as con:
+                        con.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", success)
+                        con.execute("DELETE FROM summary_failures WHERE full_name=?", (name,))
+                else:
+                    failures.append(name)
+                    self.cache.execute(
+                        """INSERT OR REPLACE INTO summary_failures(
+                        full_name,content_hash,prompt_version,provider,error_kind,
+                        error_message,failed_at
+                        ) VALUES (?,?,?,?,?,?,?)""",
+                        failure,
+                    )
+        except BaseException:
+            provider.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
         if failures:
             if not self.best_effort:
                 raise RuntimeError(

@@ -20,7 +20,7 @@ pnpm install --frozen-lockfile
 uv run atlas doctor
 ```
 
-Create `config/exclude.txt` from the provided example when repositories should be omitted. The real file is intentionally ignored.
+Archived repositories are omitted automatically. Create `config/exclude.txt` from the provided example when additional repositories should be omitted. The real file is intentionally ignored.
 
 ## Build the atlas
 

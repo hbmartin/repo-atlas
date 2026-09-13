@@ -13,7 +13,7 @@ export function AtlasGuide({ data, view, onLanguage, onRegion, onHighlight }: {
   return <div className="atlas-guide">
     <header><span className="eyebrow">EXPLORE THE LANDSCAPE</span><h2>Atlas guide</h2>
       <p>One point, one repository. Nearby projects share ideas and techniques.</p></header>
-    <p className="guide-instructions"><span className="desktop-hint">Hover to preview · Click to explore</span><span className="touch-hint">Tap a point to explore</span><br />Drag to pan · <span className="desktop-hint">Scroll to zoom</span><span className="touch-hint">Pinch to zoom</span> · <kbd>/</kbd> to search</p>
+    <p className="guide-instructions"><span className="desktop-hint">Hover to preview · Click to explore</span><span className="touch-hint">Tap a point to explore</span><br />Drag to pan · <span className="desktop-hint">Scroll or double-click to zoom</span><span className="touch-hint">Pinch to zoom</span> · <kbd>/</kbd> to search</p>
     <section aria-label="Language legend"><h3>Language <small>all repositories</small></h3>
       <div className="guide-languages">{languages.map(language => <button key={language.name}
         aria-label={`Filter by ${language.name}: ${language.count} repositories`} aria-pressed={view.languages.includes(language.name)} onClick={() => onLanguage(language.name)}>

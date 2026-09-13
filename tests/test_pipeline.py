@@ -15,7 +15,10 @@ from repo_atlas.pipeline import (
     AtlasPipeline,
     embedding_text,
 )
-from repo_atlas.summarizers import SummarizerConfigurationError
+from repo_atlas.summarizers import (
+    SummarizerCancelledError,
+    SummarizerConfigurationError,
+)
 
 SUMMARY = RepoSummary(
     one_liner="A complete, concise repository description.",
@@ -29,15 +32,20 @@ SUMMARY = RepoSummary(
 )
 
 
-def insert_repo(pipeline: AtlasPipeline, name: str, languages: dict[str, int] | None = None) -> None:
+def insert_repo(
+    pipeline: AtlasPipeline,
+    name: str,
+    languages: dict[str, int] | None = None,
+    archived: bool = False,
+) -> None:
     pipeline.cache.execute(
         """INSERT INTO repos(
-        full_name,default_branch,languages_json,created_at,pushed_at,fetched_at,
+        full_name,default_branch,languages_json,created_at,pushed_at,archived,fetched_at,
         readme_present,readme_cleaned,readme_word_count,tree_digest_json,content_hash
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             name, "main", json.dumps(languages or {"Python": 100}),
-            "2025-01-01T00:00:00Z", "2025-01-01T00:00:00Z", "now",
+            "2025-01-01T00:00:00Z", "2025-01-01T00:00:00Z", archived, "now",
             1, "A documented project. " * 10, 40, "{}", "content",
         ),
     )
@@ -111,6 +119,71 @@ def test_cached_exclusions_do_not_warn_after_the_repo_is_already_absent(tmp_path
     pipeline = AtlasPipeline(tmp_path, None)
     pipeline._apply_cached_exclusions()
     assert "warning" not in capsys.readouterr().err
+
+
+def test_discovery_skips_archived_repositories_before_followup_requests(tmp_path):
+    base = {
+        "default_branch": "main",
+        "size": 1,
+        "description": None,
+        "homepage": None,
+        "topics": [],
+        "language": "Python",
+        "stargazers_count": 0,
+        "created_at": "2025-01-01T00:00:00Z",
+        "pushed_at": "2025-01-01T00:00:00Z",
+        "license": None,
+        "fork": False,
+    }
+    archived = {**base, "full_name": "owner/archived", "archived": True}
+    active = {**base, "full_name": "owner/active", "archived": False}
+
+    class FakeGitHub:
+        def __init__(self):
+            self.requested = []
+
+        def paginate(self, *_args, **_kwargs):
+            return [archived, active]
+
+        def get_json(self, path, **_kwargs):
+            self.requested.append(path)
+            if path == "/repos/owner/active/languages":
+                return {"Python": 100}
+            raise AssertionError(path)
+
+    github = FakeGitHub()
+    pipeline = AtlasPipeline(tmp_path, github)
+    insert_repo(pipeline, archived["full_name"], archived=True)
+    pipeline.discover()
+
+    assert github.requested == ["/repos/owner/active/languages"]
+    assert [row[0] for row in pipeline.cache.rows("SELECT full_name FROM repos")] == [
+        "owner/active",
+    ]
+
+
+def test_resumed_run_prunes_cached_archived_repositories(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None)
+    insert_repo(pipeline, "owner/active")
+    insert_repo(pipeline, "owner/archived", archived=True)
+    insert_summary_and_fallback(pipeline, "owner/archived")
+    names_seen_by_stage = []
+
+    def resumed_stage():
+        names_seen_by_stage.extend(
+            row["full_name"] for row in pipeline.cache.rows("SELECT full_name FROM repos")
+        )
+
+    pipeline.embed = resumed_stage
+    pipeline.run(start="embed", only={"embed"})
+
+    assert names_seen_by_stage == ["owner/active"]
+    assert not pipeline.cache.rows(
+        "SELECT full_name FROM summaries WHERE full_name='owner/archived'"
+    )
+    assert not pipeline.cache.rows(
+        "SELECT full_name FROM embeddings WHERE full_name='owner/archived'"
+    )
 
 
 def test_discovery_skips_inaccessible_fork_comparisons(tmp_path):
@@ -383,25 +456,44 @@ def test_summarizer_configuration_failure_aborts_without_per_repo_failures(tmp_p
     assert pipeline.cache.rows("SELECT * FROM summary_failures") == []
 
 
-def test_interrupting_summarization_cancels_active_provider_work(tmp_path, monkeypatch):
+@pytest.mark.parametrize("error_type", [
+    None, KeyboardInterrupt, SummarizerConfigurationError, SummarizerCancelledError,
+])
+def test_summarization_shutdown_waits_only_on_success(tmp_path, monkeypatch, error_type):
     pipeline = AtlasPipeline(tmp_path, None)
     insert_repo(pipeline, "owner/repo")
+    shutdown_calls = []
 
-    class InterruptedSummarizer:
+    class RecordingExecutor(pipeline_module.ThreadPoolExecutor):
+        def shutdown(self, wait=True, *, cancel_futures=False):
+            shutdown_calls.append((wait, cancel_futures))
+            super().shutdown(wait=wait, cancel_futures=cancel_futures)
+
+    class TestSummarizer:
         cancelled = False
 
         def summarize(self, *_args, **_kwargs):
-            raise KeyboardInterrupt
+            if error_type:
+                raise error_type("Summarization interrupted")
+            return SUMMARY
 
         def cancel(self):
             self.cancelled = True
 
-    provider = InterruptedSummarizer()
+    provider = TestSummarizer()
+    monkeypatch.setattr(pipeline_module, "ThreadPoolExecutor", RecordingExecutor)
     monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: provider)
     monkeypatch.setenv("ATLAS_SUMMARY_WORKERS", "1")
-    with pytest.raises(KeyboardInterrupt):
+    if error_type:
+        with pytest.raises(error_type):
+            pipeline.summarize()
+        assert provider.cancelled is True
+        assert shutdown_calls == [(False, True)]
+    else:
         pipeline.summarize()
-    assert provider.cancelled is True
+        assert provider.cancelled is False
+        assert shutdown_calls == [(True, False)]
+        assert len(pipeline.cache.rows("SELECT * FROM summaries")) == 1
 
 
 def test_vectors_reject_partial_current_corpus(tmp_path):

@@ -1,6 +1,7 @@
 import subprocess
 from types import SimpleNamespace
 
+import httpx
 from typer.testing import CliRunner
 
 import repo_atlas.cli as cli_module
@@ -50,6 +51,24 @@ def test_run_formats_operational_github_errors(tmp_path, monkeypatch):
     result = CliRunner().invoke(cli_module.app, ["run", "--only", "embed"])
     assert result.exit_code == 1
     assert "Error: GitHub rate limit" in result.output
+    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_run_formats_github_transport_errors(tmp_path, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise httpx.ConnectError("DNS lookup failed")
+
+    def run(pipeline, *_args):
+        pipeline.github.get("/user/repos")
+
+    monkeypatch.setattr(cli_module, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(cli_module, "resolve_token", lambda: "token")
+    monkeypatch.setattr(httpx.Client, "get", fail)
+    monkeypatch.setattr(cli_module.AtlasPipeline, "run", run)
+    result = CliRunner().invoke(cli_module.app, ["run", "--only", "discover"])
+    assert result.exit_code == 1
+    assert "Error: GitHub request failed for /user/repos: DNS lookup failed" in result.output
     assert "Traceback" not in result.output
     assert isinstance(result.exception, SystemExit)
 

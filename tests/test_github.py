@@ -1,9 +1,51 @@
 import subprocess
 from types import SimpleNamespace
 
+import httpx
 import pytest
 
 from repo_atlas.github import GitHubClient, GitHubError, resolve_token
+
+
+@pytest.mark.parametrize("error", [
+    httpx.ConnectError("DNS lookup failed"),
+    httpx.ConnectError("TLS certificate verification failed"),
+    httpx.ConnectError("Connection refused"),
+    httpx.ReadTimeout("Read timed out"),
+    httpx.ReadError("Connection reset"),
+    httpx.RequestError("Request failed"),
+])
+def test_request_errors_are_normalized(monkeypatch, error):
+    client = GitHubClient("token")
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(client.client, "get", fail)
+    try:
+        with pytest.raises(GitHubError) as caught:
+            client.get("/repos/owner/repo")
+        assert caught.value.__cause__ is error
+        assert "/repos/owner/repo" in str(caught.value)
+        assert str(error) in str(caught.value)
+    finally:
+        client.close()
+
+
+def test_already_wrapped_github_error_is_preserved(monkeypatch):
+    client = GitHubClient("token")
+    error = GitHubError("Already wrapped")
+
+    def fail(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(client.client, "get", fail)
+    try:
+        with pytest.raises(GitHubError) as caught:
+            client.get("/repos/owner/repo")
+        assert caught.value is error
+    finally:
+        client.close()
 
 
 def test_missing_gh_cli_has_actionable_error(monkeypatch):

@@ -60,7 +60,10 @@ class GitHubClient:
         delay = 1.0
         last_status = 0
         for attempt in range(6):
-            response = self.client.get(path, params=params or None)
+            try:
+                response = self.client.get(path, params=params or None)
+            except httpx.RequestError as exc:
+                raise GitHubError(f"GitHub request failed for {path}: {exc}") from exc
             last_status = response.status_code
             remaining = int(response.headers.get("X-RateLimit-Remaining", "5000"))
             retry_after_header = response.headers.get("Retry-After")

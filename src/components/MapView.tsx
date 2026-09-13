@@ -159,6 +159,16 @@ export function MapView({ data, view, visible, selected, onSelect, regionRequest
     navigated.current = true
     apply(zoomIdentity.translate(...center).scale(k).translate(-point[0], -point[1]), true)
   }
+  const zoomAtPointer = (clientX: number, clientY: number, factor = 2) => {
+    const bounds = svgRef.current?.getBoundingClientRect()
+    if (!bounds) return
+    const current = transformRef.current
+    const pointer: [number, number] = [clientX - bounds.left, clientY - bounds.top]
+    const point = current.invert(pointer)
+    const k = Math.max(fit.k * .6, Math.min(fit.k * 10, current.k * factor))
+    navigated.current = true
+    apply(zoomIdentity.translate(...pointer).scale(k).translate(-point[0], -point[1]), true)
+  }
 
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
@@ -170,7 +180,7 @@ export function MapView({ data, view, visible, selected, onSelect, regionRequest
         if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) return
         onSelect(hitRepo(event.clientX, event.clientY))
       }}
-      onDoubleClick={event => { const repo = hitRepo(event.clientX, event.clientY); if (repo) centerRepo(repo, 2.6) }}>
+      onDoubleClick={event => { event.preventDefault(); zoomAtPointer(event.clientX, event.clientY) }}>
       <rect width={size.width} height={size.height} className="map-bg" />
       <g transform={transform.toString()} className="map-geometry">
         {paths.map(path => <path key={path.key} d={path.path} className={`contour outer ${activeRegion === path.id ? 'active' : ''}`} style={{ fill: colors.get(path.id), stroke: colors.get(path.id) }} />)}
@@ -216,7 +226,7 @@ export function MapView({ data, view, visible, selected, onSelect, regionRequest
       </g>
     </svg>
     <div className="map-navigation" style={compact && selected ? { bottom: 'calc(60dvh + 12px)' } : undefined}>
-      <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
+      <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
     {activeRepo && <div className="tooltip" role="tooltip" style={{ left: Math.max(8, Math.min(tooltip.x + 14, window.innerWidth - 284)), top: Math.max(8, Math.min(tooltip.y + 14, window.innerHeight - 160)) }}>
