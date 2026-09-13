@@ -1,8 +1,12 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
   "name": "repo-atlas",
+  "account_id": "940db9a80e285cf3f700d5d903d8e182",
   "compatibility_date": "2026-09-13",
   "workers_dev": true,
+  "routes": [
+    { "pattern": "haroldmartin.me", "custom_domain": true }
+  ],
   "assets": {
     "directory": "./dist",
     "not_found_handling": "none"

@@ -28,7 +28,7 @@ repository list. Cloudflare's default HTML handling redirects the latter to
 `/atlas-list`. Missing assets and unknown paths return 404; there is no SPA
 fallback because shareable application state lives in query parameters at `/`.
 
-When ready to publish to the account's Workers address:
+When ready to publish to the configured account and domain:
 
 ```bash
 pnpm exec wrangler login
@@ -36,11 +36,11 @@ pnpm exec wrangler whoami
 pnpm run deploy
 ```
 
-Select the account that manages `haroldmartin.me`. If multiple accounts are
-available, set `CLOUDFLARE_ACCOUNT_ID` to the intended account ID. `deploy` builds
+The configuration selects the account that manages `haroldmartin.me`. `deploy` builds
 before uploading, so it cannot accidentally reuse an old `dist` directory after
-a failed build. Open the `workers.dev` URL printed by Wrangler and complete the
-checks above before moving the custom domain.
+a failed build. It publishes to both `haroldmartin.me` and the `workers.dev`
+address. To stage a new Worker before a domain cutover, omit `routes` in a local
+configuration copy and verify its Workers address before adding the domain.
 
 For unattended CLI deployment, use `CLOUDFLARE_API_TOKEN` and
 `CLOUDFLARE_ACCOUNT_ID` in the deployment environment. Use a token scoped to the
@@ -95,9 +95,10 @@ and [tool version overrides](https://developers.cloudflare.com/workers/ci-cd/bui
 
 ## Launch on haroldmartin.me
 
-The initial configuration intentionally has no custom-domain route so the first
-deployment can be verified at its Workers address. Domain changes are a separate
-launch step. Keep `workers_dev: true` for deployment checks and recovery.
+The production configuration includes the `haroldmartin.me` Custom Domain and
+keeps `workers_dev: true` for deployment checks and recovery. The first release
+was verified at its Workers address before adding the domain. The following
+procedure documents the cutover and can be used when restoring or moving it.
 
 1. Confirm that `haroldmartin.me` is an active zone in the same Cloudflare
    account. Export its DNS records and record the current apex/www website
@@ -107,8 +108,8 @@ launch step. Keep `workers_dev: true` for deployment checks and recovery.
    Disable any matching Cloudflare redirect when switching the apex to the
    Worker, so it cannot loop with the new reverse redirect. If the redirect
    comes from the old origin, switching the apex origin will replace it.
-3. Add the following top-level `routes` entry to `wrangler.jsonc`, commit it,
-   and deploy. Replace only website DNS records that conflict with adding the
+3. Keep the following top-level `routes` entry in `wrangler.jsonc` and deploy.
+   Replace only website DNS records that conflict with adding the
    Custom Domain. Leave mail, verification, and unrelated records intact.
 
    ```json
