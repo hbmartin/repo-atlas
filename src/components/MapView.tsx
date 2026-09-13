@@ -37,6 +37,7 @@ export function MapView({
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
+  const transformRef = useRef<ZoomTransform>(zoomIdentity)
   const [transform, setTransform] = useState<ZoomTransform>(zoomIdentity)
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [tooltip, setTooltip] = useState({ x: 0, y: 0 })
@@ -69,7 +70,10 @@ export function MapView({
         [-700, -700],
         [1700, 1700],
       ])
-      .on('zoom', (event) => setTransform(event.transform))
+      .on('zoom', (event) => {
+        transformRef.current = event.transform
+        setTransform(event.transform)
+      })
     zoomRef.current = behavior
     select(node).call(behavior).on('dblclick.zoom', null)
     return () => {
@@ -89,7 +93,7 @@ export function MapView({
         : 500
       const next = zoomIdentity
         .translate(500, targetY)
-        .scale(scale)
+        .scale(Math.max(scale, transformRef.current.k))
         .translate(-pointX(repo), -pointY(repo))
       const selection = select(svgRef.current)
       if (reduced) selection.call(zoomRef.current.transform, next)
@@ -117,8 +121,6 @@ export function MapView({
       const direction = {
         ArrowLeft: [-1, 0],
         ArrowRight: [1, 0],
-        ArrowUp: [0, -1],
-        ArrowDown: [0, 1],
       }[event.key]
       if (!direction) return
       const next = nearestRepoInDirection(
@@ -210,6 +212,10 @@ export function MapView({
             point.y,
             22 * point.unitsPerPixel,
             view.layoutAlt,
+            (repo) => repo.size_r * (
+              selected?.full_name === repo.full_name || hover?.full_name === repo.full_name ? 1.3 : 1
+            ),
+            selected?.full_name,
           ))
         }}
         onDoubleClick={(event) => {
@@ -220,7 +226,16 @@ export function MapView({
             transform,
           )
           const repo = nearestRepoAtPoint(
-            data.repos, visible, point.x, point.y, 22 * point.unitsPerPixel, view.layoutAlt,
+            data.repos,
+            visible,
+            point.x,
+            point.y,
+            22 * point.unitsPerPixel,
+            view.layoutAlt,
+            (candidate) => candidate.size_r * (
+              selected?.full_name === candidate.full_name || hover?.full_name === candidate.full_name ? 1.3 : 1
+            ),
+            selected?.full_name,
           )
           if (repo) centerRepo(repo, 2.6)
         }}

@@ -54,21 +54,23 @@ class GitHubClient:
     def close(self) -> None:
         self.client.close()
 
-    def get(
-        self,
-        path: str,
-        *,
-        retry_forbidden: bool = True,
-        **params: Any,
-    ) -> httpx.Response:
+    def get(self, path: str, **params: Any) -> httpx.Response:
         delay = 1.0
+        last_status = 0
         for attempt in range(6):
             response = self.client.get(path, params=params or None)
+            last_status = response.status_code
             remaining = int(response.headers.get("X-RateLimit-Remaining", "5000"))
-            rate_limited = response.status_code == 403 and remaining == 0
+            retry_after_header = response.headers.get("Retry-After")
+            rate_limited = (
+                response.status_code == 429
+                or (
+                    response.status_code == 403
+                    and (remaining == 0 or retry_after_header is not None)
+                )
+            )
             retryable = (
-                (response.status_code == 403 and (rate_limited or retry_forbidden))
-                or response.status_code == 429
+                rate_limited
                 or response.status_code >= 500
             )
             if not retryable:
@@ -77,11 +79,18 @@ class GitHubClient:
                 break
             if rate_limited:
                 reset = int(response.headers.get("X-RateLimit-Reset", "0"))
-                retry_after = max(0, reset - int(time.time()) + 1)
-                if retry_after > 60:
-                    raise GitHubError(
-                        f"GitHub rate limit exhausted; retry after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}."
-                    )
+                if remaining == 0 and reset > 0:
+                    retry_after = max(0, reset - int(time.time()) + 1)
+                    if retry_after > 60:
+                        raise GitHubError(
+                            "GitHub rate limit exhausted; retry after "
+                            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}."
+                        )
+                else:
+                    try:
+                        retry_after = float(retry_after_header or delay)
+                    except ValueError:
+                        retry_after = delay
             else:
                 try:
                     retry_after = float(response.headers.get("Retry-After", delay))
@@ -89,7 +98,7 @@ class GitHubClient:
                     retry_after = delay
             time.sleep(retry_after)
             delay = min(delay * 2, 16)
-        raise GitHubError(f"GitHub request failed after retries: {path}")
+        raise GitHubError(f"GitHub {last_status} request failed after retries: {path}")
 
     def get_json(self, path: str, **params: Any) -> Any:
         response = self.get(path, **params)

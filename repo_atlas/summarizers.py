@@ -18,15 +18,23 @@ from .models import ClusterLabel, RepoSummary
 T = TypeVar("T", bound=BaseModel)
 FENCE = re.compile(r"^\s*```(?:json)?\s*|\s*```\s*$", re.IGNORECASE)
 SAFE_ENV_KEYS = {
+    "ALL_PROXY", "APPDATA", "COMSPEC",
     "COLORTERM", "HOME", "LANG", "LANGUAGE", "LC_ALL", "LOGNAME", "NO_COLOR",
-    "PATH", "SHELL", "SSL_CERT_DIR", "SSL_CERT_FILE", "TERM", "TMP", "TMPDIR",
-    "TEMP", "USER",
+    "HOMEDRIVE", "HOMEPATH", "HTTP_PROXY", "HTTPS_PROXY", "LOCALAPPDATA",
+    "NODE_EXTRA_CA_CERTS", "NO_PROXY", "PATH", "PATHEXT", "REQUESTS_CA_BUNDLE",
+    "SHELL", "SSL_CERT_DIR", "SSL_CERT_FILE", "SYSTEMROOT", "TERM", "TMP", "TMPDIR",
+    "TEMP", "USER", "USERPROFILE", "WINDIR", "all_proxy", "http_proxy",
+    "https_proxy", "no_proxy",
 }
 PROVIDER_CONFIG_ENV = {
     "codex": {"CODEX_HOME", "OPENAI_API_KEY"},
     "claude": {"CLAUDE_CONFIG_DIR", "ANTHROPIC_API_KEY"},
     "gemini": {"GEMINI_CLI_HOME", "GEMINI_API_KEY", "GOOGLE_API_KEY"},
 }
+
+
+class SummarizerConfigurationError(RuntimeError):
+    pass
 
 
 def safe_subprocess_env(provider: str) -> dict[str, str]:
@@ -36,6 +44,18 @@ def safe_subprocess_env(provider: str) -> dict[str, str]:
         key: value for key, value in os.environ.items()
         if key in allowed or key.startswith("LC_")
     }
+
+
+def safe_stderr_detail(provider: str, stderr: str) -> str:
+    detail = " ".join(stderr.strip().split())
+    sensitive = PROVIDER_CONFIG_ENV.get(provider, set()) | {
+        "ALL_PROXY", "HTTP_PROXY", "HTTPS_PROXY", "all_proxy", "http_proxy", "https_proxy",
+    }
+    for key in sensitive:
+        value = os.environ.get(key)
+        if value:
+            detail = detail.replace(value, "[redacted]")
+    return detail[-1000:]
 
 
 SUMMARY_PROMPT = """You normalize repository evidence for semantic comparison.
@@ -92,6 +112,24 @@ def parse_model_json(text: str, model: type[T]) -> T:
 class Summarizer(ABC):
     name: str
 
+    def __init__(self) -> None:
+        self._active_processes: set[subprocess.Popen[str]] = set()
+        self._process_lock = Lock()
+
+    def cancel(self) -> None:
+        with self._process_lock:
+            processes = tuple(self._active_processes)
+        for process in processes:
+            if process.poll() is not None:
+                continue
+            try:
+                if os.name == "posix":
+                    os.killpg(process.pid, signal.SIGKILL)
+                else:
+                    process.kill()
+            except (OSError, ProcessLookupError):
+                pass
+
     def command(self, prompt: str, schema_path: Path) -> list[str]:
         raise NotImplementedError
 
@@ -110,6 +148,8 @@ class Summarizer(ABC):
                 text=True,
                 start_new_session=os.name == "posix",
             )
+            with self._process_lock:
+                self._active_processes.add(process)
             try:
                 stdout, _stderr = process.communicate(
                     input=prompt if self.name == "codex" else None,
@@ -122,12 +162,16 @@ class Summarizer(ABC):
                     process.kill()
                 process.communicate()
                 raise RuntimeError(f"{self.name} timed out after {timeout} seconds") from exc
+            finally:
+                with self._process_lock:
+                    self._active_processes.discard(process)
             if process.returncode != 0:
-                raise RuntimeError(f"{self.name} failed with exit code {process.returncode}")
-            try:
-                return parse_model_json(stdout, model)
-            except ValueError as exc:
-                raise ValueError(str(exc)) from exc
+                detail = safe_stderr_detail(self.name, _stderr)
+                suffix = f": {detail}" if detail else ""
+                raise RuntimeError(
+                    f"{self.name} failed with exit code {process.returncode}{suffix}"
+                )
+            return parse_model_json(stdout, model)
 
     def invoke_with_repairs(self, prompt: str, model: type[T]) -> T:
         error = ""
@@ -138,6 +182,8 @@ class Summarizer(ABC):
             )
             try:
                 return self.invoke(prompt + repair, model)
+            except SummarizerConfigurationError:
+                raise
             except (ValueError, RuntimeError) as exc:
                 error = str(exc)
         raise RuntimeError(error)
@@ -200,6 +246,7 @@ class OpenAISummarizer(Summarizer):
     name = "openai"
 
     def __init__(self) -> None:
+        super().__init__()
         self._clients: dict[int, Any] = {}
         self._client_lock = Lock()
 
@@ -221,6 +268,14 @@ class OpenAISummarizer(Summarizer):
                 response_format=model,
             )
         except OpenAIError as exc:
+            if not os.environ.get("OPENAI_API_KEY"):
+                raise SummarizerConfigurationError(
+                    "OpenAI authentication is not configured; set OPENAI_API_KEY."
+                ) from exc
+            if "authentication" in type(exc).__name__.casefold():
+                raise SummarizerConfigurationError(
+                    "OpenAI authentication failed; check OPENAI_API_KEY."
+                ) from exc
             raise RuntimeError(f"openai request failed: {type(exc).__name__}") from exc
         parsed = completion.choices[0].message.parsed
         if parsed is None:

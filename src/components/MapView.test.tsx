@@ -39,6 +39,16 @@ describe('MapView', () => {
     expect(nearestRepoAtPoint([first, second], visible, 514, 500, 22, false)).toBe(second)
   })
 
+  it('hits the full drawn radius and favors an already-selected overlapping repo', () => {
+    const selected = makeAtlas().repos[0]
+    const neighbor = { ...selected, full_name: 'owner/neighbor', name: 'neighbor', x: 524 }
+    const visible = new Set([selected.full_name, neighbor.full_name])
+    const radius = (repo: typeof selected) => repo.full_name === selected.full_name ? 30 : 6
+    expect(nearestRepoAtPoint(
+      [selected, neighbor], visible, 525, 500, 5, false, radius, selected.full_name,
+    )).toBe(selected)
+  })
+
   it('uses map-level hit testing instead of overlapping transparent circles', () => {
     const data = makeAtlas()
     const onSelect = vi.fn()
@@ -99,5 +109,25 @@ describe('MapView', () => {
     )
     fireEvent.keyDown(window, { key: 'ArrowRight' })
     expect(onSelect).toHaveBeenCalledWith(second)
+  })
+
+  it('leaves vertical arrow keys available for scrolling the focused details panel', () => {
+    const first = makeAtlas().repos[0]
+    const below = { ...first, full_name: 'owner/below', name: 'below', y: 700, y_alt: 700 }
+    const data = makeAtlas([first, below])
+    const onSelect = vi.fn()
+    render(
+      <MapView
+        data={data}
+        view={{ ...view, repo: first.full_name }}
+        visible={new Set(data.repos.map((repo) => repo.full_name))}
+        selected={first}
+        onSelect={onSelect}
+      />,
+    )
+    const event = new KeyboardEvent('keydown', { key: 'ArrowDown', cancelable: true })
+    window.dispatchEvent(event)
+    expect(event.defaultPrevented).toBe(false)
+    expect(onSelect).not.toHaveBeenCalled()
   })
 })

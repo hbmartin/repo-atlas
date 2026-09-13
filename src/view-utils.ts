@@ -74,14 +74,19 @@ export function nearestRepoAtPoint(
   y: number,
   maxDistance: number,
   layoutAlt: boolean,
+  drawnRadius: (repo: AtlasRepo) => number = () => 0,
+  preferredFullName: string | null = null,
 ) {
   let nearest: AtlasRepo | null = null
-  let nearestSquared = maxDistance * maxDistance
+  let nearestSquared = Number.POSITIVE_INFINITY
   for (const repo of repos) {
     if (!visible.has(repo.full_name)) continue
     const dx = (layoutAlt ? repo.x_alt : repo.x) - x
     const dy = (layoutAlt ? repo.y_alt : repo.y) - y
     const squared = dx * dx + dy * dy
+    const hitRadius = Math.max(maxDistance, drawnRadius(repo))
+    if (squared > hitRadius * hitRadius) continue
+    if (repo.full_name === preferredFullName) return repo
     if (squared <= nearestSquared) {
       nearest = repo
       nearestSquared = squared

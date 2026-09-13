@@ -21,7 +21,10 @@ def test_missing_gh_cli_has_actionable_error(monkeypatch):
 def test_transient_403_is_retried(monkeypatch):
     client = GitHubClient("token")
     responses = iter([
-        SimpleNamespace(status_code=403, headers={"X-RateLimit-Remaining": "12"}),
+        SimpleNamespace(
+            status_code=403,
+            headers={"X-RateLimit-Remaining": "12", "Retry-After": "1"},
+        ),
         SimpleNamespace(status_code=200, headers={}),
     ])
     monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: next(responses))
@@ -32,13 +35,13 @@ def test_transient_403_is_retried(monkeypatch):
         client.close()
 
 
-def test_permission_403_can_be_returned_without_retry(monkeypatch):
+def test_permission_403_is_returned_without_retry(monkeypatch):
     client = GitHubClient("token")
     response = SimpleNamespace(status_code=403, headers={"X-RateLimit-Remaining": "12"})
     calls = []
     monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: calls.append(1) or response)
     try:
-        assert client.get("/repos/owner/repo", retry_forbidden=False) is response
+        assert client.get("/repos/owner/repo") is response
         assert calls == [1]
     finally:
         client.close()
@@ -49,6 +52,26 @@ def test_rate_limit_uses_one_delay_before_retry(monkeypatch):
     responses = iter([
         SimpleNamespace(
             status_code=403,
+            headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "110"},
+        ),
+        SimpleNamespace(status_code=200, headers={}),
+    ])
+    sleeps = []
+    monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr("repo_atlas.github.time.time", lambda: 100)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", sleeps.append)
+    try:
+        assert client.get("/repos/owner/repo").status_code == 200
+        assert sleeps == [11]
+    finally:
+        client.close()
+
+
+def test_429_uses_rate_limit_reset(monkeypatch):
+    client = GitHubClient("token")
+    responses = iter([
+        SimpleNamespace(
+            status_code=429,
             headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "110"},
         ),
         SimpleNamespace(status_code=200, headers={}),

@@ -72,9 +72,13 @@ def test_subprocess_environment_uses_an_allowlist(monkeypatch):
     monkeypatch.setenv("DATABASE_URL", "postgres://secret")
     monkeypatch.setenv("OPENAI_API_KEY", "secret")
     monkeypatch.setenv("CODEX_HOME", "/tmp/codex")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.example")
+    monkeypatch.setenv("NODE_EXTRA_CA_CERTS", "/certs/corporate.pem")
     environment = safe_subprocess_env("codex")
     assert environment["PATH"] == "/usr/bin"
     assert environment["CODEX_HOME"] == "/tmp/codex"
+    assert environment["HTTPS_PROXY"] == "http://proxy.example"
+    assert environment["NODE_EXTRA_CA_CERTS"] == "/certs/corporate.pem"
     assert "DATABASE_URL" not in environment
     assert environment["OPENAI_API_KEY"] == "secret"
 
@@ -129,10 +133,31 @@ def test_timeout_kills_the_cli_process_group(monkeypatch):
     assert killed and killed[0][0] == 1234
 
 
+def test_cli_failure_reports_sanitized_stderr(monkeypatch):
+    import subprocess
+
+    secret = "sk-test-secret"
+
+    class FailedProcess:
+        pid = 1234
+        returncode = 1
+
+        def communicate(self, **_kwargs):
+            return "", f"authentication failed for {secret}"
+
+    monkeypatch.setenv("OPENAI_API_KEY", secret)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess())
+    with pytest.raises(RuntimeError, match="authentication failed") as caught:
+        CodexSummarizer().invoke("prompt", RepoSummary)
+    assert secret not in str(caught.value)
+    assert "[redacted]" in str(caught.value)
+
+
 def test_openai_sdk_errors_are_retried_without_leaking_details(monkeypatch):
     import openai
 
     calls = []
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
 
     def fail(**_kwargs):
         calls.append(1)
@@ -143,6 +168,22 @@ def test_openai_sdk_errors_are_retried_without_leaking_details(monkeypatch):
         OpenAISummarizer().invoke_with_repairs("prompt", RepoSummary)
     assert len(calls) == 3
     assert "secret provider detail" not in str(caught.value)
+
+
+def test_missing_openai_authentication_is_not_retried(monkeypatch):
+    import openai
+
+    calls = []
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+
+    def fail(**_kwargs):
+        calls.append(1)
+        raise openai.OpenAIError("api_key is missing")
+
+    monkeypatch.setattr(openai, "OpenAI", fail)
+    with pytest.raises(RuntimeError, match="set OPENAI_API_KEY"):
+        OpenAISummarizer().invoke_with_repairs("prompt", RepoSummary)
+    assert calls == [1]
 
 
 def test_openai_client_is_reused_for_matching_timeouts(monkeypatch):

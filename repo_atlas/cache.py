@@ -7,7 +7,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 # Label cache entries are keyed by cluster signature rather than by run. Retaining
 # only the newest global N entries makes stable labels churn as soon as an atlas
 # contains more than N clusters, so labels remain until explicit invalidation.
@@ -59,6 +59,7 @@ CREATE TABLE IF NOT EXISTS summary_failures (
   prompt_version TEXT NOT NULL,
   provider TEXT NOT NULL,
   error_kind TEXT NOT NULL,
+  error_message TEXT NOT NULL DEFAULT '',
   failed_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS embeddings (
@@ -139,6 +140,14 @@ class Cache:
         # Version zero includes legacy caches created before schema tracking.
         # Reapplying idempotent DDL adopts those caches without data loss.
         self._connection.executescript(SCHEMA)
+        failure_columns = {
+            row[1]
+            for row in self._connection.execute("PRAGMA table_info(summary_failures)")
+        }
+        if "error_message" not in failure_columns:
+            self._connection.execute(
+                "ALTER TABLE summary_failures ADD COLUMN error_message TEXT NOT NULL DEFAULT ''"
+            )
         if version < SCHEMA_VERSION:
             self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._connection.commit()

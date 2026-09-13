@@ -14,6 +14,7 @@ from pathlib import Path
 from urllib.parse import quote
 
 import numpy as np
+from pydantic import ValidationError
 
 from .cache import Cache
 from .content import clean_readme, content_hash, tracked_file_count, tree_digest
@@ -32,6 +33,7 @@ PROMPT_VERSION = "summary-v2"
 LABEL_PROMPT_VERSION = "label-v1"
 TEMPLATE_VERSION = "embed-v1"
 ALGORITHM_VERSION = "analysis-v2"
+ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
 
 LANGUAGE_COLORS = {
@@ -63,6 +65,13 @@ def month(value: str) -> str:
     return value[:10]
 
 
+def summarizer_cache_id(name: str) -> str:
+    if name == "openai":
+        model = os.environ.get("ATLAS_SUMMARY_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
+        return f"openai:{model}"
+    return name
+
+
 class AtlasPipeline:
     def __init__(
         self,
@@ -78,6 +87,7 @@ class AtlasPipeline:
         self.cache = Cache(root / ".atlas" / "cache.db")
         self.github = github
         self.summarizer_name = summarizer
+        self.summary_provider_id = summarizer_cache_id(summarizer)
         self.embedder_name = embedder
         self.yes = yes
         self.allow_fallback = allow_fallback
@@ -127,9 +137,6 @@ class AtlasPipeline:
         for full_name in matched:
             self.cache.execute("DELETE FROM repos WHERE full_name=?", (full_name,))
             print(f"[exclude] removed cached {full_name}")
-        matched_keys = {name.casefold() for name in matched}
-        for missing in sorted(excluded - matched_keys):
-            print(f"[exclude] warning: no cached repository matched {missing}", file=sys.stderr)
 
     def _summarizer(self):
         if self.summarizer_name in {"codex", "claude", "gemini"} and not self.allow_agent_summarizer:
@@ -168,7 +175,6 @@ class AtlasPipeline:
                     f"/repos/{full_name}/compare/"
                     f"{quote(parent_name.split('/')[0])}:{quote(parent_branch)}..."
                     f"{quote(detail['owner']['login'])}:{quote(detail['default_branch'])}",
-                    retry_forbidden=False,
                 )
                 if compare.status_code in (404, 409, 422):
                     continue
@@ -224,7 +230,7 @@ class AtlasPipeline:
         self._invalidate_snapshots()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         for index, repo in enumerate(rows, 1):
-            key = content_hash(repo["pushed_at"], repo["default_branch"])
+            key = content_hash(ACQUIRE_VERSION, repo["pushed_at"], repo["default_branch"])
             if repo["acquire_key"] == key and repo["content_hash"]:
                 print(f"[acquire {index}/{len(rows)}] cached {repo['full_name']}")
                 continue
@@ -278,7 +284,7 @@ class AtlasPipeline:
     def _current_summary_rows(self, *, require_provider: bool = False) -> list[sqlite3.Row]:
         if self._summary_snapshot is not None and (
             not require_provider
-            or all(row["provider"] == self.summarizer_name for row in self._summary_snapshot)
+            or all(row["provider"] == self.summary_provider_id for row in self._summary_snapshot)
         ):
             return self._summary_snapshot
         repos = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
@@ -294,7 +300,7 @@ class AtlasPipeline:
                 summary["status"] != "ok",
                 summary["content_hash"] != context_key,
                 summary["prompt_version"] != PROMPT_VERSION,
-                require_provider and summary["provider"] != self.summarizer_name,
+                require_provider and summary["provider"] != self.summary_provider_id,
                 summary["template_version"] != TEMPLATE_VERSION,
             )):
                 stale.append(repo["full_name"])
@@ -323,7 +329,7 @@ class AtlasPipeline:
         for index, repo in enumerate(rows, 1):
             context, low, context_key = self._summary_context(repo)
             cached = cached_by_name.get(repo["full_name"])
-            if cached and cached["status"] == "ok" and cached["content_hash"] == context_key and cached["prompt_version"] == PROMPT_VERSION and cached["provider"] == self.summarizer_name:
+            if cached and cached["status"] == "ok" and cached["content_hash"] == context_key and cached["prompt_version"] == PROMPT_VERSION and cached["provider"] == self.summary_provider_id:
                 if cached["template_version"] != TEMPLATE_VERSION:
                     summary = RepoSummary.model_validate_json(cached["summary_json"])
                     text = embedding_text(summary)
@@ -350,33 +356,46 @@ class AtlasPipeline:
                 text = embedding_text(summary)
                 success = (
                     repo["full_name"], context_key, PROMPT_VERSION,
-                    self.summarizer_name, summary.model_dump_json(), text,
+                    self.summary_provider_id, summary.model_dump_json(), text,
                     hashlib.sha256(text.encode()).hexdigest(), TEMPLATE_VERSION, low, "ok", now(),
                 )
                 failure = None
             except Exception as exc:  # noqa: BLE001 - isolate individual model failures
                 error_kind = type(exc).__name__
-                print(f"[summarize] failed {repo['full_name']}: {error_kind}", file=sys.stderr)
+                error_message = str(exc)
+                print(
+                    f"[summarize] failed {repo['full_name']}: "
+                    f"{error_kind}: {error_message}",
+                    file=sys.stderr,
+                )
                 success = None
                 failure = (
                     repo["full_name"], context_key, PROMPT_VERSION,
-                    self.summarizer_name, error_kind, now(),
+                    self.summary_provider_id, error_kind, error_message[:1000], now(),
                 )
             return index, repo["full_name"], success, failure
 
         workers = max(1, min(8, int(os.environ.get("ATLAS_SUMMARY_WORKERS", "4"))))
         failures: list[str] = []
         with ThreadPoolExecutor(max_workers=workers) as executor:
-            for _index, name, success, failure in executor.map(work, pending):
-                if success:
-                    with self.cache.connect() as con:
-                        con.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", success)
-                        con.execute("DELETE FROM summary_failures WHERE full_name=?", (name,))
-                else:
-                    failures.append(name)
-                    self.cache.execute(
-                        "INSERT OR REPLACE INTO summary_failures VALUES (?,?,?,?,?,?)", failure,
-                    )
+            try:
+                for _index, name, success, failure in executor.map(work, pending):
+                    if success:
+                        with self.cache.connect() as con:
+                            con.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", success)
+                            con.execute("DELETE FROM summary_failures WHERE full_name=?", (name,))
+                    else:
+                        failures.append(name)
+                        self.cache.execute(
+                            """INSERT OR REPLACE INTO summary_failures(
+                            full_name,content_hash,prompt_version,provider,error_kind,
+                            error_message,failed_at
+                            ) VALUES (?,?,?,?,?,?,?)""",
+                            failure,
+                        )
+            except BaseException:
+                provider.cancel()
+                raise
         if failures:
             raise RuntimeError(
                 f"Summarization failed for {len(failures)} repositories; last-known-good "
@@ -563,31 +582,82 @@ class AtlasPipeline:
         provider = None
         used: set[str] = set()
         self.labels = {}
-        overrides = {row["signature"]: row for row in self.cache.rows("SELECT * FROM label_overrides WHERE locked=1")}
+        signatures, overrides, reserved = self._locked_override_values(members)
         label_cache = {
             row["cache_key"]: json.loads(row["payload_json"])
             for row in self.cache.rows("SELECT cache_key,payload_json FROM stage_cache WHERE stage='label'")
         }
         for cluster_id in sorted(members):
-            signature = content_hash(sorted(members[cluster_id]))
-            override = overrides.get(signature)
-            stage_key = content_hash(signature, LABEL_PROMPT_VERSION, self.summarizer_name)
+            signature = signatures[cluster_id]
+            override = overrides.get(cluster_id)
+            stage_key = content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id)
             cached = label_cache.get(stage_key)
             if override:
-                value = ClusterLabel(label=override["label"], gloss=override["gloss"] or "")
+                value = override
             elif cached:
                 value = ClusterLabel.model_validate(cached)
             else:
                 provider = provider or self._summarizer()
                 descriptions = [summaries[name].one_liner for name in members[cluster_id]][:40]
                 value = provider.label(descriptions)
-                if value.label.casefold() in used:
+                if value.label.casefold() in used | reserved:
                     value = provider.label(descriptions, collision=value.label)
                 self.cache.set_stage("label", stage_key, value.model_dump(), now())
-            value = self._deduplicate_label(value, cluster_id, used)
+            if not override:
+                value = self._deduplicate_label(value, cluster_id, used | reserved)
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
             print(f"[label] {cluster_id}: {value.label}")
+
+    def _validated_override(self, row: sqlite3.Row) -> ClusterLabel:
+        try:
+            return ClusterLabel(label=row["label"], gloss=row["gloss"] or "")
+        except ValidationError:
+            # Cache schema v1 allowed arbitrary override text. Preserve as much
+            # of that user choice as the current public-data contract permits.
+            words = str(row["label"] or "").strip().split()[:4]
+            value = ClusterLabel(
+                label=" ".join(words) or "Unlabeled",
+                gloss=str(row["gloss"] or "").strip()[:100],
+            )
+            self.cache.execute(
+                "UPDATE label_overrides SET label=?,gloss=?,updated_at=? WHERE signature=?",
+                (value.label, value.gloss, now(), row["signature"]),
+            )
+            print(
+                f"[label] normalized legacy override {row['signature'][:10]} to "
+                f"{value.label!r}",
+                file=sys.stderr,
+            )
+            return value
+
+    def _locked_override_values(
+        self,
+        members: dict[int, list[str]],
+    ) -> tuple[dict[int, str], dict[int, ClusterLabel], set[str]]:
+        signatures = {
+            cluster_id: content_hash(sorted(names))
+            for cluster_id, names in members.items()
+        }
+        rows = {
+            row["signature"]: row
+            for row in self.cache.rows("SELECT * FROM label_overrides WHERE locked=1")
+        }
+        overrides = {
+            cluster_id: self._validated_override(rows[signature])
+            for cluster_id, signature in signatures.items()
+            if signature in rows
+        }
+        by_label: dict[str, list[int]] = defaultdict(list)
+        for cluster_id, value in overrides.items():
+            by_label[value.label.casefold()].append(cluster_id)
+        collisions = [ids for ids in by_label.values() if len(ids) > 1]
+        if collisions:
+            clusters = ", ".join(str(value) for ids in collisions for value in ids)
+            raise RuntimeError(
+                f"Locked label overrides must be unique; resolve clusters {clusters}."
+            )
+        return signatures, overrides, set(by_label)
 
     def _restore_labels(self, analysis: dict) -> None:
         members: dict[int, list[str]] = defaultdict(list)
@@ -596,24 +666,21 @@ class AtlasPipeline:
                 members[int(cluster_id)].append(name)
         used: set[str] = set()
         self.labels = {}
+        signatures, overrides, reserved = self._locked_override_values(members)
         for cluster_id, names in sorted(members.items()):
-            signature = content_hash(sorted(names))
-            override = self.cache.rows(
-                "SELECT label,gloss FROM label_overrides WHERE signature=? AND locked=1",
-                (signature,),
-            )
+            signature = signatures[cluster_id]
+            override = overrides.get(cluster_id)
             cached = self.cache.get_stage(
-                "label", content_hash(signature, LABEL_PROMPT_VERSION, self.summarizer_name),
+                "label", content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id),
             )
             if override:
-                value = ClusterLabel(
-                    label=override[0]["label"], gloss=override[0]["gloss"] or "",
-                )
+                value = override
             elif cached:
                 value = ClusterLabel.model_validate(cached)
             else:
                 continue
-            value = self._deduplicate_label(value, cluster_id, used)
+            if not override:
+                value = self._deduplicate_label(value, cluster_id, used | reserved)
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
 
@@ -929,7 +996,7 @@ class AtlasPipeline:
             con.execute(
                 "INSERT INTO runs VALUES (?,?,?,?,?,?,?,?,?)",
                 (
-                    self.run_id, self.started_at, finished, self.summarizer_name, projected.get("embedding_model", self.embedder_name),
+                    self.run_id, self.started_at, finished, self.summary_provider_id, projected.get("embedding_model", self.embedder_name),
                     projected["layout"], json.dumps(projected["metrics"], sort_keys=True),
                     len(payload["repos"]), projected["analysis_key"],
                 ),

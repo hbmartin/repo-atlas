@@ -9,6 +9,7 @@ from repo_atlas.embeddings import OfflineFallbackEmbedder, l2_normalize
 from repo_atlas.layouts import projection_neighbor_counts
 from repo_atlas.models import RepoSummary
 from repo_atlas.pipeline import (
+    ACQUIRE_VERSION,
     PROMPT_VERSION,
     TEMPLATE_VERSION,
     AtlasPipeline,
@@ -49,7 +50,7 @@ def insert_summary_and_fallback(pipeline: AtlasPipeline, name: str) -> None:
     pipeline.cache.execute(
         "INSERT INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         (
-            name, context_key, PROMPT_VERSION, pipeline.summarizer_name,
+            name, context_key, PROMPT_VERSION, pipeline.summary_provider_id,
             SUMMARY.model_dump_json(), text, text_hash, TEMPLATE_VERSION, low, "ok", "now",
         ),
     )
@@ -103,6 +104,14 @@ def test_discovery_refuses_to_replace_cache_with_empty_result(tmp_path):
     assert pipeline.cache.rows("SELECT full_name FROM repos")[0][0] == "owner/existing"
 
 
+def test_cached_exclusions_do_not_warn_after_the_repo_is_already_absent(tmp_path, capsys):
+    (tmp_path / "config").mkdir()
+    (tmp_path / "config" / "exclude.txt").write_text("owner/absent\n", encoding="utf-8")
+    pipeline = AtlasPipeline(tmp_path, None)
+    pipeline._apply_cached_exclusions()
+    assert "warning" not in capsys.readouterr().err
+
+
 def test_discovery_skips_inaccessible_fork_comparisons(tmp_path):
     base = {
         "default_branch": "main",
@@ -144,8 +153,39 @@ def test_discovery_skips_inaccessible_fork_comparisons(tmp_path):
     github = FakeGitHub()
     pipeline = AtlasPipeline(tmp_path, github)
     pipeline.discover()
-    assert github.compare_options == {"retry_forbidden": False}
+    assert github.compare_options == {}
     assert [row[0] for row in pipeline.cache.rows("SELECT full_name FROM repos")] == ["owner/retained"]
+
+
+def test_acquire_key_includes_content_processing_version(tmp_path):
+    class FakeGitHub:
+        readme_calls = 0
+
+        def readme(self, _full_name):
+            self.readme_calls += 1
+            return "# Current README"
+
+        def get(self, *_args, **_kwargs):
+            return SimpleNamespace(
+                status_code=200,
+                json=lambda: {"tree": [{"path": "main.py", "type": "blob"}]},
+            )
+
+    github = FakeGitHub()
+    pipeline = AtlasPipeline(tmp_path, github)
+    insert_repo(pipeline, "owner/repo")
+    repo = pipeline.cache.rows("SELECT * FROM repos")[0]
+    old_key = pipeline_module.content_hash(repo["pushed_at"], repo["default_branch"])
+    pipeline.cache.execute(
+        "UPDATE repos SET acquire_key=?,content_hash='old' WHERE full_name='owner/repo'",
+        (old_key,),
+    )
+    pipeline.acquire()
+    refreshed = pipeline.cache.rows("SELECT acquire_key FROM repos")[0][0]
+    assert github.readme_calls == 1
+    assert refreshed == pipeline_module.content_hash(
+        ACQUIRE_VERSION, repo["pushed_at"], repo["default_branch"],
+    )
 
 
 def test_vectors_require_explicit_fallback_permission(tmp_path):
@@ -170,6 +210,15 @@ def test_downstream_vectors_accept_current_summaries_from_another_provider(tmp_p
     names, vectors, _key = alternate._vectors()
     assert names == ["owner/repo"]
     assert vectors.shape == (1, 2)
+
+
+def test_openai_cache_identity_includes_the_selected_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("ATLAS_SUMMARY_MODEL", "gpt-4o-mini")
+    first = AtlasPipeline(tmp_path, None)
+    monkeypatch.setenv("ATLAS_SUMMARY_MODEL", "gpt-4.1")
+    second = AtlasPipeline(tmp_path, None)
+    assert first.summary_provider_id == "openai:gpt-4o-mini"
+    assert second.summary_provider_id == "openai:gpt-4.1"
 
 
 def test_vectors_are_loaded_once_per_pipeline_snapshot(tmp_path):
@@ -229,6 +278,28 @@ def test_failed_resummary_preserves_last_good_summary_and_aborts(tmp_path, monke
     assert preserved["summary_json"] == original["summary_json"]
     failure = pipeline.cache.rows("SELECT * FROM summary_failures")[0]
     assert failure["error_kind"] == "ValueError"
+    assert failure["error_message"] == "untrusted model output"
+
+
+def test_interrupting_summarization_cancels_active_provider_work(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None)
+    insert_repo(pipeline, "owner/repo")
+
+    class InterruptedSummarizer:
+        cancelled = False
+
+        def summarize(self, *_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        def cancel(self):
+            self.cancelled = True
+
+    provider = InterruptedSummarizer()
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: provider)
+    monkeypatch.setenv("ATLAS_SUMMARY_WORKERS", "1")
+    with pytest.raises(KeyboardInterrupt):
+        pipeline.summarize()
+    assert provider.cancelled is True
 
 
 def test_vectors_reject_partial_current_corpus(tmp_path):
@@ -258,6 +329,45 @@ def test_duplicate_labels_get_stable_bounded_suffixes():
     result = AtlasPipeline._deduplicate_label(label, 4, {"developer tools"})
     assert result.label == "Developer Tools 5"
     assert len(result.label.split()) <= 4
+
+
+def test_legacy_locked_label_overrides_are_normalized(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None)
+    signature = pipeline_module.content_hash(["owner/repo"])
+    pipeline.cache.execute(
+        "INSERT INTO label_overrides VALUES (?,?,?,?,?)",
+        (signature, "Mobile And Web Infrastructure Tools", "g" * 110, True, "old"),
+    )
+    analysis = {"names": ["owner/repo"], "cluster_ids": [0]}
+    pipeline._restore_labels(analysis)
+    assert pipeline.labels[0].label == "Mobile And Web Infrastructure"
+    saved = pipeline.cache.rows("SELECT label,gloss FROM label_overrides")[0]
+    assert saved["label"] == "Mobile And Web Infrastructure"
+    assert len(saved["gloss"]) == 100
+
+
+def test_locked_label_override_wins_over_generated_collision(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None)
+    locked_signature = pipeline_module.content_hash(["owner/two"])
+    generated_signature = pipeline_module.content_hash(["owner/one"])
+    pipeline.cache.execute(
+        "INSERT INTO label_overrides VALUES (?,?,?,?,?)",
+        (locked_signature, "Mobile Tools", "Locked.", True, "now"),
+    )
+    pipeline.cache.set_stage(
+        "label",
+        pipeline_module.content_hash(
+            generated_signature, pipeline_module.LABEL_PROMPT_VERSION, pipeline.summary_provider_id,
+        ),
+        {"label": "Mobile Tools", "gloss": "Generated."},
+        "now",
+    )
+    pipeline._restore_labels({
+        "names": ["owner/one", "owner/two"],
+        "cluster_ids": [0, 1],
+    })
+    assert pipeline.labels[1].label == "Mobile Tools"
+    assert pipeline.labels[0].label != "Mobile Tools"
 
 
 def test_embedding_incrementally_fills_hosted_corpus_without_yes(tmp_path, monkeypatch):
