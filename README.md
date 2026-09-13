@@ -62,6 +62,23 @@ Low-confidence points have missing or sparse READMEs and are shown as dashed hol
 
 The cache, local exclusion list, generated reports, environment files, and credentials are ignored. `public/atlas.json` and `public/atlas-list.html` are deployable outputs and may be committed after review. Always inspect `uv run atlas report` and the generated labels before publishing a new snapshot.
 
+## Deploy to Cloudflare
+
+The static site is configured for Cloudflare Worker `repo-atlas`, with production
+metadata for `https://haroldmartin.me`.
+
+```bash
+pnpm run deploy:check       # Build and validate without publishing
+pnpm run preview:cloudflare # Build and preview using Cloudflare's local runtime
+pnpm exec wrangler login   # Authenticate when ready to publish
+pnpm run deploy           # Build and deploy to your Workers address
+```
+
+See [Cloudflare deployment](docs/cloudflare.md) for GitHub automatic deployments,
+the `VITE_SITE_URL` metadata override, custom-domain launch, the www redirect,
+and rollback. Cloudflare deploys the committed atlas snapshot; Python and model
+credentials are only needed when regenerating that snapshot locally.
+
 ## Verification
 
 ```bash

@@ -10,6 +10,9 @@ lerna-debug.log*
 node_modules
 dist
 dist-ssr
+.wrangler/
+.dev.vars
+.dev.vars.*
 *.local
 .venv/
 .atlas/
