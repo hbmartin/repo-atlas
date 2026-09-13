@@ -1,6 +1,17 @@
 import sqlite3
 
+import pytest
+
 from repo_atlas.cache import Cache
+
+
+def test_interrupted_transaction_preserves_previous_corpus(tmp_path):
+    cache = Cache(tmp_path / "cache.db")
+    cache.set_stage("cluster", "old", {"ids": [1]}, "now")
+    with pytest.raises(KeyboardInterrupt), cache.connect() as con:
+        con.execute("DELETE FROM stage_cache")
+        raise KeyboardInterrupt
+    assert cache.get_stage("cluster", "old") == {"ids": [1]}
 
 
 def test_stage_cache_round_trip(tmp_path):

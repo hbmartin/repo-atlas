@@ -42,6 +42,24 @@ def test_run_formats_github_authentication_errors(monkeypatch):
     assert "GitHub authentication is required" in result.output
 
 
+def test_run_formats_operational_github_errors(tmp_path, monkeypatch):
+    def fail(*_args, **_kwargs):
+        raise GitHubError("GitHub rate limit requires waiting 3601 seconds")
+    monkeypatch.setattr(cli_module, "project_root", lambda: tmp_path)
+    monkeypatch.setattr(cli_module.AtlasPipeline, "run", fail)
+    result = CliRunner().invoke(cli_module.app, ["run", "--only", "embed"])
+    assert result.exit_code == 1
+    assert "Error: GitHub rate limit" in result.output
+    assert "Traceback" not in result.output
+    assert isinstance(result.exception, SystemExit)
+
+
+def test_legacy_unlock_flag_gives_migration_guidance():
+    result = CliRunner().invoke(cli_module.app, ["labels", "set", "0=Tools", "--unlock"])
+    assert result.exit_code == 2
+    assert "atlas labels unlock ID" in result.output
+
+
 def test_label_overrides_are_locked_and_validated_by_default(tmp_path, monkeypatch):
     cache = Cache(tmp_path / ".atlas" / "cache.db")
     with cache.connect() as con:
@@ -56,6 +74,7 @@ def test_label_overrides_are_locked_and_validated_by_default(tmp_path, monkeypat
     runner = CliRunner()
     result = runner.invoke(cli_module.app, ["labels", "set", "0=Mobile Tools"])
     assert result.exit_code == 0
+    assert runner.invoke(cli_module.app, ["labels", "set", "0=Mobile Tools", "--lock"]).exit_code == 0
     saved = Cache(tmp_path / ".atlas" / "cache.db").rows("SELECT * FROM label_overrides")[0]
     assert saved["label"] == "Mobile Tools"
     assert saved["locked"] == 1

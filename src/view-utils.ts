@@ -79,29 +79,36 @@ export function nearestRepoAtPoint(
 ) {
   let nearest: AtlasRepo | null = null
   let nearestSquared = Number.POSITIVE_INFINITY
+  let nearestEdgeDistance = Number.POSITIVE_INFINITY
   for (const repo of repos) {
     if (!visible.has(repo.full_name)) continue
     const dx = (layoutAlt ? repo.x_alt : repo.x) - x
     const dy = (layoutAlt ? repo.y_alt : repo.y) - y
     const squared = dx * dx + dy * dy
-    const hitRadius = Math.max(maxDistance, drawnRadius(repo))
+    const radius = drawnRadius(repo)
+    const hitRadius = Math.max(maxDistance, radius)
     if (squared > hitRadius * hitRadius) continue
-    const winsTie = squared === nearestSquared && (
+    // Actual circle hits precede padded targets. Within overlapping circles,
+    // prefer the nearest center, then use a stable selection/name tie-break.
+    const edgeDistance = Math.max(0, Math.sqrt(squared) - radius)
+    const winsTie = edgeDistance === nearestEdgeDistance && squared === nearestSquared && (
       repo.full_name === preferredFullName
       || (nearest?.full_name !== preferredFullName && (
         !nearest || repo.full_name.localeCompare(nearest.full_name) < 0
       ))
     )
-    if (squared < nearestSquared || winsTie) {
+    if (edgeDistance < nearestEdgeDistance
+      || (edgeDistance === nearestEdgeDistance && squared < nearestSquared) || winsTie) {
       nearest = repo
       nearestSquared = squared
+      nearestEdgeDistance = edgeDistance
     }
   }
   return nearest
 }
 
-export function clusterGlossesVisible(zoomScale: number, mapSize: number) {
-  return zoomScale < 1.5 && mapSize >= 700
+export function clusterGlossesVisible(zoomScale: number, mapSize: number, compact: boolean = false) {
+  return !compact && zoomScale < 1.5 && mapSize >= 700
 }
 
 export function clusterLabelX(
@@ -124,14 +131,18 @@ export function toggleValue(values: string[], value: string) {
     : [...values, value]
 }
 
-export function useReducedMotion() {
-  const [reduced, setReduced] = useState(false)
+export function useMediaQuery(queryText: string) {
+  const [matches, setMatches] = useState(() => window.matchMedia(queryText).matches)
   useEffect(() => {
-    const query = window.matchMedia('(prefers-reduced-motion: reduce)')
-    const update = () => setReduced(query.matches)
+    const query = window.matchMedia(queryText)
+    const update = () => setMatches(query.matches)
     update()
     query.addEventListener('change', update)
     return () => query.removeEventListener('change', update)
-  }, [])
-  return reduced
+  }, [queryText])
+  return matches
+}
+
+export function useReducedMotion() {
+  return useMediaQuery('(prefers-reduced-motion: reduce)')
 }

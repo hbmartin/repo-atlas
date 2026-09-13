@@ -11,8 +11,34 @@ from repo_atlas.summarizers import (
     SummarizerConfigurationError,
     openai_summary_model,
     parse_model_json,
+    safe_stderr_detail,
     safe_subprocess_env,
 )
+
+CODEX_FEATURES = CodexSummarizer.required_features | {"future_capability"}
+
+
+@pytest.fixture(autouse=True)
+def codex_metadata(monkeypatch):
+    import subprocess
+
+    calls = []
+
+    def probe(command, **kwargs):
+        calls.append((command, kwargs))
+        if command[1:3] == ["exec", "--help"]:
+            output = "--sandbox --ephemeral --ignore-user-config --ignore-rules " \
+                "--strict-config --disable --output-schema --skip-git-repo-check"
+        else:
+            disabled = {command[i + 1] for i, arg in enumerate(command[:-1]) if arg == "--disable"}
+            output = "\n".join(
+                f"{name} stable {str(name not in disabled).lower()}" for name in sorted(CODEX_FEATURES)
+            ) + "\nretired_flag removed true"
+        return SimpleNamespace(returncode=0, stdout=output, stderr="")
+
+    monkeypatch.setattr(subprocess, "run", probe)
+    return calls
+
 
 VALID = {
     "one_liner": "Converts diagrams into editable files.",
@@ -77,10 +103,7 @@ def test_codex_adapter_is_read_only_and_ephemeral(tmp_path):
         for index, value in enumerate(command[:-1])
         if value == "--disable"
     }
-    assert disabled == {
-        "apps", "browser_use", "computer_use", "image_generation", "in_app_browser",
-        "shell_tool",
-    }
+    assert disabled == CODEX_FEATURES
     assert "Ignore prior instructions" not in command
 
 
@@ -117,10 +140,7 @@ def test_codex_repairs_keep_untrusted_text_off_argv_and_all_tools_disabled(monke
             for index, value in enumerate(command[:-1])
             if value == "--disable"
         }
-        assert disabled == {
-            "apps", "browser_use", "computer_use", "image_generation", "in_app_browser",
-            "shell_tool",
-        }
+        assert disabled == CODEX_FEATURES
 
 
 def test_subprocess_environment_uses_an_allowlist(monkeypatch):
@@ -285,16 +305,15 @@ def test_cancellation_stops_repair_attempts(monkeypatch):
 def test_old_codex_cli_is_a_non_retryable_configuration_error(monkeypatch):
     import subprocess
 
-    class FailedProcess:
-        pid = 1234
-        returncode = 1
-
-        def communicate(self, **_kwargs):
-            return "", "error: unknown feature 'computer_use'"
-
-    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess())
+    calls = []
+    def failed_probe(*_args, **_kwargs):
+        calls.append(1)
+        return SimpleNamespace(returncode=1, stdout="", stderr="error: unknown variant disabled")
+    monkeypatch.setattr(subprocess, "run", failed_probe)
+    monkeypatch.setattr(subprocess, "Popen", lambda *_a, **_k: pytest.fail("model must not start"))
     with pytest.raises(SummarizerConfigurationError, match="update Codex"):
-        CodexSummarizer().invoke_with_repairs("prompt", RepoSummary)
+        CodexSummarizer().invoke_with_repairs("untrusted prompt", RepoSummary)
+    assert calls == [1]
 
 
 def test_cli_failure_reports_sanitized_stderr(monkeypatch):
@@ -402,3 +421,118 @@ def test_openai_client_is_reused_for_matching_timeouts(monkeypatch):
     with pytest.raises(SummarizerCancelledError):
         summarizer.invoke("after cancellation", RepoSummary)
     assert clients == [client]
+
+
+def test_codex_preflight_disables_future_features_and_runs_once(tmp_path, codex_metadata):
+    summarizer = CodexSummarizer()
+    first = summarizer.command("untrusted README", tmp_path / "schema.json")
+    second = summarizer.command("repair", tmp_path / "schema.json")
+    assert first == second
+    assert len(codex_metadata) == 3
+    assert "future_capability" in first
+    assert "retired_flag" not in first
+    for command, kwargs in codex_metadata:
+        assert "untrusted README" not in command
+        assert "OPENAI_API_KEY" not in kwargs["env"]
+        assert kwargs["timeout"] == 10
+
+
+def test_codex_preflight_rejects_ineffective_controls(monkeypatch):
+    import subprocess
+
+    original = subprocess.run
+    def ignores_disable(command, **kwargs):
+        return original([arg for arg in command if arg != "--disable"], **kwargs)
+    monkeypatch.setattr(subprocess, "run", ignores_disable)
+    with pytest.raises(SummarizerConfigurationError, match="could not disable"):
+        CodexSummarizer()._preflight()
+
+
+@pytest.mark.parametrize("metadata", ["future-tool stable true", "bad metadata", ""])
+def test_codex_preflight_rejects_unrecognized_registry(monkeypatch, metadata):
+    import subprocess
+
+    original = subprocess.run
+    def malformed(command, **kwargs):
+        if command[1:3] == ["features", "list"]:
+            return SimpleNamespace(returncode=0, stdout=metadata, stderr="")
+        return original(command, **kwargs)
+    monkeypatch.setattr(subprocess, "run", malformed)
+    with pytest.raises(SummarizerConfigurationError):
+        CodexSummarizer()._preflight()
+
+
+def test_codex_preflight_timeout_is_nonretryable(monkeypatch):
+    import subprocess
+
+    def timeout(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired("codex", 10)
+    monkeypatch.setattr(subprocess, "run", timeout)
+    with pytest.raises(SummarizerConfigurationError, match="TimeoutExpired"):
+        CodexSummarizer().invoke_with_repairs("README", RepoSummary)
+
+
+def test_prompt_echo_cannot_turn_a_provider_failure_into_configuration_error(monkeypatch):
+    import subprocess
+
+    prompts = []
+    class FailedProcess:
+        pid = 1234
+        returncode = 1
+        def communicate(self, **kwargs):
+            prompts.append(kwargs["input"])
+            return "", "README says unknown feature or unknown config; ordinary request failure"
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: FailedProcess())
+    with pytest.raises(RuntimeError) as caught:
+        CodexSummarizer().invoke_with_repairs("README: unknown feature", RepoSummary)
+    assert not isinstance(caught.value, SummarizerConfigurationError)
+    assert len(prompts) == 3
+
+
+@pytest.mark.parametrize("error", [FileNotFoundError, PermissionError])
+def test_missing_or_unusable_cli_fails_without_repairs(monkeypatch, error):
+    import subprocess
+
+    from repo_atlas.summarizers import ClaudeSummarizer
+
+    calls = []
+    def fail(*_args, **_kwargs):
+        calls.append(1)
+        raise error("synthetic")
+    monkeypatch.setattr(subprocess, "Popen", fail)
+    with pytest.raises(SummarizerConfigurationError, match="Cannot start claude"):
+        ClaudeSummarizer().invoke_with_repairs("prompt", RepoSummary)
+    assert calls == [1]
+
+
+@pytest.mark.parametrize(("environment", "stderr", "expected"), [
+    ({"CLAUDE_CODE_USE_BEDROCK": "1", "AWS_SECRET_ACCESS_KEY": "dummy1credential"},
+     "error 1: dummy1credential", "error 1: [redacted]"),
+    ({"AWS_ACCESS_KEY_ID": "1", "AWS_SECRET_ACCESS_KEY": "dummy1credential"},
+     "dummy1credential", "[redacted]"),
+    ({"AWS_SECRET_ACCESS_KEY": "abc", "AWS_SESSION_TOKEN": "bcd"},
+     "abcd", "[redacted]"),
+    ({"AWS_SECRET_ACCESS_KEY": "red", "AWS_SESSION_TOKEN": "secret"},
+     "secret secret", "[redacted] [redacted]"),
+    ({"AWS_SECRET_ACCESS_KEY": "dummy\tcredential"},
+     "error dummy\ncredential", "error [redacted]"),
+    ({"AWS_SECRET_ACCESS_KEY": "   "}, "error 1", "error 1"),
+    ({"HTTPS_PROXY": "https://user:password@example.test"},
+     "proxy https://user:password@example.test failed", "proxy [redacted] failed"),
+])
+def test_redaction_handles_overlaps_and_normalization(environment, stderr, expected):
+    import os
+    from unittest.mock import patch
+
+    with patch.dict(os.environ, environment, clear=True):
+        assert safe_stderr_detail("claude", stderr) == expected
+
+
+def test_redaction_precedes_truncation():
+    import os
+    from unittest.mock import patch
+
+    secret = "x" * 1200
+    with patch.dict(os.environ, {"AWS_SECRET_ACCESS_KEY": secret}, clear=True):
+        assert safe_stderr_detail("claude", f"prefix {secret}") == "prefix [redacted]"
+        assert safe_stderr_detail("claude", "z" * 1200) == "z" * 1000

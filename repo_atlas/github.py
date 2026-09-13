@@ -76,10 +76,6 @@ class GitHubClient:
                 or response.status_code >= 500
             )
             if not retryable:
-                reset = int(response.headers.get("X-RateLimit-Reset", "0"))
-                if response.status_code < 400 and remaining < 100 and reset > 0:
-                    quota_wait = max(0, reset - int(time.time()) + 1)
-                    self._wait_for_rate_limit(quota_wait, reset)
                 return response
             if attempt == 5:
                 break

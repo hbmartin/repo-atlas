@@ -78,7 +78,7 @@ def run(
     best_effort: bool = typer.Option(
         False,
         "--best-effort",
-        help="Omit repositories without current summaries instead of stopping the run.",
+        help="Permit summary omissions and fallback cluster labels instead of stopping the run.",
     ),
     max_rate_limit_wait: int = typer.Option(
         3660,
@@ -111,6 +111,9 @@ def run(
             pipeline.run(from_stage, selected)
         except SummarizerConfigurationError as exc:
             raise typer.BadParameter(str(exc)) from exc
+        except RuntimeError as exc:
+            typer.echo(f"Error: {exc}", err=True)
+            raise typer.Exit(1) from exc
     finally:
         if github:
             github.close()
@@ -178,23 +181,23 @@ def labels_show() -> None:
 @labels_app.command("set")
 def labels_set(
     assignment: str = typer.Argument(..., help="ID=LABEL"),
-    lock: bool = typer.Option(True, "--lock"),
+    lock: bool = typer.Option(True, "--lock/--unlock", help="Labels are locked by default; --unlock is retired."),
     gloss: str | None = typer.Option(None),
 ) -> None:
+    if not lock:
+        raise typer.BadParameter(
+            "labels set --unlock is retired. Use `atlas labels unlock ID` to remove an override."
+        )
     if "=" not in assignment:
         raise typer.BadParameter("Expected ID=LABEL")
     raw_id, label = assignment.split("=", 1)
     cluster_id = int(raw_id)
     cache = Cache(project_root() / ".atlas" / "cache.db")
-    rows = cache.rows(
-        """SELECT signature,gloss FROM clusters
-        WHERE run_id=(SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1) AND cluster_id=?""",
-        (cluster_id,),
-    )
-    if not rows:
+    cluster = cache.latest_cluster(cluster_id)
+    if cluster is None:
         raise typer.BadParameter(f"Cluster {cluster_id} does not exist in the latest run.")
     try:
-        value = ClusterLabel(label=label.strip(), gloss=gloss or rows[0]["gloss"] or "")
+        value = ClusterLabel(label=label.strip(), gloss=gloss or cluster["gloss"] or "")
     except ValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
     with cache.connect() as con:
@@ -215,7 +218,7 @@ def labels_set(
             )
         con.execute(
             "INSERT OR REPLACE INTO label_overrides VALUES (?,?,?,?,?)",
-            (rows[0]["signature"], value.label, value.gloss, bool(lock), now()),
+            (cluster["signature"], value.label, value.gloss, True, now()),
         )
     typer.echo(f"Set cluster {cluster_id} to {value.label!r} and locked it.")
 
@@ -223,17 +226,13 @@ def labels_set(
 @labels_app.command("unlock")
 def labels_unlock(cluster_id: int = typer.Argument(..., help="Cluster ID")) -> None:
     cache = Cache(project_root() / ".atlas" / "cache.db")
-    rows = cache.rows(
-        """SELECT signature FROM clusters
-        WHERE run_id=(SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1) AND cluster_id=?""",
-        (cluster_id,),
-    )
-    if not rows:
+    cluster = cache.latest_cluster(cluster_id)
+    if cluster is None:
         raise typer.BadParameter(f"Cluster {cluster_id} does not exist in the latest run.")
     with cache.connect() as con:
         removed = con.execute(
             "DELETE FROM label_overrides WHERE signature=?",
-            (rows[0]["signature"],),
+            (cluster["signature"],),
         ).rowcount
     if removed:
         typer.echo(f"Unlocked cluster {cluster_id}; generated labels will be used again.")

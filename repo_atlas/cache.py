@@ -157,7 +157,7 @@ class Cache:
         try:
             yield self._connection
             self._connection.commit()
-        except Exception:
+        except BaseException:
             self._connection.rollback()
             raise
         finally:
@@ -179,6 +179,15 @@ class Cache:
     def execute(self, query: str, params: tuple[Any, ...] = ()) -> None:
         with self.connect() as con:
             con.execute(query, params)
+
+    def latest_cluster(self, cluster_id: int) -> sqlite3.Row | None:
+        rows = self.rows(
+            """SELECT * FROM clusters WHERE
+            run_id=(SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1)
+            AND cluster_id=?""",
+            (cluster_id,),
+        )
+        return rows[0] if rows else None
 
     def get_stage(self, stage: str, key: str) -> Any | None:
         rows = self.rows(
