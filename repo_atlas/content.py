@@ -20,6 +20,10 @@ HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.IGNORECASE)
 FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+NAMED_FILES_CASEFOLDED = frozenset(value.casefold() for value in NAMED_FILES)
+DIRECTORY_PREFIXES_CASEFOLDED = tuple(value.casefold() for value in DIRECTORY_PREFIXES)
+EXTENSIONS_CASEFOLDED = tuple(value.casefold() for value in EXTENSIONS)
+GENERATED_PATTERNS_CASEFOLDED = tuple(value.casefold() for value in GENERATED_PATTERNS)
 
 
 def clean_readme(markdown: str | None) -> str:
@@ -76,17 +80,17 @@ def excluded_path(path: str) -> bool:
     normalized = path.removeprefix("./").casefold()
     parts = PurePosixPath(normalized).parts
     basename = parts[-1] if parts else normalized
-    if basename in {value.casefold() for value in NAMED_FILES}:
+    if basename in NAMED_FILES_CASEFOLDED:
         return True
     if any(
-        normalized.startswith(prefix.casefold())
-        or f"/{prefix.casefold()}" in f"/{normalized}"
-        for prefix in DIRECTORY_PREFIXES
+        normalized.startswith(prefix)
+        or f"/{prefix}" in f"/{normalized}"
+        for prefix in DIRECTORY_PREFIXES_CASEFOLDED
     ):
         return True
-    if any(normalized.endswith(ext.casefold()) for ext in EXTENSIONS):
+    if any(normalized.endswith(ext) for ext in EXTENSIONS_CASEFOLDED):
         return True
-    return any(fnmatch.fnmatch(basename, pattern.casefold()) for pattern in GENERATED_PATTERNS)
+    return any(fnmatch.fnmatch(basename, pattern) for pattern in GENERATED_PATTERNS_CASEFOLDED)
 
 
 NOTABLE = (

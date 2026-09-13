@@ -32,6 +32,18 @@ def test_transient_403_is_retried(monkeypatch):
         client.close()
 
 
+def test_permission_403_can_be_returned_without_retry(monkeypatch):
+    client = GitHubClient("token")
+    response = SimpleNamespace(status_code=403, headers={"X-RateLimit-Remaining": "12"})
+    calls = []
+    monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: calls.append(1) or response)
+    try:
+        assert client.get("/repos/owner/repo", retry_forbidden=False) is response
+        assert calls == [1]
+    finally:
+        client.close()
+
+
 def test_rate_limit_uses_one_delay_before_retry(monkeypatch):
     client = GitHubClient("token")
     responses = iter([

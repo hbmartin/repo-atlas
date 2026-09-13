@@ -8,7 +8,10 @@ from pathlib import Path
 from typing import Any
 
 SCHEMA_VERSION = 2
-PRUNABLE_STAGES = ("cluster", "label", "project")
+# Label cache entries are keyed by cluster signature rather than by run. Retaining
+# only the newest global N entries makes stable labels churn as soon as an atlas
+# contains more than N clusters, so labels remain until explicit invalidation.
+PRUNABLE_STAGES = ("cluster", "project")
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS repos (

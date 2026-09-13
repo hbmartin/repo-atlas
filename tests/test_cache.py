@@ -23,5 +23,6 @@ def test_prune_retains_recent_runs_and_stage_entries(tmp_path):
             cache.set_stage("label", f"label-{index}", {"i": index}, f"2026-01-0{index + 1}")
             cache.set_stage("project", f"project-{index}", {"i": index}, f"2026-01-0{index + 1}")
     removed = cache.prune(keep_runs=2, keep_stage_entries=1)
-    assert removed == {"runs_removed": 2, "stage_entries_removed": 9}
+    assert removed == {"runs_removed": 2, "stage_entries_removed": 6}
     assert [row[0] for row in cache.rows("SELECT run_id FROM runs ORDER BY run_id")] == ["run-2", "run-3"]
+    assert cache.rows("SELECT COUNT(*) FROM stage_cache WHERE stage='label'")[0][0] == 4

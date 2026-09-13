@@ -103,6 +103,51 @@ def test_discovery_refuses_to_replace_cache_with_empty_result(tmp_path):
     assert pipeline.cache.rows("SELECT full_name FROM repos")[0][0] == "owner/existing"
 
 
+def test_discovery_skips_inaccessible_fork_comparisons(tmp_path):
+    base = {
+        "default_branch": "main",
+        "size": 1,
+        "description": None,
+        "homepage": None,
+        "topics": [],
+        "language": "Python",
+        "stargazers_count": 0,
+        "created_at": "2025-01-01T00:00:00Z",
+        "pushed_at": "2025-01-01T00:00:00Z",
+        "archived": False,
+        "license": None,
+    }
+    blocked = {**base, "full_name": "owner/blocked-fork", "fork": True}
+    retained = {**base, "full_name": "owner/retained", "fork": False}
+
+    class FakeGitHub:
+        compare_options = None
+
+        def paginate(self, *_args, **_kwargs):
+            return [blocked, retained]
+
+        def get_json(self, path, **_kwargs):
+            if path == "/repos/owner/blocked-fork":
+                return {
+                    **blocked,
+                    "owner": {"login": "owner"},
+                    "parent": {"full_name": "upstream/project", "default_branch": "main"},
+                }
+            if path.endswith("/languages"):
+                return {"Python": 100}
+            raise AssertionError(path)
+
+        def get(self, _path, **kwargs):
+            self.compare_options = kwargs
+            return SimpleNamespace(status_code=403)
+
+    github = FakeGitHub()
+    pipeline = AtlasPipeline(tmp_path, github)
+    pipeline.discover()
+    assert github.compare_options == {"retry_forbidden": False}
+    assert [row[0] for row in pipeline.cache.rows("SELECT full_name FROM repos")] == ["owner/retained"]
+
+
 def test_vectors_require_explicit_fallback_permission(tmp_path):
     pipeline = AtlasPipeline(tmp_path, None)
     insert_repo(pipeline, "owner/repo")
@@ -114,6 +159,27 @@ def test_vectors_require_explicit_fallback_permission(tmp_path):
     names, vectors, _key = permitted._vectors()
     assert names == ["owner/repo"]
     assert vectors.shape == (1, 2)
+
+
+def test_downstream_vectors_accept_current_summaries_from_another_provider(tmp_path):
+    original = AtlasPipeline(tmp_path, None, summarizer="openai", allow_fallback=True)
+    insert_repo(original, "owner/repo")
+    insert_summary_and_fallback(original, "owner/repo")
+
+    alternate = AtlasPipeline(tmp_path, None, summarizer="claude", allow_fallback=True)
+    names, vectors, _key = alternate._vectors()
+    assert names == ["owner/repo"]
+    assert vectors.shape == (1, 2)
+
+
+def test_vectors_are_loaded_once_per_pipeline_snapshot(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None, allow_fallback=True)
+    insert_repo(pipeline, "owner/repo")
+    insert_summary_and_fallback(pipeline, "owner/repo")
+    first = pipeline._vectors()
+    second = pipeline._vectors()
+    assert second[0] is first[0]
+    assert second[1] is first[1]
 
 
 def test_summary_cache_key_changes_with_language_evidence(tmp_path, monkeypatch):

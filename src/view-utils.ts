@@ -18,12 +18,53 @@ export function pointerToMapPoint(
 ) {
   const scale = Math.min(bounds.width, bounds.height) / 1000
   const offsetX = (bounds.width - 1000 * scale) / 2
-  const offsetY = (bounds.height - 1000 * scale) / 2
   return {
     x: ((clientX - bounds.left - offsetX) / scale - transform.x) / transform.k,
-    y: ((clientY - bounds.top - offsetY) / scale - transform.y) / transform.k,
+    y: ((clientY - bounds.top) / scale - transform.y) / transform.k,
     unitsPerPixel: 1 / scale / transform.k,
   }
+}
+
+export function mobileMapTargetY(
+  bounds: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
+  occlusionTop: number,
+) {
+  const scale = Math.min(bounds.width, bounds.height) / 1000
+  if (!Number.isFinite(scale) || scale <= 0) return 210
+  const contentTop = bounds.top
+  const contentBottom = contentTop + 1000 * scale
+  const visibleBottom = Math.min(contentBottom, occlusionTop)
+  const visibleHeight = Math.max(0, visibleBottom - contentTop)
+  return Math.max(30, Math.min(500, visibleHeight / (2 * scale)))
+}
+
+export function nearestRepoInDirection(
+  repos: AtlasRepo[],
+  visible: Set<string>,
+  selected: AtlasRepo,
+  directionX: number,
+  directionY: number,
+  layoutAlt: boolean,
+) {
+  const selectedX = layoutAlt ? selected.x_alt : selected.x
+  const selectedY = layoutAlt ? selected.y_alt : selected.y
+  let nearest: AtlasRepo | null = null
+  let nearestSquared = Number.POSITIVE_INFINITY
+  for (const repo of repos) {
+    if (repo.full_name === selected.full_name || !visible.has(repo.full_name)) continue
+    const dx = (layoutAlt ? repo.x_alt : repo.x) - selectedX
+    const dy = (layoutAlt ? repo.y_alt : repo.y) - selectedY
+    if (dx * directionX + dy * directionY <= 0) continue
+    const squared = dx * dx + dy * dy
+    if (
+      squared < nearestSquared
+      || (squared === nearestSquared && nearest && repo.full_name.localeCompare(nearest.full_name) < 0)
+    ) {
+      nearest = repo
+      nearestSquared = squared
+    }
+  }
+  return nearest
 }
 
 export function nearestRepoAtPoint(

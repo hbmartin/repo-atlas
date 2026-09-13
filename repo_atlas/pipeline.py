@@ -88,6 +88,12 @@ class AtlasPipeline:
         self.labels: dict[int, ClusterLabel] = {}
         self.final_payload: dict | None = None
         self.effective_embedder_id: str | None = None
+        self._summary_snapshot: list[sqlite3.Row] | None = None
+        self._vector_snapshot: tuple[list[str], np.ndarray, str] | None = None
+
+    def _invalidate_snapshots(self) -> None:
+        self._summary_snapshot = None
+        self._vector_snapshot = None
 
     def run(self, start: str = "discover", only: set[str] | None = None) -> None:
         if start not in STAGES:
@@ -134,6 +140,7 @@ class AtlasPipeline:
         return get_summarizer(self.summarizer_name)
 
     def discover(self) -> None:
+        self._invalidate_snapshots()
         excluded = self._exclude_names()
         matched_exclusions: set[str] = set()
         seen: set[str] = set()
@@ -160,14 +167,18 @@ class AtlasPipeline:
                 compare = self.github.get(
                     f"/repos/{full_name}/compare/"
                     f"{quote(parent_name.split('/')[0])}:{quote(parent_branch)}..."
-                    f"{quote(detail['owner']['login'])}:{quote(detail['default_branch'])}"
+                    f"{quote(detail['owner']['login'])}:{quote(detail['default_branch'])}",
+                    retry_forbidden=False,
                 )
                 if compare.status_code in (404, 409, 422):
                     continue
                 if compare.status_code >= 400:
-                    raise RuntimeError(
-                        f"Fork comparison failed for {full_name}: {compare.status_code}"
+                    print(
+                        f"[discover] warning: skipped {full_name}; fork comparison returned "
+                        f"GitHub {compare.status_code}",
+                        file=sys.stderr,
                     )
+                    continue
                 if int(compare.json().get("ahead_by", 0)) <= 0:
                     continue
             languages = self.github.get_json(f"/repos/{full_name}/languages")
@@ -210,6 +221,7 @@ class AtlasPipeline:
             print(f"[discover] warning: exclusion did not match {missing}", file=sys.stderr)
 
     def acquire(self) -> None:
+        self._invalidate_snapshots()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         for index, repo in enumerate(rows, 1):
             key = content_hash(repo["pushed_at"], repo["default_branch"])
@@ -263,7 +275,12 @@ class AtlasPipeline:
         }
         return context, low, content_hash(context, {"low_confidence": low})
 
-    def _current_summary_rows(self) -> list[sqlite3.Row]:
+    def _current_summary_rows(self, *, require_provider: bool = False) -> list[sqlite3.Row]:
+        if self._summary_snapshot is not None and (
+            not require_provider
+            or all(row["provider"] == self.summarizer_name for row in self._summary_snapshot)
+        ):
+            return self._summary_snapshot
         repos = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         summaries = {
             row["full_name"]: row for row in self.cache.rows("SELECT * FROM summaries")
@@ -277,7 +294,7 @@ class AtlasPipeline:
                 summary["status"] != "ok",
                 summary["content_hash"] != context_key,
                 summary["prompt_version"] != PROMPT_VERSION,
-                summary["provider"] != self.summarizer_name,
+                require_provider and summary["provider"] != self.summarizer_name,
                 summary["template_version"] != TEMPLATE_VERSION,
             )):
                 stale.append(repo["full_name"])
@@ -292,9 +309,11 @@ class AtlasPipeline:
             )
         if not current:
             raise RuntimeError("No current successful summaries are available.")
+        self._summary_snapshot = current
         return current
 
     def summarize(self) -> None:
+        self._invalidate_snapshots()
         provider = self._summarizer()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         cached_by_name = {
@@ -363,9 +382,10 @@ class AtlasPipeline:
                 f"Summarization failed for {len(failures)} repositories; last-known-good "
                 "summaries were preserved and downstream stages were not run."
             )
-        self._current_summary_rows()
+        self._current_summary_rows(require_provider=True)
 
     def embed(self) -> None:
+        self._invalidate_snapshots()
         embedder = get_embedder(self.embedder_name)
         rows = self._current_summary_rows()
         missing = []
@@ -422,6 +442,8 @@ class AtlasPipeline:
         print(f"[embed] wrote {len(missing)} vectors using {embedder.model_id}")
 
     def _vectors(self) -> tuple[list[str], np.ndarray, str]:
+        if self._vector_snapshot is not None:
+            return self._vector_snapshot
         embedder = get_embedder(self.embedder_name)
         summaries = self._current_summary_rows()
         expected = {row["full_name"]: row["embed_text_hash"] for row in summaries}
@@ -470,7 +492,8 @@ class AtlasPipeline:
         self.effective_embedder_id = model_id
         vector_digest = hashlib.sha256(vectors.round(7).tobytes()).hexdigest()
         key = content_hash(ALGORITHM_VERSION, model_id, names, vector_digest)
-        return names, vectors, key
+        self._vector_snapshot = (names, vectors, key)
+        return self._vector_snapshot
 
     def cluster(self) -> None:
         names, vectors, key = self._vectors()

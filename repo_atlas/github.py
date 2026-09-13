@@ -54,13 +54,23 @@ class GitHubClient:
     def close(self) -> None:
         self.client.close()
 
-    def get(self, path: str, **params: Any) -> httpx.Response:
+    def get(
+        self,
+        path: str,
+        *,
+        retry_forbidden: bool = True,
+        **params: Any,
+    ) -> httpx.Response:
         delay = 1.0
         for attempt in range(6):
             response = self.client.get(path, params=params or None)
             remaining = int(response.headers.get("X-RateLimit-Remaining", "5000"))
             rate_limited = response.status_code == 403 and remaining == 0
-            retryable = response.status_code == 403 or response.status_code == 429 or response.status_code >= 500
+            retryable = (
+                (response.status_code == 403 and (rate_limited or retry_forbidden))
+                or response.status_code == 429
+                or response.status_code >= 500
+            )
             if not retryable:
                 return response
             if attempt == 5:

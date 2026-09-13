@@ -31,10 +31,12 @@ function normalizeHttpUrl(value: unknown, path: string, nullable = false): strin
     try {
       parsed = new URL(`https://${value}`)
     } catch {
+      if (nullable) return null
       throw new Error(`${path} must be a valid URL`)
     }
   }
   if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    if (nullable) return null
     throw new Error(`${path} must use HTTP or HTTPS`)
   }
   return parsed.toString()

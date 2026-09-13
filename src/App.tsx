@@ -25,6 +25,7 @@ const EMPTY_VIEW: ViewState = {
   since: null,
   layoutAlt: false,
 }
+const SOURCE_URL = 'https://github.com/hbmartin/repo-atlas'
 
 const FOCUSABLE = [
   'a[href]',
@@ -58,6 +59,7 @@ export default function App() {
   }, [])
 
   const setView = useCallback((next: ViewState) => {
+    viewRef.current = next
     setViewState(next)
     window.history.replaceState(null, '', writeViewState(next))
   }, [])
@@ -110,6 +112,17 @@ export default function App() {
       document.body.style.overflow = previousOverflow
     }
   }, [closeMobileFilters, mobileFilters])
+
+  useEffect(() => {
+    if (!mobileFilters) return
+    const query = window.matchMedia('(max-width: 1023px)')
+    const closeAtDesktopWidth = () => {
+      if (!query.matches) setMobileFilters(false)
+    }
+    closeAtDesktopWidth()
+    query.addEventListener('change', closeAtDesktopWidth)
+    return () => query.removeEventListener('change', closeAtDesktopWidth)
+  }, [mobileFilters])
 
   useEffect(() => {
     if (!data || !document.modelContext?.registerTool) return
@@ -294,7 +307,7 @@ export default function App() {
           <span>Generated {data.generated_at.slice(0, 10)}</span>
           {data.embedding_model && <span title="Embedding model">{data.embedding_model}</span>}
           <a href="/atlas-list.html">Plain HTML list</a>
-          <a href={`${profileUrl}/repo-atlas`}>Source & method ↗</a>
+          <a href={SOURCE_URL}>Source & method ↗</a>
         </div>
       </footer>
     </div>

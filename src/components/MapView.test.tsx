@@ -3,7 +3,7 @@ import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas } from '../test-fixtures'
 import type { ViewState } from '../types'
-import { clusterLabelX, nearestRepoAtPoint } from '../view-utils'
+import { clusterLabelX, mobileMapTargetY, nearestRepoAtPoint, pointerToMapPoint } from '../view-utils'
 import { MapView } from './MapView'
 
 const view: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
@@ -54,5 +54,50 @@ describe('MapView', () => {
     fireEvent.click(svg, { clientX: 510, clientY: 500, detail: 1 })
     expect(container.querySelector('.touch-target')).toBeNull()
     expect(onSelect).toHaveBeenCalledWith(data.repos[0])
+  })
+
+  it('centers selected repositories in the visible map area above the mobile sheet', () => {
+    expect(mobileMapTargetY({ left: 0, top: 176, width: 390, height: 668 }, 338)).toBeCloseTo(207.69, 1)
+    expect(mobileMapTargetY({ left: 0, top: 0, width: 800, height: 800 }, 480)).toBe(300)
+    expect(pointerToMapPoint(
+      195,
+      176,
+      { left: 0, top: 176, width: 390, height: 668 },
+      { x: 0, y: 0, k: 1 },
+    ).y).toBe(0)
+  })
+
+  it('closes details with Escape even after focus moves outside the map', () => {
+    const data = makeAtlas()
+    const onSelect = vi.fn()
+    render(
+      <MapView
+        data={data}
+        view={{ ...view, repo: data.repos[0].full_name }}
+        visible={new Set([data.repos[0].full_name])}
+        selected={data.repos[0]}
+        onSelect={onSelect}
+      />,
+    )
+    fireEvent.keyDown(window, { key: 'Escape' })
+    expect(onSelect).toHaveBeenCalledWith(null)
+  })
+
+  it('navigates spatially between visible repositories with the arrow keys', () => {
+    const first = makeAtlas().repos[0]
+    const second = { ...first, full_name: 'owner/right', name: 'right', x: 700, x_alt: 700 }
+    const data = makeAtlas([first, second])
+    const onSelect = vi.fn()
+    render(
+      <MapView
+        data={data}
+        view={{ ...view, repo: first.full_name }}
+        visible={new Set(data.repos.map((repo) => repo.full_name))}
+        selected={first}
+        onSelect={onSelect}
+      />,
+    )
+    fireEvent.keyDown(window, { key: 'ArrowRight' })
+    expect(onSelect).toHaveBeenCalledWith(second)
   })
 })

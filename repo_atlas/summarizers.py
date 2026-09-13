@@ -8,6 +8,7 @@ import subprocess
 import tempfile
 from abc import ABC
 from pathlib import Path
+from threading import Lock
 from typing import Any, TypeVar
 
 from pydantic import BaseModel, ValidationError
@@ -65,6 +66,7 @@ def parse_model_json(text: str, model: type[T]) -> T:
     first, last = text.find("{"), text.rfind("}")
     if first >= 0 and last > first:
         candidates.append(text[first:last + 1])
+    validation_error: ValidationError | None = None
     for candidate in candidates:
         try:
             value = json.loads(candidate)
@@ -74,8 +76,16 @@ def parse_model_json(text: str, model: type[T]) -> T:
                     return parse_model_json(wrapped, model)
                 value = wrapped
             return model.model_validate(value)
-        except (json.JSONDecodeError, ValidationError, TypeError):
+        except ValidationError as exc:
+            validation_error = exc
+        except (json.JSONDecodeError, TypeError):
             pass
+    if validation_error:
+        issues = "; ".join(
+            f"{'.'.join(map(str, error['loc']))}: {error['msg']}"
+            for error in validation_error.errors(include_url=False)[:3]
+        )
+        raise ValueError(f"summarizer output failed validation: {issues}") from validation_error
     raise ValueError("summarizer output did not match the required JSON schema")
 
 
@@ -123,7 +133,7 @@ class Summarizer(ABC):
         error = ""
         for attempt in range(3):
             repair = "" if attempt == 0 else (
-                f"\nYour previous response failed validation: {error}. "
+                f"\nYour previous attempt failed: {error}. "
                 "Repair it and return only one bare JSON object."
             )
             try:
@@ -189,14 +199,29 @@ class OpenAISummarizer(Summarizer):
 
     name = "openai"
 
-    def invoke(self, prompt: str, model: type[T], timeout: int = 180) -> T:
+    def __init__(self) -> None:
+        self._clients: dict[int, Any] = {}
+        self._client_lock = Lock()
+
+    def _client(self, timeout: int):
         from openai import OpenAI
 
-        completion = OpenAI(timeout=timeout).beta.chat.completions.parse(
-            model=os.environ.get("ATLAS_SUMMARY_MODEL", "gpt-4o-mini"),
-            messages=[{"role": "user", "content": prompt}],
-            response_format=model,
-        )
+        with self._client_lock:
+            if timeout not in self._clients:
+                self._clients[timeout] = OpenAI(timeout=timeout)
+            return self._clients[timeout]
+
+    def invoke(self, prompt: str, model: type[T], timeout: int = 180) -> T:
+        from openai import OpenAIError
+
+        try:
+            completion = self._client(timeout).beta.chat.completions.parse(
+                model=os.environ.get("ATLAS_SUMMARY_MODEL", "gpt-4o-mini"),
+                messages=[{"role": "user", "content": prompt}],
+                response_format=model,
+            )
+        except OpenAIError as exc:
+            raise RuntimeError(f"openai request failed: {type(exc).__name__}") from exc
         parsed = completion.choices[0].message.parsed
         if parsed is None:
             raise ValueError("openai response did not contain validated structured output")

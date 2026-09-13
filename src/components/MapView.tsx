@@ -11,7 +11,9 @@ import type { AtlasData, AtlasRepo, ViewState } from '../types'
 import {
   clusterLabelX,
   formatDate,
+  mobileMapTargetY,
   nearestRepoAtPoint,
+  nearestRepoInDirection,
   pointerToMapPoint,
   useReducedMotion,
 } from '../view-utils'
@@ -79,7 +81,12 @@ export function MapView({
   const centerRepo = useCallback(
     (repo: AtlasRepo, scale = 2.2) => {
       if (!svgRef.current || !zoomRef.current) return
-      const targetY = window.matchMedia('(max-width: 1023px)').matches ? 210 : 500
+      const bounds = svgRef.current.getBoundingClientRect()
+      const panelTop = document.querySelector<HTMLElement>('.detail-panel.populated')
+        ?.getBoundingClientRect().top
+      const targetY = window.matchMedia('(max-width: 1023px)').matches
+        ? mobileMapTargetY(bounds, panelTop ?? bounds.top + bounds.height * 0.4)
+        : 500
       const next = zoomIdentity
         .translate(500, targetY)
         .scale(scale)
@@ -94,6 +101,42 @@ export function MapView({
   useEffect(() => {
     if (selected) centerRepo(selected)
   }, [selected, view.layoutAlt, centerRepo])
+
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (!selected || event.defaultPrevented || svgRef.current?.closest('[inert]')) return
+      const target = event.target
+      if (target instanceof HTMLElement && (
+        target.isContentEditable || target.matches('input, textarea, select')
+      )) return
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        onSelect(null)
+        return
+      }
+      const direction = {
+        ArrowLeft: [-1, 0],
+        ArrowRight: [1, 0],
+        ArrowUp: [0, -1],
+        ArrowDown: [0, 1],
+      }[event.key]
+      if (!direction) return
+      const next = nearestRepoInDirection(
+        data.repos,
+        visible,
+        selected,
+        direction[0],
+        direction[1],
+        view.layoutAlt,
+      )
+      if (next) {
+        event.preventDefault()
+        onSelect(next)
+      }
+    }
+    window.addEventListener('keydown', handleKeyDown)
+    return () => window.removeEventListener('keydown', handleKeyDown)
+  }, [data.repos, onSelect, selected, view.layoutAlt, visible])
 
   const neighbors = selected?.neighbors
     .map((neighbor) => reposByName.get(neighbor.full_name))
@@ -142,6 +185,7 @@ export function MapView({
         ref={svgRef}
         className="atlas-map"
         viewBox="0 0 1000 1000"
+        preserveAspectRatio="xMidYMin meet"
         role="group"
         aria-label="Semantic map of public GitHub repositories"
         onPointerDown={(event) => {
@@ -237,8 +281,6 @@ export function MapView({
                   if (event.key === 'Enter' || event.key === ' ') {
                     event.preventDefault()
                     onSelect(repo)
-                  } else if (event.key === 'Escape' && isSelected) {
-                    onSelect(null)
                   }
                 }}
                 onClick={(event) => {

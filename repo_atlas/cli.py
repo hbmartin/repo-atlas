@@ -30,6 +30,26 @@ def project_root() -> Path:
     raise typer.BadParameter("Run atlas from the Repo Atlas project directory.")
 
 
+def command_major_version(command: str) -> int | None:
+    executable = shutil.which(command)
+    if not executable:
+        return None
+    try:
+        result = subprocess.run(
+            [executable, "--version"],
+            capture_output=True,
+            text=True,
+            check=False,
+            stdin=subprocess.DEVNULL,
+            timeout=5,
+        )
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    digits = "".join(character if character.isdigit() else " " for character in result.stdout)
+    first = digits.split()
+    return int(first[0]) if result.returncode == 0 and first else None
+
+
 @app.callback()
 def main(version: bool = typer.Option(False, "--version", is_eager=True)) -> None:
     if version:
@@ -88,18 +108,8 @@ def doctor(
     except (GitHubError, OSError):
         github_authenticated = False
 
-    def major_version(command: str) -> int | None:
-        if not shutil.which(command):
-            return None
-        result = subprocess.run(
-            [command, "--version"], capture_output=True, text=True, check=False,
-        )
-        digits = "".join(character if character.isdigit() else " " for character in result.stdout)
-        first = digits.split()
-        return int(first[0]) if result.returncode == 0 and first else None
-
-    node_major = major_version("node")
-    pnpm_major = major_version("pnpm")
+    node_major = command_major_version("node")
+    pnpm_major = command_major_version("pnpm")
     checks = {
         "GitHub authentication": github_authenticated,
         f"{summarizer} summarizer": (

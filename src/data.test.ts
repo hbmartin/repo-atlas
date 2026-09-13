@@ -33,6 +33,8 @@ describe('atlas data utilities', () => {
   it('validates nested data and normalizes optional homepages', () => {
     const data = makeAtlas([makeRepo({ homepage: 'example.com' })])
     expect(validateAtlas(data).repos[0].homepage).toBe('https://example.com/')
+    expect(validateAtlas(makeAtlas([makeRepo({ homepage: 'coming soon' })])).repos[0].homepage).toBeNull()
+    expect(validateAtlas(makeAtlas([makeRepo({ homepage: 'javascript:alert(1)' })])).repos[0].homepage).toBeNull()
     expect(() => validateAtlas(makeAtlas([makeRepo({ pushed_at: 'invalid' })]))).toThrow('invalid date')
   })
   it('rejects duplicate region labels that would make filters ambiguous', () => {

@@ -1,9 +1,12 @@
+from types import SimpleNamespace
+
 import pytest
 
 from repo_atlas.models import RepoSummary
 from repo_atlas.summarizers import (
     CodexSummarizer,
     GeminiSummarizer,
+    OpenAISummarizer,
     parse_model_json,
     safe_subprocess_env,
 )
@@ -36,7 +39,7 @@ def test_parser_normalizes_unwanted_register():
 def test_parser_rejects_schema_word_limits_for_repair():
     value = {**VALID, "platform": "Chromium based browsers including Google Chrome"}
     import json
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="platform"):
         parse_model_json(json.dumps(value), RepoSummary)
 
 
@@ -124,3 +127,38 @@ def test_timeout_kills_the_cli_process_group(monkeypatch):
     with pytest.raises(RuntimeError, match="timed out"):
         CodexSummarizer().invoke("prompt", RepoSummary, timeout=1)
     assert killed and killed[0][0] == 1234
+
+
+def test_openai_sdk_errors_are_retried_without_leaking_details(monkeypatch):
+    import openai
+
+    calls = []
+
+    def fail(**_kwargs):
+        calls.append(1)
+        raise openai.OpenAIError("secret provider detail")
+
+    monkeypatch.setattr(openai, "OpenAI", fail)
+    with pytest.raises(RuntimeError, match="OpenAIError") as caught:
+        OpenAISummarizer().invoke_with_repairs("prompt", RepoSummary)
+    assert len(calls) == 3
+    assert "secret provider detail" not in str(caught.value)
+
+
+def test_openai_client_is_reused_for_matching_timeouts(monkeypatch):
+    import openai
+
+    clients = []
+    completion = SimpleNamespace(
+        choices=[SimpleNamespace(message=SimpleNamespace(parsed=RepoSummary.model_validate(VALID)))]
+    )
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            chat=SimpleNamespace(completions=SimpleNamespace(parse=lambda **_kwargs: completion))
+        )
+    )
+    monkeypatch.setattr(openai, "OpenAI", lambda **_kwargs: clients.append(client) or client)
+    summarizer = OpenAISummarizer()
+    summarizer.invoke("first", RepoSummary)
+    summarizer.invoke("second", RepoSummary)
+    assert clients == [client]
