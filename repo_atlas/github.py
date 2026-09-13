@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import os
 import subprocess
+import sys
 import time
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -37,6 +38,7 @@ class GitHubClient:
     token: str
     api_url: str = "https://api.github.com"
     timeout: float = 45.0
+    max_rate_limit_wait: float = 3660.0
 
     def __post_init__(self) -> None:
         self.client = httpx.Client(
@@ -74,6 +76,10 @@ class GitHubClient:
                 or response.status_code >= 500
             )
             if not retryable:
+                reset = int(response.headers.get("X-RateLimit-Reset", "0"))
+                if response.status_code < 400 and remaining < 100 and reset > 0:
+                    quota_wait = max(0, reset - int(time.time()) + 1)
+                    self._wait_for_rate_limit(quota_wait, reset)
                 return response
             if attempt == 5:
                 break
@@ -81,11 +87,6 @@ class GitHubClient:
                 reset = int(response.headers.get("X-RateLimit-Reset", "0"))
                 if remaining == 0 and reset > 0:
                     retry_after = max(0, reset - int(time.time()) + 1)
-                    if retry_after > 60:
-                        raise GitHubError(
-                            "GitHub rate limit exhausted; retry after "
-                            f"{time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}."
-                        )
                 else:
                     try:
                         retry_after = float(retry_after_header or delay)
@@ -96,9 +97,29 @@ class GitHubClient:
                     retry_after = float(response.headers.get("Retry-After", delay))
                 except ValueError:
                     retry_after = delay
-            time.sleep(retry_after)
+            if rate_limited:
+                self._wait_for_rate_limit(retry_after, reset)
+            else:
+                time.sleep(retry_after)
             delay = min(delay * 2, 16)
         raise GitHubError(f"GitHub {last_status} request failed after retries: {path}")
+
+    def _wait_for_rate_limit(self, delay: float, reset: int) -> None:
+        if delay > self.max_rate_limit_wait:
+            reset_note = (
+                f"; retry after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}"
+                if reset > 0 else ""
+            )
+            raise GitHubError(
+                f"GitHub rate limit requires waiting {delay:.0f} seconds{reset_note}."
+            )
+        if delay > 60:
+            print(
+                f"[github] rate limited; waiting {delay:.0f} seconds before continuing",
+                file=sys.stderr,
+                flush=True,
+            )
+        time.sleep(delay)
 
     def get_json(self, path: str, **params: Any) -> Any:
         response = self.get(path, **params)

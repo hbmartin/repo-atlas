@@ -7,7 +7,7 @@ import math
 import os
 import sqlite3
 import sys
-from collections import defaultdict
+from collections import Counter, defaultdict
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 from pathlib import Path
@@ -25,8 +25,13 @@ from .layouts import (
     postprocess_layout,
     projection_neighbor_counts,
 )
-from .models import ClusterLabel, RepoSummary
-from .summarizers import get_summarizer
+from .models import UNCLUSTERED_LABEL, ClusterLabel, RepoSummary
+from .summarizers import (
+    SummarizerCancelledError,
+    SummarizerConfigurationError,
+    get_summarizer,
+    openai_summary_model,
+)
 
 STAGES = ("discover", "acquire", "summarize", "embed", "cluster", "label", "project", "emit")
 PROMPT_VERSION = "summary-v2"
@@ -67,8 +72,7 @@ def month(value: str) -> str:
 
 def summarizer_cache_id(name: str) -> str:
     if name == "openai":
-        model = os.environ.get("ATLAS_SUMMARY_MODEL", "gpt-4o-mini").strip() or "gpt-4o-mini"
-        return f"openai:{model}"
+        return f"openai:{openai_summary_model()}"
     return name
 
 
@@ -82,6 +86,7 @@ class AtlasPipeline:
         yes: bool = False,
         allow_fallback: bool = False,
         allow_agent_summarizer: bool = False,
+        best_effort: bool = False,
     ):
         self.root = root
         self.cache = Cache(root / ".atlas" / "cache.db")
@@ -92,6 +97,7 @@ class AtlasPipeline:
         self.yes = yes
         self.allow_fallback = allow_fallback
         self.allow_agent_summarizer = allow_agent_summarizer
+        self.best_effort = best_effort
         self.run_id = datetime.now(UTC).strftime("%Y%m%dT%H%M%S.%fZ")
         self.started_at = now()
         self.analysis: dict | None = None
@@ -100,6 +106,7 @@ class AtlasPipeline:
         self.effective_embedder_id: str | None = None
         self._summary_snapshot: list[sqlite3.Row] | None = None
         self._vector_snapshot: tuple[list[str], np.ndarray, str] | None = None
+        self._best_effort_excluded: set[str] = set()
 
     def _invalidate_snapshots(self) -> None:
         self._summary_snapshot = None
@@ -152,9 +159,13 @@ class AtlasPipeline:
 
     def discover(self) -> None:
         self._invalidate_snapshots()
+        self._best_effort_excluded.clear()
         excluded = self._exclude_names()
         matched_exclusions: set[str] = set()
         seen: set[str] = set()
+        cached_names = {
+            row["full_name"] for row in self.cache.rows("SELECT full_name FROM repos")
+        }
         items = list(self.github.paginate(
             "/user/repos", visibility="public", affiliation="owner", sort="full_name",
         ))
@@ -183,11 +194,15 @@ class AtlasPipeline:
                 if compare.status_code in (404, 409, 422):
                     continue
                 if compare.status_code >= 400:
+                    preserved = full_name in cached_names
                     print(
-                        f"[discover] warning: skipped {full_name}; fork comparison returned "
-                        f"GitHub {compare.status_code}",
+                        f"[discover] warning: could not verify {full_name}; fork comparison "
+                        f"returned GitHub {compare.status_code}"
+                        f"{' and cached data was preserved' if preserved else ''}",
                         file=sys.stderr,
                     )
+                    if preserved:
+                        seen.add(full_name)
                     continue
                 if int(compare.json().get("ahead_by", 0)) <= 0:
                     continue
@@ -232,6 +247,7 @@ class AtlasPipeline:
 
     def acquire(self) -> None:
         self._invalidate_snapshots()
+        self._best_effort_excluded.clear()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         for index, repo in enumerate(rows, 1):
             key = content_hash(ACQUIRE_VERSION, repo["pushed_at"], repo["default_branch"])
@@ -300,7 +316,7 @@ class AtlasPipeline:
         for repo in repos:
             _context, _low, context_key = self._summary_context(repo)
             summary = summaries.get(repo["full_name"])
-            if not summary or any((
+            if repo["full_name"] in self._best_effort_excluded or not summary or any((
                 summary["status"] != "ok",
                 summary["content_hash"] != context_key,
                 summary["prompt_version"] != PROMPT_VERSION,
@@ -311,12 +327,22 @@ class AtlasPipeline:
             else:
                 current.append(summary)
         if stale:
-            sample = ", ".join(stale[:3])
-            suffix = "…" if len(stale) > 3 else ""
-            raise RuntimeError(
-                f"{len(stale)} repositories lack a current successful summary ({sample}{suffix}). "
-                "Run the summarize stage first."
-            )
+            if self.best_effort:
+                self._best_effort_excluded.update(stale)
+                sample = ", ".join(stale[:3])
+                suffix = "…" if len(stale) > 3 else ""
+                print(
+                    f"[summarize] best-effort mode omitted {len(stale)} repositories without "
+                    f"current summaries ({sample}{suffix})",
+                    file=sys.stderr,
+                )
+            else:
+                sample = ", ".join(stale[:3])
+                suffix = "…" if len(stale) > 3 else ""
+                raise RuntimeError(
+                    f"{len(stale)} repositories lack a current successful summary "
+                    f"({sample}{suffix}). Run the summarize stage first."
+                )
         if not current:
             raise RuntimeError("No current successful summaries are available.")
         self._summary_snapshot = current
@@ -324,6 +350,7 @@ class AtlasPipeline:
 
     def summarize(self) -> None:
         self._invalidate_snapshots()
+        self._best_effort_excluded.clear()
         provider = self._summarizer()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         cached_by_name = {
@@ -364,6 +391,8 @@ class AtlasPipeline:
                     hashlib.sha256(text.encode()).hexdigest(), TEMPLATE_VERSION, low, "ok", now(),
                 )
                 failure = None
+            except (SummarizerConfigurationError, SummarizerCancelledError):
+                raise
             except Exception as exc:  # noqa: BLE001 - isolate individual model failures
                 error_kind = type(exc).__name__
                 error_message = str(exc)
@@ -401,10 +430,12 @@ class AtlasPipeline:
                 provider.cancel()
                 raise
         if failures:
-            raise RuntimeError(
-                f"Summarization failed for {len(failures)} repositories; last-known-good "
-                "summaries were preserved and downstream stages were not run."
-            )
+            if not self.best_effort:
+                raise RuntimeError(
+                    f"Summarization failed for {len(failures)} repositories; last-known-good "
+                    "summaries were preserved and downstream stages were not run."
+                )
+            self._best_effort_excluded.update(failures)
         self._current_summary_rows(require_provider=True)
 
     def embed(self) -> None:
@@ -596,22 +627,61 @@ class AtlasPipeline:
             override = overrides.get(cluster_id)
             stage_key = content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id)
             cached = label_cache.get(stage_key)
+            value: ClusterLabel | None = None
             if override:
                 value = override
             elif cached:
-                value = ClusterLabel.model_validate(cached)
-            else:
+                try:
+                    value = ClusterLabel.model_validate(cached)
+                except ValidationError as exc:
+                    print(
+                        f"[label] ignored invalid cached label for cluster {cluster_id}: {exc}",
+                        file=sys.stderr,
+                    )
+            if value is None:
                 provider = provider or self._summarizer()
                 descriptions = [summaries[name].one_liner for name in members[cluster_id]][:40]
-                value = provider.label(descriptions)
-                if value.label.casefold() in used | reserved:
-                    value = provider.label(descriptions, collision=value.label)
-                self.cache.set_stage("label", stage_key, value.model_dump(), now())
+                try:
+                    value = provider.label(descriptions)
+                    if value.label.casefold() in used | reserved:
+                        value = provider.label(descriptions, collision=value.label)
+                    self.cache.set_stage("label", stage_key, value.model_dump(), now())
+                except (SummarizerConfigurationError, SummarizerCancelledError):
+                    raise
+                except (OSError, RuntimeError, ValueError) as exc:
+                    value = self._fallback_cluster_label(cluster_id, members[cluster_id], summaries)
+                    print(
+                        f"[label] warning: model labeling failed for cluster {cluster_id}; "
+                        f"using {value.label!r}: {type(exc).__name__}: {exc}",
+                        file=sys.stderr,
+                    )
             if not override:
                 value = self._deduplicate_label(value, cluster_id, used | reserved)
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
             print(f"[label] {cluster_id}: {value.label}")
+
+    @staticmethod
+    def _fallback_cluster_label(
+        cluster_id: int,
+        names: list[str],
+        summaries: dict[str, RepoSummary],
+    ) -> ClusterLabel:
+        domains = [
+            summaries[name].domain.strip().casefold()
+            for name in names
+            if summaries[name].domain.strip().casefold() not in {"unclear", "unclustered"}
+        ]
+        if domains:
+            counts = Counter(domains)
+            candidate = min(counts, key=lambda value: (-counts[value], value)).title()
+            gloss = f"Repositories focused on {candidate.lower()}."
+            if len(gloss) > 100:
+                gloss = "Repositories with related technical goals."
+        else:
+            candidate = f"Cluster {cluster_id + 1}"
+            gloss = "Repositories with related technical goals."
+        return ClusterLabel(label=candidate, gloss=gloss)
 
     def _validated_override(self, row: sqlite3.Row) -> ClusterLabel:
         try:
@@ -620,8 +690,11 @@ class AtlasPipeline:
             # Cache schema v1 allowed arbitrary override text. Preserve as much
             # of that user choice as the current public-data contract permits.
             words = str(row["label"] or "").strip().split()[:4]
+            normalized_label = " ".join(words) or "Unlabeled"
+            if normalized_label.casefold() == UNCLUSTERED_LABEL.casefold():
+                normalized_label = "Unlabeled"
             value = ClusterLabel(
-                label=" ".join(words) or "Unlabeled",
+                label=normalized_label,
                 gloss=str(row["gloss"] or "").strip()[:100],
             )
             self.cache.execute(
@@ -661,7 +734,7 @@ class AtlasPipeline:
             raise RuntimeError(
                 f"Locked label overrides must be unique; resolve clusters {clusters}."
             )
-        return signatures, overrides, set(by_label)
+        return signatures, overrides, set(by_label) | {UNCLUSTERED_LABEL.casefold()}
 
     def _restore_labels(self, analysis: dict) -> None:
         members: dict[int, list[str]] = defaultdict(list)
@@ -680,7 +753,10 @@ class AtlasPipeline:
             if override:
                 value = override
             elif cached:
-                value = ClusterLabel.model_validate(cached)
+                try:
+                    value = ClusterLabel.model_validate(cached)
+                except ValidationError:
+                    continue
             else:
                 continue
             if not override:
@@ -896,8 +972,12 @@ class AtlasPipeline:
             )
         names = projected["names"]
         self._current_summary_rows()
+        placeholders = ",".join("?" for _ in names)
         repo_rows = self.cache.rows(
-            "SELECT r.*,s.summary_json,s.low_confidence FROM repos r JOIN summaries s USING(full_name) ORDER BY r.full_name"
+            f"""SELECT r.*,s.summary_json,s.low_confidence FROM repos r
+            JOIN summaries s USING(full_name)
+            WHERE r.full_name IN ({placeholders}) ORDER BY r.full_name""",
+            tuple(names),
         )
         rows_by_name = {row["full_name"]: row for row in repo_rows}
         if set(rows_by_name) != set(names):
@@ -1033,6 +1113,10 @@ class AtlasPipeline:
             "| Layout | KNN-10 | Trustworthiness | Contour overlap | Label collisions |",
             "|---|---:|---:|---:|---:|",
         ]
+        if self._best_effort_excluded:
+            lines[6:6] = [
+                f"- Best-effort omissions: {len(self._best_effort_excluded)}",
+            ]
         for layout in ("umap", "force"):
             value = metrics[layout]
             lines.append(f"| {layout} | {value['knn_10_preservation']:.4f} | {value['trustworthiness']:.4f} | {value['contour_overlap']:.4f} | {value['label_collisions']} |")

@@ -14,6 +14,7 @@ from .cache import Cache
 from .github import GitHubClient, GitHubError, resolve_token
 from .models import ClusterLabel
 from .pipeline import STAGES, AtlasPipeline, now
+from .summarizers import SummarizerConfigurationError
 
 app = typer.Typer(help="Build and inspect the Repo Atlas offline data bundle.", no_args_is_help=True)
 labels_app = typer.Typer(help="Inspect or override generated region labels.")
@@ -74,6 +75,17 @@ def run(
         "--allow-agent-summarizer",
         help="Opt in to a local agent CLI that may access files or provider credentials.",
     ),
+    best_effort: bool = typer.Option(
+        False,
+        "--best-effort",
+        help="Omit repositories without current summaries instead of stopping the run.",
+    ),
+    max_rate_limit_wait: int = typer.Option(
+        3660,
+        "--max-rate-limit-wait",
+        min=0,
+        help="Maximum seconds to wait for GitHub quota reset; 0 fails immediately.",
+    ),
 ) -> None:
     selected = {value.strip() for value in only.split(",") if value.strip()} if only else None
     if from_stage not in STAGES:
@@ -86,13 +98,19 @@ def run(
             raise typer.BadParameter(str(exc)) from exc
     else:
         token = "unused"
-    github = GitHubClient(token) if token != "unused" else None
+    github = (
+        GitHubClient(token, max_rate_limit_wait=max_rate_limit_wait)
+        if token != "unused" else None
+    )
     try:
         pipeline = AtlasPipeline(
             project_root(), github, summarizer, embedder, yes, allow_fallback,
-            allow_agent_summarizer,
+            allow_agent_summarizer, best_effort,
         )
-        pipeline.run(from_stage, selected)
+        try:
+            pipeline.run(from_stage, selected)
+        except SummarizerConfigurationError as exc:
+            raise typer.BadParameter(str(exc)) from exc
     finally:
         if github:
             github.close()
@@ -160,7 +178,7 @@ def labels_show() -> None:
 @labels_app.command("set")
 def labels_set(
     assignment: str = typer.Argument(..., help="ID=LABEL"),
-    lock: bool = typer.Option(True, "--lock/--unlock"),
+    lock: bool = typer.Option(True, "--lock"),
     gloss: str | None = typer.Option(None),
 ) -> None:
     if "=" not in assignment:
@@ -179,11 +197,48 @@ def labels_set(
         value = ClusterLabel(label=label.strip(), gloss=gloss or rows[0]["gloss"] or "")
     except ValidationError as exc:
         raise typer.BadParameter(str(exc)) from exc
-    cache.execute(
-        "INSERT OR REPLACE INTO label_overrides VALUES (?,?,?,?,?)",
-        (rows[0]["signature"], value.label, value.gloss, bool(lock), now()),
+    with cache.connect() as con:
+        active = list(con.execute(
+            """SELECT c.cluster_id,o.label FROM clusters c
+            JOIN label_overrides o ON o.signature=c.signature
+            WHERE c.run_id=(SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1)
+            AND c.cluster_id<>? AND o.locked=1""",
+            (cluster_id,),
+        ))
+        duplicate = next(
+            (row for row in active if row["label"].casefold() == value.label.casefold()),
+            None,
+        )
+        if duplicate:
+            raise typer.BadParameter(
+                f"Label {value.label!r} is already locked for cluster {duplicate['cluster_id']}."
+            )
+        con.execute(
+            "INSERT OR REPLACE INTO label_overrides VALUES (?,?,?,?,?)",
+            (rows[0]["signature"], value.label, value.gloss, bool(lock), now()),
+        )
+    typer.echo(f"Set cluster {cluster_id} to {value.label!r} and locked it.")
+
+
+@labels_app.command("unlock")
+def labels_unlock(cluster_id: int = typer.Argument(..., help="Cluster ID")) -> None:
+    cache = Cache(project_root() / ".atlas" / "cache.db")
+    rows = cache.rows(
+        """SELECT signature FROM clusters
+        WHERE run_id=(SELECT run_id FROM runs ORDER BY started_at DESC LIMIT 1) AND cluster_id=?""",
+        (cluster_id,),
     )
-    typer.echo(f"Set cluster {cluster_id} to {value.label!r}{' and locked it' if lock else ' and unlocked it'}.")
+    if not rows:
+        raise typer.BadParameter(f"Cluster {cluster_id} does not exist in the latest run.")
+    with cache.connect() as con:
+        removed = con.execute(
+            "DELETE FROM label_overrides WHERE signature=?",
+            (rows[0]["signature"],),
+        ).rowcount
+    if removed:
+        typer.echo(f"Unlocked cluster {cluster_id}; generated labels will be used again.")
+    else:
+        typer.echo(f"Cluster {cluster_id} has no label override.")
 
 
 @cache_app.command("stats")

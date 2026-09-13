@@ -37,15 +37,18 @@ Runs are resumable and stage-addressable:
 uv run atlas run --from embed
 uv run atlas run --only discover,acquire
 uv run atlas run --allow-fallback
+uv run atlas run --best-effort
+uv run atlas run --max-rate-limit-wait 3660
 uv run atlas run --summarizer claude --allow-agent-summarizer
 uv run atlas report
 uv run atlas labels show
-uv run atlas labels set '3=Mobile Infrastructure' --lock
+uv run atlas labels set '3=Mobile Infrastructure'
+uv run atlas labels unlock 3
 uv run atlas cache stats
 uv run atlas cache prune --keep-runs 20 --keep-stage-entries 20
 ```
 
-Each repository is committed to `.atlas/cache.db` as it completes. Summaries are frozen against content, prompt, provider, and template versions; unchanged runs make no model calls. A failed refresh is recorded separately and never overwrites the last good summary. Incremental vectors are added automatically because model-specific rows do not overwrite one another. A complete hosted corpus always wins over fallback vectors; fallback use still requires `--allow-fallback`.
+Each repository is committed to `.atlas/cache.db` as it completes. Summaries are frozen against content, prompt, provider, and template versions; unchanged runs make no model calls. A failed refresh is recorded separately and never overwrites the last good summary. Runs require a complete current summary corpus by default; `--best-effort` explicitly permits failed repositories to be omitted without publishing their stale summaries. Incremental vectors are added automatically because model-specific rows do not overwrite one another. A complete hosted corpus always wins over fallback vectors; fallback use still requires `--allow-fallback`. GitHub quota resets are awaited for up to 3660 seconds by default; lower that bound with `--max-rate-limit-wait` when fail-fast behavior is preferred.
 
 ## Method
 

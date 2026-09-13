@@ -43,4 +43,9 @@ describe('atlas data utilities', () => {
     data.stats.cluster_count = 2
     expect(() => validateAtlas(data)).toThrow('Duplicate cluster label')
   })
+  it('reserves the Unclustered region name for noise repositories', () => {
+    const data = makeAtlas()
+    data.clusters[0].label = 'Unclustered'
+    expect(() => validateAtlas(data)).toThrow('reserved')
+  })
 })

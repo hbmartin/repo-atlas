@@ -86,13 +86,22 @@ export function nearestRepoAtPoint(
     const squared = dx * dx + dy * dy
     const hitRadius = Math.max(maxDistance, drawnRadius(repo))
     if (squared > hitRadius * hitRadius) continue
-    if (repo.full_name === preferredFullName) return repo
-    if (squared <= nearestSquared) {
+    const winsTie = squared === nearestSquared && (
+      repo.full_name === preferredFullName
+      || (nearest?.full_name !== preferredFullName && (
+        !nearest || repo.full_name.localeCompare(nearest.full_name) < 0
+      ))
+    )
+    if (squared < nearestSquared || winsTie) {
       nearest = repo
       nearestSquared = squared
     }
   }
   return nearest
+}
+
+export function clusterGlossesVisible(zoomScale: number, mapSize: number) {
+  return zoomScale < 1.5 && mapSize >= 700
 }
 
 export function clusterLabelX(

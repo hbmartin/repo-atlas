@@ -81,6 +81,9 @@ export function validateAtlas(value: unknown): AtlasData {
   data.clusters.forEach((cluster, index) => {
     requireFinite(cluster.id, `clusters[${index}].id`)
     requireString(cluster.label, `clusters[${index}].label`)
+    if (cluster.label.toLocaleLowerCase() === 'unclustered') {
+      throw new Error('Cluster label Unclustered is reserved')
+    }
     if (typeof cluster.gloss !== 'string') throw new Error(`clusters[${index}].gloss must be a string`)
     requireFinite(cluster.member_count, `clusters[${index}].member_count`)
     if (clusterIds.has(cluster.id)) throw new Error(`Duplicate cluster ${cluster.id}`)
