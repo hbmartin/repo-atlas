@@ -8,6 +8,6 @@ Include the affected version or commit, reproduction steps, expected impact, and
 
 ## Security boundaries
 
-The deployed site is static and does not receive credentials or call GitHub or model APIs. Build-time credentials are used only by the local Python pipeline. Summarizer subprocesses receive a small provider-specific allowlist of environment variables instead of inheriting the full parent environment.
+The deployed site is static and does not receive credentials or call GitHub or model APIs. Build-time credentials are used only by the local Python pipeline. Summarizer subprocesses receive a small provider-specific allowlist of environment variables instead of inheriting the full parent environment. The Codex adapter also disables shell, browser, hosted-search, computer-use, app, and image-generation capabilities before submitting untrusted repository evidence.
 
 Generated artifacts can contain public repository metadata and model-produced text. Review `public/atlas.json`, `public/atlas-list.html`, and `uv run atlas report` before publishing a snapshot. Never commit `.atlas/`, `.env` files, tokens, or a private exclusion list.

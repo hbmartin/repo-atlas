@@ -10,6 +10,7 @@ ArtifactType = Literal[
 ]
 Maturity = Literal["production", "working", "prototype", "abandoned", "unclear"]
 Confidence = Literal["high", "low"]
+UNCLUSTERED_LABEL = "Unclustered"
 
 
 class RepoSummary(BaseModel):
@@ -81,7 +82,10 @@ class ClusterLabel(BaseModel):
             raise ValueError("label must not be empty")
         if len(words) > 4:
             raise ValueError("label must contain at most four words")
-        return " ".join(words)
+        label = " ".join(words)
+        if label.casefold() == UNCLUSTERED_LABEL.casefold():
+            raise ValueError(f"{UNCLUSTERED_LABEL!r} is reserved for repositories without a cluster")
+        return label
 
 
 class Neighbor(BaseModel):

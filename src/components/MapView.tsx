@@ -9,6 +9,7 @@ import {
 } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, ViewState } from '../types'
 import {
+  clusterGlossesVisible,
   clusterLabelX,
   formatDate,
   mobileMapTargetY,
@@ -179,7 +180,7 @@ export function MapView({
     }
     return names
   }, [data.repos, pointX, pointY, transform, visible])
-  const showClusterGlosses = transform.k < 1.5 && svgSize >= 1150
+  const showClusterGlosses = clusterGlossesVisible(transform.k, svgSize)
 
   return (
     <div className="map-shell">

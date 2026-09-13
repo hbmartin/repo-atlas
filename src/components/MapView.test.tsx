@@ -3,7 +3,13 @@ import { cleanup, fireEvent, render } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas } from '../test-fixtures'
 import type { ViewState } from '../types'
-import { clusterLabelX, mobileMapTargetY, nearestRepoAtPoint, pointerToMapPoint } from '../view-utils'
+import {
+  clusterGlossesVisible,
+  clusterLabelX,
+  mobileMapTargetY,
+  nearestRepoAtPoint,
+  pointerToMapPoint,
+} from '../view-utils'
 import { MapView } from './MapView'
 
 const view: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
@@ -39,14 +45,29 @@ describe('MapView', () => {
     expect(nearestRepoAtPoint([first, second], visible, 514, 500, 22, false)).toBe(second)
   })
 
-  it('hits the full drawn radius and favors an already-selected overlapping repo', () => {
+  it('hits the full drawn radius without masking a closer repo with the selection', () => {
     const selected = makeAtlas().repos[0]
     const neighbor = { ...selected, full_name: 'owner/neighbor', name: 'neighbor', x: 524 }
     const visible = new Set([selected.full_name, neighbor.full_name])
     const radius = (repo: typeof selected) => repo.full_name === selected.full_name ? 30 : 6
     expect(nearestRepoAtPoint(
       [selected, neighbor], visible, 525, 500, 5, false, radius, selected.full_name,
+    )).toBe(neighbor)
+  })
+
+  it('uses the selected repository only to break an exact distance tie', () => {
+    const selected = makeAtlas().repos[0]
+    const neighbor = { ...selected, full_name: 'owner/neighbor', name: 'neighbor', x: 510 }
+    const visible = new Set([selected.full_name, neighbor.full_name])
+    expect(nearestRepoAtPoint(
+      [neighbor, selected], visible, 505, 500, 10, false, () => 0, selected.full_name,
     )).toBe(selected)
+  })
+
+  it('shows region glosses on ordinary desktop maps', () => {
+    expect(clusterGlossesVisible(1, 800)).toBe(true)
+    expect(clusterGlossesVisible(1, 600)).toBe(false)
+    expect(clusterGlossesVisible(2, 800)).toBe(false)
   })
 
   it('uses map-level hit testing instead of overlapping transparent circles', () => {

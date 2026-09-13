@@ -67,6 +67,58 @@ def test_rate_limit_uses_one_delay_before_retry(monkeypatch):
         client.close()
 
 
+def test_successful_response_waits_before_quota_is_exhausted(monkeypatch):
+    client = GitHubClient("token")
+    response = SimpleNamespace(
+        status_code=200,
+        headers={"X-RateLimit-Remaining": "99", "X-RateLimit-Reset": "110"},
+    )
+    sleeps = []
+    monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr("repo_atlas.github.time.time", lambda: 100)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", sleeps.append)
+    try:
+        assert client.get("/repos/owner/repo") is response
+        assert sleeps == [11]
+    finally:
+        client.close()
+
+
+def test_rate_limit_waits_across_a_long_quota_reset(monkeypatch):
+    client = GitHubClient("token")
+    responses = iter([
+        SimpleNamespace(
+            status_code=403,
+            headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "3700"},
+        ),
+        SimpleNamespace(status_code=200, headers={}),
+    ])
+    sleeps = []
+    monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: next(responses))
+    monkeypatch.setattr("repo_atlas.github.time.time", lambda: 100)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", sleeps.append)
+    try:
+        assert client.get("/repos/owner/repo").status_code == 200
+        assert sleeps == [3601]
+    finally:
+        client.close()
+
+
+def test_rate_limit_wait_respects_configured_maximum(monkeypatch):
+    client = GitHubClient("token", max_rate_limit_wait=60)
+    response = SimpleNamespace(
+        status_code=403,
+        headers={"X-RateLimit-Remaining": "0", "X-RateLimit-Reset": "3700"},
+    )
+    monkeypatch.setattr(client.client, "get", lambda *_args, **_kwargs: response)
+    monkeypatch.setattr("repo_atlas.github.time.time", lambda: 100)
+    try:
+        with pytest.raises(GitHubError, match="requires waiting 3601 seconds"):
+            client.get("/repos/owner/repo")
+    finally:
+        client.close()
+
+
 def test_429_uses_rate_limit_reset(monkeypatch):
     client = GitHubClient("token")
     responses = iter([

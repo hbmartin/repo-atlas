@@ -15,6 +15,7 @@ from repo_atlas.pipeline import (
     AtlasPipeline,
     embedding_text,
 )
+from repo_atlas.summarizers import SummarizerConfigurationError
 
 SUMMARY = RepoSummary(
     one_liner="A complete, concise repository description.",
@@ -157,6 +158,38 @@ def test_discovery_skips_inaccessible_fork_comparisons(tmp_path):
     assert [row[0] for row in pipeline.cache.rows("SELECT full_name FROM repos")] == ["owner/retained"]
 
 
+def test_discovery_preserves_cached_fork_when_comparison_is_uncertain(tmp_path):
+    fork = {
+        "full_name": "owner/cached-fork", "default_branch": "main", "size": 1,
+        "description": None, "homepage": None, "topics": [], "language": "Python",
+        "stargazers_count": 0, "created_at": "2025-01-01T00:00:00Z",
+        "pushed_at": "2025-01-01T00:00:00Z", "archived": False, "license": None,
+        "fork": True,
+    }
+
+    class FakeGitHub:
+        def paginate(self, *_args, **_kwargs):
+            return [fork]
+
+        def get_json(self, *_args, **_kwargs):
+            return {
+                **fork,
+                "owner": {"login": "owner"},
+                "parent": {"full_name": "upstream/project", "default_branch": "main"},
+            }
+
+        def get(self, *_args, **_kwargs):
+            return SimpleNamespace(status_code=403)
+
+    pipeline = AtlasPipeline(tmp_path, FakeGitHub())
+    insert_repo(pipeline, fork["full_name"])
+    insert_summary_and_fallback(pipeline, fork["full_name"])
+    pipeline.discover()
+    assert pipeline.cache.rows("SELECT full_name FROM repos")[0][0] == fork["full_name"]
+    assert pipeline.cache.rows("SELECT full_name FROM summaries")[0][0] == fork["full_name"]
+    assert pipeline.cache.rows("SELECT full_name FROM embeddings")[0][0] == fork["full_name"]
+
+
 def test_acquire_key_includes_content_processing_version(tmp_path):
     class FakeGitHub:
         readme_calls = 0
@@ -219,6 +252,11 @@ def test_openai_cache_identity_includes_the_selected_model(tmp_path, monkeypatch
     second = AtlasPipeline(tmp_path, None)
     assert first.summary_provider_id == "openai:gpt-4o-mini"
     assert second.summary_provider_id == "openai:gpt-4.1"
+
+    monkeypatch.setenv("ATLAS_SUMMARY_MODEL", "  gpt-4.1  ")
+    assert AtlasPipeline(tmp_path, None).summary_provider_id == "openai:gpt-4.1"
+    monkeypatch.setenv("ATLAS_SUMMARY_MODEL", "   ")
+    assert AtlasPipeline(tmp_path, None).summary_provider_id == "openai:gpt-4o-mini"
 
 
 def test_vectors_are_loaded_once_per_pipeline_snapshot(tmp_path):
@@ -298,6 +336,53 @@ def test_failed_resummary_preserves_last_good_summary_and_aborts(tmp_path, monke
     assert failure["error_message"] == "untrusted model output"
 
 
+def test_best_effort_omits_failed_repository_without_using_stale_summary(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    for name in ("owner/good", "owner/bad"):
+        insert_repo(pipeline, name)
+        insert_summary_and_fallback(pipeline, name)
+    pipeline.cache.execute(
+        "UPDATE repos SET languages_json=? WHERE full_name='owner/bad'",
+        (json.dumps({"Rust": 100}),),
+    )
+
+    class BrokenSummarizer:
+        def summarize(self, *_args, **_kwargs):
+            raise ValueError("untrusted model output")
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: BrokenSummarizer())
+    monkeypatch.setenv("ATLAS_SUMMARY_WORKERS", "1")
+    pipeline.summarize()
+    pipeline._invalidate_snapshots()
+    assert [row["full_name"] for row in pipeline._current_summary_rows()] == ["owner/good"]
+    assert pipeline.cache.rows("SELECT full_name FROM summaries ORDER BY full_name")[0][0] == "owner/bad"
+    assert pipeline.cache.rows("SELECT full_name FROM summary_failures")[0][0] == "owner/bad"
+
+
+def test_summarizer_configuration_failure_aborts_without_per_repo_failures(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None)
+    for name in ("owner/one", "owner/two"):
+        insert_repo(pipeline, name)
+
+    class UnconfiguredSummarizer:
+        def summarize(self, *_args, **_kwargs):
+            raise SummarizerConfigurationError("set OPENAI_API_KEY")
+
+        def cancel(self):
+            pass
+
+    monkeypatch.setattr(
+        pipeline_module, "get_summarizer", lambda _name: UnconfiguredSummarizer(),
+    )
+    monkeypatch.setenv("ATLAS_SUMMARY_WORKERS", "1")
+    with pytest.raises(SummarizerConfigurationError, match="set OPENAI_API_KEY"):
+        pipeline.summarize()
+    assert pipeline.cache.rows("SELECT * FROM summary_failures") == []
+
+
 def test_interrupting_summarization_cancels_active_provider_work(tmp_path, monkeypatch):
     pipeline = AtlasPipeline(tmp_path, None)
     insert_repo(pipeline, "owner/repo")
@@ -348,6 +433,24 @@ def test_duplicate_labels_get_stable_bounded_suffixes():
     assert len(result.label.split()) <= 4
 
 
+def test_label_stage_uses_deterministic_fallback_after_model_failures(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None)
+    insert_repo(pipeline, "owner/repo")
+    insert_summary_and_fallback(pipeline, "owner/repo")
+    pipeline.analysis = {
+        "key": "key", "names": ["owner/repo"], "cluster_ids": [0], "algorithm": "none",
+    }
+
+    class BrokenLabeler:
+        def label(self, *_args, **_kwargs):
+            raise RuntimeError("invalid labels")
+
+    monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: BrokenLabeler())
+    pipeline.label()
+    assert pipeline.labels[0].label == "Developer Tools"
+    assert pipeline.cache.rows("SELECT * FROM stage_cache WHERE stage='label'") == []
+
+
 def test_legacy_locked_label_overrides_are_normalized(tmp_path):
     pipeline = AtlasPipeline(tmp_path, None)
     signature = pipeline_module.content_hash(["owner/repo"])
@@ -361,6 +464,17 @@ def test_legacy_locked_label_overrides_are_normalized(tmp_path):
     saved = pipeline.cache.rows("SELECT label,gloss FROM label_overrides")[0]
     assert saved["label"] == "Mobile And Web Infrastructure"
     assert len(saved["gloss"]) == 100
+
+
+def test_legacy_unclustered_override_is_normalized(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None)
+    signature = pipeline_module.content_hash(["owner/repo"])
+    pipeline.cache.execute(
+        "INSERT INTO label_overrides VALUES (?,?,?,?,?)",
+        (signature, "Unclustered", "Legacy.", True, "old"),
+    )
+    pipeline._restore_labels({"names": ["owner/repo"], "cluster_ids": [0]})
+    assert pipeline.labels[0].label == "Unlabeled"
 
 
 def test_locked_label_override_wins_over_generated_collision(tmp_path):
