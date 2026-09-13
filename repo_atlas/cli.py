@@ -59,7 +59,13 @@ def run(
     if from_stage not in STAGES:
         raise typer.BadParameter(f"Choose --from from: {', '.join(STAGES)}")
     chosen = selected if selected is not None else set(STAGES[STAGES.index(from_stage):])
-    token = resolve_token() if chosen.intersection({"discover", "acquire"}) else "unused"
+    if chosen.intersection({"discover", "acquire"}):
+        try:
+            token = resolve_token()
+        except GitHubError as exc:
+            raise typer.BadParameter(str(exc)) from exc
+    else:
+        token = "unused"
     github = GitHubClient(token) if token != "unused" else None
     try:
         pipeline = AtlasPipeline(

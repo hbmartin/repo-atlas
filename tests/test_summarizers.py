@@ -90,6 +90,16 @@ def test_overlong_one_liner_is_rejected_for_repair():
         parse_model_json(json.dumps(value), RepoSummary)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [("one_liner", "   "), ("what_it_does", "   "), ("what_it_does", "This repository contains")],
+)
+def test_empty_summary_text_is_rejected_for_repair(field, value):
+    import json
+    with pytest.raises(ValueError):
+        parse_model_json(json.dumps({**VALID, field: value}), RepoSummary)
+
+
 def test_timeout_kills_the_cli_process_group(monkeypatch):
     import subprocess
 
@@ -109,6 +119,7 @@ def test_timeout_kills_the_cli_process_group(monkeypatch):
             return "", ""
 
     monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: TimedOutProcess())
+    monkeypatch.setattr("repo_atlas.summarizers.os.name", "posix")
     monkeypatch.setattr("repo_atlas.summarizers.os.killpg", lambda pid, sig: killed.append((pid, sig)))
     with pytest.raises(RuntimeError, match="timed out"):
         CodexSummarizer().invoke("prompt", RepoSummary, timeout=1)

@@ -20,10 +20,15 @@ export function SearchBox({
   }, [query])
   useEffect(() => {
     const listener = (event: KeyboardEvent) => {
-      if (event.key === '/' && document.activeElement !== input.current) {
-        event.preventDefault()
-        input.current?.focus()
-      }
+      if (event.key !== '/' || event.defaultPrevented) return
+      const target = event.target
+      if (target === input.current) return
+      if (target instanceof HTMLElement && (
+        target.isContentEditable || ['INPUT', 'TEXTAREA', 'SELECT'].includes(target.tagName)
+      )) return
+      if (!input.current || input.current.closest('[inert]')) return
+      event.preventDefault()
+      input.current.focus()
     }
     window.addEventListener('keydown', listener)
     return () => window.removeEventListener('keydown', listener)

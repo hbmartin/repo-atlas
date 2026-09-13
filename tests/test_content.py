@@ -25,6 +25,25 @@ def test_readme_headings_and_badges_inside_fences_are_preserved_as_code():
     assert "Kept." in cleaned
 
 
+def test_readme_fence_closes_only_with_matching_marker_and_length():
+    source = """# Tool
+````md
+```
+~~~
+## License
+![badge](https://img.shields.io/x)
+````
+## Notes
+Kept.
+"""
+    cleaned = clean_readme(source)
+    assert "```" in cleaned
+    assert "~~~" in cleaned
+    assert "## License" in cleaned
+    assert "shields.io" in cleaned
+    assert "Kept." in cleaned
+
+
 def test_file_exclusions_cover_dependencies_and_generated_files():
     assert excluded_path("node_modules/pkg/index.js")
     assert excluded_path("src/schema.generated.ts")

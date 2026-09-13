@@ -19,6 +19,7 @@ BADGE_LINE = re.compile(r"^\s*(?:\[?!?\[.*?(?:badge|shield).*?$|<img[^>]+(?:badg
 HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.IGNORECASE)
+FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
 
 
 def clean_readme(markdown: str | None) -> str:
@@ -28,21 +29,26 @@ def clean_readme(markdown: str | None) -> str:
     lines = text.splitlines()
     output: list[str] = []
     skip_level: int | None = None
-    in_fence = False
+    fence_marker: tuple[str, int] | None = None
     fence_lines = 0
     for line in lines:
-        if line.lstrip().startswith(("```", "~~~")):
-            if not in_fence:
-                in_fence = True
+        fence = FENCE.match(line)
+        if fence_marker is None and fence:
+            marker = fence.group(1)
+            fence_marker = (marker[0], len(marker))
+            fence_lines = 0
+            if skip_level is None:
+                output.append(line)
+            continue
+        if fence_marker is not None and fence:
+            marker = fence.group(1)
+            if marker[0] == fence_marker[0] and len(marker) >= fence_marker[1]:
+                fence_marker = None
                 fence_lines = 0
                 if skip_level is None:
                     output.append(line)
-            else:
-                in_fence = False
-                if skip_level is None:
-                    output.append(line)
-            continue
-        if in_fence:
+                continue
+        if fence_marker is not None:
             if skip_level is None:
                 fence_lines += 1
                 if fence_lines <= 20:

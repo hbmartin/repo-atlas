@@ -60,23 +60,23 @@ class GitHubClient:
             response = self.client.get(path, params=params or None)
             remaining = int(response.headers.get("X-RateLimit-Remaining", "5000"))
             rate_limited = response.status_code == 403 and remaining == 0
-            if rate_limited:
-                reset = int(response.headers.get("X-RateLimit-Reset", "0"))
-                wait = max(0, reset - int(time.time()) + 1)
-                if wait > 60:
-                    raise GitHubError(
-                        f"GitHub rate limit exhausted; retry after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}."
-                    )
-                time.sleep(wait)
             retryable = response.status_code == 403 or response.status_code == 429 or response.status_code >= 500
             if not retryable:
                 return response
             if attempt == 5:
                 break
-            try:
-                retry_after = float(response.headers.get("Retry-After", delay))
-            except ValueError:
-                retry_after = delay
+            if rate_limited:
+                reset = int(response.headers.get("X-RateLimit-Reset", "0"))
+                retry_after = max(0, reset - int(time.time()) + 1)
+                if retry_after > 60:
+                    raise GitHubError(
+                        f"GitHub rate limit exhausted; retry after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}."
+                    )
+            else:
+                try:
+                    retry_after = float(response.headers.get("Retry-After", delay))
+                except ValueError:
+                    retry_after = delay
             time.sleep(retry_after)
             delay = min(delay * 2, 16)
         raise GitHubError(f"GitHub request failed after retries: {path}")

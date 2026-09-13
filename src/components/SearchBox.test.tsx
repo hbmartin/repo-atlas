@@ -23,4 +23,25 @@ describe('SearchBox', () => {
     await user.keyboard('{Enter}')
     expect(onSelect).toHaveBeenCalledWith(exact)
   })
+
+  it('does not claim the slash key from another editable field', async () => {
+    const user = userEvent.setup()
+    render(
+      <>
+        <textarea aria-label="Notes" />
+        <SearchBox repos={[makeRepo()]} onSelect={vi.fn()} />
+      </>,
+    )
+    const notes = screen.getByRole('textbox', { name: 'Notes' })
+    await user.type(notes, '/')
+    expect((notes as HTMLTextAreaElement).value).toBe('/')
+    expect(document.activeElement).not.toBe(screen.getByRole('combobox', { name: 'Search repositories' }))
+  })
+
+  it('focuses search for the slash shortcut outside editable fields', async () => {
+    const user = userEvent.setup()
+    render(<SearchBox repos={[makeRepo()]} onSelect={vi.fn()} />)
+    await user.keyboard('/')
+    expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search repositories' }))
+  })
 })

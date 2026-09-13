@@ -14,8 +14,8 @@ Confidence = Literal["high", "low"]
 
 class RepoSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
-    one_liner: str = Field(max_length=140)
-    what_it_does: str = Field(max_length=800)
+    one_liner: str = Field(min_length=1, max_length=140)
+    what_it_does: str = Field(min_length=1, max_length=800)
     domain: str = Field(max_length=80)
     platform: str = Field(max_length=80)
     techniques: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(max_length=12)
@@ -23,13 +23,16 @@ class RepoSummary(BaseModel):
     maturity: Maturity
     confidence: Confidence
 
-    @field_validator("one_liner", mode="before")
+    @field_validator("one_liner", "what_it_does", mode="before")
     @classmethod
-    def bounded_one_liner(cls, value: str) -> str:
+    def normalize_summary_text(cls, value: str) -> str:
         # Let the field constraint reject overlong model output so the
         # summarizer repair loop can produce a complete sentence. Silently
         # slicing here published broken words and partial Unicode sequences.
-        return str(value).strip()
+        normalized = str(value).strip()
+        if not normalized:
+            raise ValueError("value must not be empty")
+        return normalized
 
     @field_validator("domain", "platform", mode="before")
     @classmethod
@@ -55,6 +58,8 @@ class RepoSummary(BaseModel):
         lowered = value.strip().lower()
         if lowered.startswith("this repository contains"):
             remainder = value.strip()[len("this repository contains"):].lstrip(" :—-")
+            if not remainder:
+                raise ValueError("value must not be empty after normalization")
             return remainder[:1].upper() + remainder[1:]
         return value.strip()
 
