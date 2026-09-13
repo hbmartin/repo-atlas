@@ -104,6 +104,10 @@ class AtlasPipeline:
     def _invalidate_snapshots(self) -> None:
         self._summary_snapshot = None
         self._vector_snapshot = None
+        self.analysis = None
+        self.labels = {}
+        self.final_payload = None
+        self.effective_embedder_id = None
 
     def run(self, start: str = "discover", only: set[str] | None = None) -> None:
         if start not in STAGES:

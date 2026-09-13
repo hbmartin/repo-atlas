@@ -29,7 +29,9 @@ class RepoSummary(BaseModel):
         # Let the field constraint reject overlong model output so the
         # summarizer repair loop can produce a complete sentence. Silently
         # slicing here published broken words and partial Unicode sequences.
-        normalized = str(value).strip()
+        if not isinstance(value, str):
+            raise TypeError("value must be a string")
+        normalized = value.strip()
         if not normalized:
             raise ValueError("value must not be empty")
         return normalized
@@ -37,7 +39,9 @@ class RepoSummary(BaseModel):
     @field_validator("domain", "platform", mode="before")
     @classmethod
     def at_most_four_words(cls, value: str) -> str:
-        normalized = " ".join(str(value).strip().split())
+        if not isinstance(value, str):
+            raise TypeError("value must be a string")
+        normalized = " ".join(value.strip().split())
         if not normalized:
             raise ValueError("value must not be empty")
         if len(normalized.split()) > 4:

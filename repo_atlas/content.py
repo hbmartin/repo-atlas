@@ -19,7 +19,7 @@ BADGE_LINE = re.compile(r"^\s*(?:\[?!?\[.*?(?:badge|shield).*?$|<img[^>]+(?:badg
 HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
 SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.IGNORECASE)
-FENCE = re.compile(r"^\s*(`{3,}|~{3,})")
+FENCE = re.compile(r"^ {0,3}(`{3,}|~{3,})(.*)$")
 NAMED_FILES_CASEFOLDED = frozenset(value.casefold() for value in NAMED_FILES)
 DIRECTORY_PREFIXES_CASEFOLDED = tuple(value.casefold() for value in DIRECTORY_PREFIXES)
 EXTENSIONS_CASEFOLDED = tuple(value.casefold() for value in EXTENSIONS)
@@ -46,7 +46,11 @@ def clean_readme(markdown: str | None) -> str:
             continue
         if fence_marker is not None and fence:
             marker = fence.group(1)
-            if marker[0] == fence_marker[0] and len(marker) >= fence_marker[1]:
+            if (
+                marker[0] == fence_marker[0]
+                and len(marker) >= fence_marker[1]
+                and not fence.group(2).strip()
+            ):
                 fence_marker = None
                 fence_lines = 0
                 if skip_level is None:

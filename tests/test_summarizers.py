@@ -107,6 +107,21 @@ def test_empty_summary_text_is_rejected_for_repair(field, value):
         parse_model_json(json.dumps({**VALID, field: value}), RepoSummary)
 
 
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("one_liner", None),
+        ("what_it_does", 123),
+        ("domain", {"name": "tools"}),
+        ("platform", ["web"]),
+    ],
+)
+def test_non_string_summary_text_is_rejected_for_repair(field, value):
+    import json
+    with pytest.raises(ValueError, match="must be a string"):
+        parse_model_json(json.dumps({**VALID, field: value}), RepoSummary)
+
+
 def test_timeout_kills_the_cli_process_group(monkeypatch):
     import subprocess
 
@@ -127,7 +142,11 @@ def test_timeout_kills_the_cli_process_group(monkeypatch):
 
     monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: TimedOutProcess())
     monkeypatch.setattr("repo_atlas.summarizers.os.name", "posix")
-    monkeypatch.setattr("repo_atlas.summarizers.os.killpg", lambda pid, sig: killed.append((pid, sig)))
+    monkeypatch.setattr(
+        "repo_atlas.summarizers.os.killpg",
+        lambda pid, sig: killed.append((pid, sig)),
+        raising=False,
+    )
     with pytest.raises(RuntimeError, match="timed out"):
         CodexSummarizer().invoke("prompt", RepoSummary, timeout=1)
     assert killed and killed[0][0] == 1234

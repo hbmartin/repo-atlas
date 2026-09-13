@@ -44,6 +44,26 @@ Kept.
     assert "Kept." in cleaned
 
 
+def test_readme_fence_requires_markdown_indentation_and_bare_closer():
+    source = """# Tool
+    ```
+Not fenced.
+````md
+````python
+## License
+Kept inside the fence.
+````
+## Notes
+Kept after the fence.
+"""
+    cleaned = clean_readme(source)
+    assert "Not fenced." in cleaned
+    assert "````python" in cleaned
+    assert "## License" in cleaned
+    assert "Kept inside the fence." in cleaned
+    assert "Kept after the fence." in cleaned
+
+
 def test_file_exclusions_cover_dependencies_and_generated_files():
     assert excluded_path("node_modules/pkg/index.js")
     assert excluded_path("src/schema.generated.ts")

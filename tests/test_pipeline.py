@@ -231,6 +231,23 @@ def test_vectors_are_loaded_once_per_pipeline_snapshot(tmp_path):
     assert second[1] is first[1]
 
 
+def test_source_changes_invalidate_all_derived_in_memory_state(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None)
+    pipeline._summary_snapshot = [SimpleNamespace()]
+    pipeline._vector_snapshot = (["owner/repo"], np.zeros((1, 2)), "key")
+    pipeline.analysis = {"key": "stale"}
+    pipeline.labels = {0: pipeline_module.ClusterLabel(label="Stale", gloss="Old.")}
+    pipeline.final_payload = {"names": ["owner/repo"]}
+    pipeline.effective_embedder_id = "stale-model"
+    pipeline._invalidate_snapshots()
+    assert pipeline._summary_snapshot is None
+    assert pipeline._vector_snapshot is None
+    assert pipeline.analysis is None
+    assert pipeline.labels == {}
+    assert pipeline.final_payload is None
+    assert pipeline.effective_embedder_id is None
+
+
 def test_summary_cache_key_changes_with_language_evidence(tmp_path, monkeypatch):
     pipeline = AtlasPipeline(tmp_path, None)
     insert_repo(pipeline, "owner/repo", {"Python": 100})

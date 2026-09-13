@@ -87,6 +87,7 @@ def parse_model_json(text: str, model: type[T]) -> T:
     if first >= 0 and last > first:
         candidates.append(text[first:last + 1])
     validation_error: ValidationError | None = None
+    type_error: TypeError | None = None
     for candidate in candidates:
         try:
             value = json.loads(candidate)
@@ -98,7 +99,9 @@ def parse_model_json(text: str, model: type[T]) -> T:
             return model.model_validate(value)
         except ValidationError as exc:
             validation_error = exc
-        except (json.JSONDecodeError, TypeError):
+        except TypeError as exc:
+            type_error = exc
+        except json.JSONDecodeError:
             pass
     if validation_error:
         issues = "; ".join(
@@ -106,6 +109,8 @@ def parse_model_json(text: str, model: type[T]) -> T:
             for error in validation_error.errors(include_url=False)[:3]
         )
         raise ValueError(f"summarizer output failed validation: {issues}") from validation_error
+    if type_error:
+        raise ValueError(f"summarizer output failed validation: {type_error}") from type_error
     raise ValueError("summarizer output did not match the required JSON schema")
 
 
