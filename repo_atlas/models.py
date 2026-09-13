@@ -1,9 +1,8 @@
 from __future__ import annotations
 
-from typing import Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
-
 
 ArtifactType = Literal[
     "library", "application", "cli", "service", "experiment", "dataset",
@@ -16,10 +15,10 @@ Confidence = Literal["high", "low"]
 class RepoSummary(BaseModel):
     model_config = ConfigDict(extra="forbid")
     one_liner: str = Field(max_length=140)
-    what_it_does: str
-    domain: str
-    platform: str
-    techniques: list[str]
+    what_it_does: str = Field(max_length=800)
+    domain: str = Field(max_length=80)
+    platform: str = Field(max_length=80)
+    techniques: list[Annotated[str, Field(min_length=1, max_length=80)]] = Field(max_length=12)
     artifact_type: ArtifactType
     maturity: Maturity
     confidence: Confidence
@@ -27,21 +26,36 @@ class RepoSummary(BaseModel):
     @field_validator("one_liner", mode="before")
     @classmethod
     def bounded_one_liner(cls, value: str) -> str:
-        return str(value).strip()[:140].rstrip()
+        # Let the field constraint reject overlong model output so the
+        # summarizer repair loop can produce a complete sentence. Silently
+        # slicing here published broken words and partial Unicode sequences.
+        return str(value).strip()
 
     @field_validator("domain", "platform", mode="before")
     @classmethod
     def at_most_four_words(cls, value: str) -> str:
-        # Agent CLIs do not currently express word-count constraints in JSON Schema.
-        # Normalize an otherwise valid structured response deterministically.
-        return " ".join(str(value).strip().split()[:4])
+        normalized = " ".join(str(value).strip().split())
+        if not normalized:
+            raise ValueError("value must not be empty")
+        if len(normalized.split()) > 4:
+            raise ValueError("value must contain at most four words")
+        return normalized
+
+    @field_validator("techniques", mode="after")
+    @classmethod
+    def normalize_techniques(cls, values: list[str]) -> list[str]:
+        normalized = [" ".join(value.strip().split()) for value in values]
+        if any(not value for value in normalized):
+            raise ValueError("techniques must not contain empty values")
+        return normalized
 
     @field_validator("what_it_does")
     @classmethod
     def consistent_register(cls, value: str) -> str:
         lowered = value.strip().lower()
         if lowered.startswith("this repository contains"):
-            return value.strip()[len("this repository contains"):].lstrip(" :—-").capitalize()
+            remainder = value.strip()[len("this repository contains"):].lstrip(" :—-")
+            return remainder[:1].upper() + remainder[1:]
         return value.strip()
 
 
@@ -56,7 +70,9 @@ class ClusterLabel(BaseModel):
         words = str(value).strip().split()
         if not words:
             raise ValueError("label must not be empty")
-        return " ".join(words[:4])
+        if len(words) > 4:
+            raise ValueError("label must contain at most four words")
+        return " ".join(words)
 
 
 class Neighbor(BaseModel):

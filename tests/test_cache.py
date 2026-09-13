@@ -7,4 +7,21 @@ def test_stage_cache_round_trip(tmp_path):
     assert cache.get_stage("cluster", "key") == {"ids": [1, 2]}
     columns = [row[1] for row in cache.rows("PRAGMA table_info(repos)")]
     assert "readme_cleaned" in columns
+    assert cache.rows("PRAGMA user_version")[0][0] == 2
+    assert cache.rows("PRAGMA table_info(summary_failures)")
 
+
+def test_prune_retains_recent_runs_and_stage_entries(tmp_path):
+    cache = Cache(tmp_path / "cache.db")
+    with cache.connect() as con:
+        for index in range(4):
+            con.execute(
+                "INSERT INTO runs(run_id,started_at) VALUES (?,?)",
+                (f"run-{index}", f"2026-01-0{index + 1}"),
+            )
+            cache.set_stage("cluster", f"cluster-{index}", {"i": index}, f"2026-01-0{index + 1}")
+            cache.set_stage("label", f"label-{index}", {"i": index}, f"2026-01-0{index + 1}")
+            cache.set_stage("project", f"project-{index}", {"i": index}, f"2026-01-0{index + 1}")
+    removed = cache.prune(keep_runs=2, keep_stage_entries=1)
+    assert removed == {"runs_removed": 2, "stage_entries_removed": 9}
+    assert [row[0] for row in cache.rows("SELECT run_id FROM runs ORDER BY run_id")] == ["run-2", "run-3"]

@@ -51,6 +51,7 @@ export interface AtlasRepo {
   is_fork: boolean
   parent_full_name: string | null
   low_confidence: boolean
+  tree_truncated?: boolean
   neighbors: Neighbor[]
 }
 

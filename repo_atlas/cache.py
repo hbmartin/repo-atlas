@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import json
 import sqlite3
+from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
-
+SCHEMA_VERSION = 2
+PRUNABLE_STAGES = ("cluster", "label", "project")
 SCHEMA = """
 PRAGMA foreign_keys = ON;
 CREATE TABLE IF NOT EXISTS repos (
@@ -47,6 +49,14 @@ CREATE TABLE IF NOT EXISTS summaries (
   low_confidence INTEGER NOT NULL DEFAULT 0,
   status TEXT NOT NULL DEFAULT 'ok',
   created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS summary_failures (
+  full_name TEXT PRIMARY KEY REFERENCES repos(full_name) ON DELETE CASCADE,
+  content_hash TEXT NOT NULL,
+  prompt_version TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  error_kind TEXT NOT NULL,
+  failed_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS embeddings (
   full_name TEXT NOT NULL REFERENCES repos(full_name) ON DELETE CASCADE,
@@ -115,7 +125,19 @@ class Cache:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._connection = sqlite3.connect(self.path, check_same_thread=False)
         self._connection.row_factory = sqlite3.Row
+        self._initialize()
+
+    def _initialize(self) -> None:
+        version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
+        if version > SCHEMA_VERSION:
+            raise RuntimeError(
+                f"Cache schema {version} is newer than supported schema {SCHEMA_VERSION}."
+            )
+        # Version zero includes legacy caches created before schema tracking.
+        # Reapplying idempotent DDL adopts those caches without data loss.
         self._connection.executescript(SCHEMA)
+        if version < SCHEMA_VERSION:
+            self._connection.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
         self._connection.commit()
 
     @contextmanager
@@ -158,3 +180,34 @@ class Cache:
             "INSERT OR REPLACE INTO stage_cache VALUES (?, ?, ?, ?)",
             (stage, key, json.dumps(payload, sort_keys=True), now),
         )
+
+    def prune(self, keep_runs: int = 20, keep_stage_entries: int = 20) -> dict[str, int]:
+        if keep_runs < 0 or keep_stage_entries < 0:
+            raise ValueError("Retention counts must be non-negative.")
+        before_runs = self.rows("SELECT COUNT(*) count FROM runs")[0]["count"]
+        placeholders = ",".join("?" for _ in PRUNABLE_STAGES)
+        stage_count_query = (
+            f"SELECT COUNT(*) count FROM stage_cache WHERE stage IN ({placeholders})"
+        )
+        before_stages = self.rows(stage_count_query, PRUNABLE_STAGES)[0]["count"]
+        with self.connect() as con:
+            con.execute(
+                """DELETE FROM runs WHERE run_id NOT IN (
+                SELECT run_id FROM runs ORDER BY started_at DESC LIMIT ?
+                )""",
+                (keep_runs,),
+            )
+            for stage in PRUNABLE_STAGES:
+                con.execute(
+                    """DELETE FROM stage_cache WHERE stage=? AND cache_key NOT IN (
+                    SELECT cache_key FROM stage_cache WHERE stage=?
+                    ORDER BY created_at DESC LIMIT ?
+                    )""",
+                    (stage, stage, keep_stage_entries),
+                )
+        after_runs = self.rows("SELECT COUNT(*) count FROM runs")[0]["count"]
+        after_stages = self.rows(stage_count_query, PRUNABLE_STAGES)[0]["count"]
+        return {
+            "runs_removed": before_runs - after_runs,
+            "stage_entries_removed": before_stages - after_stages,
+        }

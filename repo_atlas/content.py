@@ -8,13 +8,17 @@ from collections import Counter
 from pathlib import PurePosixPath
 from typing import Any
 
-from config.exclusions import DIRECTORY_PREFIXES, EXTENSIONS, GENERATED_PATTERNS, NAMED_FILES
+from config.exclusions import (
+    DIRECTORY_PREFIXES,
+    EXTENSIONS,
+    GENERATED_PATTERNS,
+    NAMED_FILES,
+)
 
-
-BADGE_LINE = re.compile(r"^\s*(?:\[?!?\[.*?(?:badge|shield).*?$|<img[^>]+(?:badge|shield))", re.I)
+BADGE_LINE = re.compile(r"^\s*(?:\[?!?\[.*?(?:badge|shield).*?$|<img[^>]+(?:badge|shield))", re.IGNORECASE)
 HTML_COMMENT = re.compile(r"<!--[\s\S]*?-->")
 HEADING = re.compile(r"^(#{1,6})\s+(.+?)\s*$")
-SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.I)
+SECTION_SKIP = re.compile(r"^(?:licen[cs]e|contributing|code of conduct)\b", re.IGNORECASE)
 
 
 def clean_readme(markdown: str | None) -> str:
@@ -27,6 +31,25 @@ def clean_readme(markdown: str | None) -> str:
     in_fence = False
     fence_lines = 0
     for line in lines:
+        if line.lstrip().startswith(("```", "~~~")):
+            if not in_fence:
+                in_fence = True
+                fence_lines = 0
+                if skip_level is None:
+                    output.append(line)
+            else:
+                in_fence = False
+                if skip_level is None:
+                    output.append(line)
+            continue
+        if in_fence:
+            if skip_level is None:
+                fence_lines += 1
+                if fence_lines <= 20:
+                    output.append(line)
+                elif fence_lines == 21:
+                    output.append("…")
+            continue
         heading = HEADING.match(line)
         if heading:
             level = len(heading.group(1))
@@ -39,37 +62,25 @@ def clean_readme(markdown: str | None) -> str:
             continue
         if BADGE_LINE.match(line) or "shields.io" in line.lower():
             continue
-        if line.lstrip().startswith("```") or line.lstrip().startswith("~~~"):
-            if not in_fence:
-                in_fence = True
-                fence_lines = 0
-                output.append(line)
-            else:
-                in_fence = False
-                output.append(line)
-            continue
-        if in_fence:
-            fence_lines += 1
-            if fence_lines <= 20:
-                output.append(line)
-            elif fence_lines == 21:
-                output.append("…")
-            continue
         output.append(line)
     return re.sub(r"\n{3,}", "\n\n", "\n".join(output)).strip()
 
 
 def excluded_path(path: str) -> bool:
-    normalized = path.lstrip("./")
+    normalized = path.removeprefix("./").casefold()
     parts = PurePosixPath(normalized).parts
     basename = parts[-1] if parts else normalized
-    if basename in NAMED_FILES:
+    if basename in {value.casefold() for value in NAMED_FILES}:
         return True
-    if any(normalized.startswith(prefix) or f"/{prefix}" in f"/{normalized}" for prefix in DIRECTORY_PREFIXES):
+    if any(
+        normalized.startswith(prefix.casefold())
+        or f"/{prefix.casefold()}" in f"/{normalized}"
+        for prefix in DIRECTORY_PREFIXES
+    ):
         return True
-    if any(normalized.endswith(ext) for ext in EXTENSIONS):
+    if any(normalized.endswith(ext.casefold()) for ext in EXTENSIONS):
         return True
-    return any(fnmatch.fnmatch(basename, pattern) for pattern in GENERATED_PATTERNS)
+    return any(fnmatch.fnmatch(basename, pattern.casefold()) for pattern in GENERATED_PATTERNS)
 
 
 NOTABLE = (
@@ -100,4 +111,3 @@ def tracked_file_count(tree: list[dict[str, Any]]) -> int:
 def content_hash(*parts: Any) -> str:
     encoded = json.dumps(parts, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
     return hashlib.sha256(encoded.encode()).hexdigest()
-

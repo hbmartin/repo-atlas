@@ -1,18 +1,19 @@
 from __future__ import annotations
 
-import json
 import os
 import shutil
 import sqlite3
+import subprocess
 from pathlib import Path
 
 import typer
+from pydantic import ValidationError
 
 from . import __version__
 from .cache import Cache
-from .github import GitHubClient, resolve_token
-from .pipeline import STAGES, AtlasPipeline, content_hash, now
-
+from .github import GitHubClient, GitHubError, resolve_token
+from .models import ClusterLabel
+from .pipeline import STAGES, AtlasPipeline, now
 
 app = typer.Typer(help="Build and inspect the Repo Atlas offline data bundle.", no_args_is_help=True)
 labels_app = typer.Typer(help="Inspect or override generated region labels.")
@@ -40,15 +41,31 @@ def main(version: bool = typer.Option(False, "--version", is_eager=True)) -> Non
 def run(
     from_stage: str = typer.Option("discover", "--from", help="First stage to run."),
     only: str | None = typer.Option(None, help="Comma-separated stages to run."),
-    summarizer: str = typer.Option("codex", help="codex, claude, or gemini."),
+    summarizer: str = typer.Option("openai", help="openai, codex, claude, or gemini."),
     embedder: str = typer.Option("hosted", help="hosted or local."),
-    yes: bool = typer.Option(False, "--yes", help="Confirm embedding invalidation."),
+    yes: bool = typer.Option(False, "--yes", help="Deprecated compatibility flag."),
+    allow_fallback: bool = typer.Option(
+        False,
+        "--allow-fallback",
+        help="Permit or reuse lower-quality TF-IDF/SVD embeddings when hosted quota is exhausted.",
+    ),
+    allow_agent_summarizer: bool = typer.Option(
+        False,
+        "--allow-agent-summarizer",
+        help="Opt in to a local agent CLI that may access files or provider credentials.",
+    ),
 ) -> None:
     selected = {value.strip() for value in only.split(",") if value.strip()} if only else None
-    token = resolve_token() if selected is None or selected.intersection({"discover", "acquire"}) else "unused"
+    if from_stage not in STAGES:
+        raise typer.BadParameter(f"Choose --from from: {', '.join(STAGES)}")
+    chosen = selected if selected is not None else set(STAGES[STAGES.index(from_stage):])
+    token = resolve_token() if chosen.intersection({"discover", "acquire"}) else "unused"
     github = GitHubClient(token) if token != "unused" else None
     try:
-        pipeline = AtlasPipeline(project_root(), github, summarizer, embedder, yes)
+        pipeline = AtlasPipeline(
+            project_root(), github, summarizer, embedder, yes, allow_fallback,
+            allow_agent_summarizer,
+        )
         pipeline.run(from_stage, selected)
     finally:
         if github:
@@ -57,15 +74,35 @@ def run(
 
 @app.command()
 def doctor(
-    summarizer: str = typer.Option("codex"),
+    summarizer: str = typer.Option("openai"),
     embedder: str = typer.Option("hosted"),
 ) -> None:
+    try:
+        github_authenticated = bool(resolve_token())
+    except (GitHubError, OSError):
+        github_authenticated = False
+
+    def major_version(command: str) -> int | None:
+        if not shutil.which(command):
+            return None
+        result = subprocess.run(
+            [command, "--version"], capture_output=True, text=True, check=False,
+        )
+        digits = "".join(character if character.isdigit() else " " for character in result.stdout)
+        first = digits.split()
+        return int(first[0]) if result.returncode == 0 and first else None
+
+    node_major = major_version("node")
+    pnpm_major = major_version("pnpm")
     checks = {
-        "GitHub authentication": bool(resolve_token()),
-        f"{summarizer} CLI": shutil.which(summarizer) is not None,
+        "GitHub authentication": github_authenticated,
+        f"{summarizer} summarizer": (
+            bool(os.environ.get("OPENAI_API_KEY"))
+            if summarizer == "openai" else shutil.which(summarizer) is not None
+        ),
         "OpenAI API key": bool(os.environ.get("OPENAI_API_KEY")) if embedder == "hosted" else True,
-        "Node.js": shutil.which("node") is not None,
-        "pnpm": shutil.which("pnpm") is not None,
+        "Node.js 24+": node_major is not None and node_major >= 24,
+        "pnpm 12+": pnpm_major is not None and pnpm_major >= 12,
     }
     failed = False
     for label, status in checks.items():
@@ -107,7 +144,7 @@ def labels_show() -> None:
 @labels_app.command("set")
 def labels_set(
     assignment: str = typer.Argument(..., help="ID=LABEL"),
-    lock: bool = typer.Option(False, "--lock"),
+    lock: bool = typer.Option(True, "--lock/--unlock"),
     gloss: str | None = typer.Option(None),
 ) -> None:
     if "=" not in assignment:
@@ -122,17 +159,24 @@ def labels_set(
     )
     if not rows:
         raise typer.BadParameter(f"Cluster {cluster_id} does not exist in the latest run.")
+    try:
+        value = ClusterLabel(label=label.strip(), gloss=gloss or rows[0]["gloss"] or "")
+    except ValidationError as exc:
+        raise typer.BadParameter(str(exc)) from exc
     cache.execute(
         "INSERT OR REPLACE INTO label_overrides VALUES (?,?,?,?,?)",
-        (rows[0]["signature"], label.strip(), gloss or rows[0]["gloss"], bool(lock), now()),
+        (rows[0]["signature"], value.label, value.gloss, bool(lock), now()),
     )
-    typer.echo(f"Set cluster {cluster_id} to {label.strip()!r}{' and locked it' if lock else ''}.")
+    typer.echo(f"Set cluster {cluster_id} to {value.label!r}{' and locked it' if lock else ' and unlocked it'}.")
 
 
 @cache_app.command("stats")
 def cache_stats() -> None:
     cache = Cache(project_root() / ".atlas" / "cache.db")
-    for table in ("repos", "summaries", "embeddings", "runs", "clusters", "label_overrides"):
+    for table in (
+        "repos", "summaries", "summary_failures", "embeddings", "runs", "clusters",
+        "label_overrides",
+    ):
         count = cache.rows(f"SELECT COUNT(*) count FROM {table}")[0]["count"]
         typer.echo(f"{table:18} {count}")
 
@@ -146,6 +190,7 @@ def cache_invalidate(stage: str = typer.Argument(...)) -> None:
     with cache.connect() as con:
         if index <= STAGES.index("summarize"):
             con.execute("DELETE FROM summaries")
+            con.execute("DELETE FROM summary_failures")
         if index <= STAGES.index("embed"):
             con.execute("DELETE FROM embeddings")
         if index <= STAGES.index("cluster"):
@@ -162,7 +207,8 @@ def cache_invalidate(stage: str = typer.Argument(...)) -> None:
 @cache_app.command("vacuum")
 def cache_vacuum() -> None:
     path = project_root() / ".atlas" / "cache.db"
-    Cache(path)
+    cache = Cache(path)
+    cache.close()
     con = sqlite3.connect(path)
     try:
         con.execute("VACUUM")
@@ -171,6 +217,23 @@ def cache_vacuum() -> None:
     typer.echo("Cache vacuum complete.")
 
 
+@cache_app.command("prune")
+def cache_prune(
+    keep_runs: int = typer.Option(20, min=0, help="Completed runs to retain."),
+    keep_stage_entries: int = typer.Option(
+        20, min=0, help="Analysis stage-cache entries to retain per stage.",
+    ),
+) -> None:
+    cache = Cache(project_root() / ".atlas" / "cache.db")
+    try:
+        removed = cache.prune(keep_runs, keep_stage_entries)
+    finally:
+        cache.close()
+    typer.echo(
+        f"Removed {removed['runs_removed']} runs and "
+        f"{removed['stage_entries_removed']} stage-cache entries."
+    )
+
+
 if __name__ == "__main__":
     app()
-

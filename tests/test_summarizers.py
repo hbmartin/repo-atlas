@@ -1,8 +1,12 @@
 import pytest
 
 from repo_atlas.models import RepoSummary
-from repo_atlas.summarizers import CodexSummarizer, parse_model_json
-
+from repo_atlas.summarizers import (
+    CodexSummarizer,
+    GeminiSummarizer,
+    parse_model_json,
+    safe_subprocess_env,
+)
 
 VALID = {
     "one_liner": "Converts diagrams into editable files.",
@@ -29,11 +33,27 @@ def test_parser_normalizes_unwanted_register():
     assert parsed.what_it_does == "A tool."
 
 
-def test_parser_normalizes_schema_word_limits():
+def test_parser_rejects_schema_word_limits_for_repair():
     value = {**VALID, "platform": "Chromium based browsers including Google Chrome"}
     import json
+    with pytest.raises(ValueError):
+        parse_model_json(json.dumps(value), RepoSummary)
+
+
+def test_parser_unwraps_gemini_response():
+    import json
+    parsed = parse_model_json(
+        json.dumps({"response": f"```json\n{json.dumps(VALID)}\n```"}),
+        RepoSummary,
+    )
+    assert parsed.domain == "Diagram tooling"
+
+
+def test_register_normalization_preserves_acronyms():
+    import json
+    value = {**VALID, "what_it_does": "This repository contains an API for SVG files."}
     parsed = parse_model_json(json.dumps(value), RepoSummary)
-    assert parsed.platform == "Chromium based browsers including"
+    assert parsed.what_it_does == "An API for SVG files."
 
 
 def test_codex_adapter_is_read_only_and_ephemeral(tmp_path):
@@ -42,3 +62,54 @@ def test_codex_adapter_is_read_only_and_ephemeral(tmp_path):
     assert "read-only" in command
     assert "--ephemeral" in command
     assert "--ignore-rules" in command
+
+
+def test_subprocess_environment_uses_an_allowlist(monkeypatch):
+    monkeypatch.setenv("PATH", "/usr/bin")
+    monkeypatch.setenv("DATABASE_URL", "postgres://secret")
+    monkeypatch.setenv("OPENAI_API_KEY", "secret")
+    monkeypatch.setenv("CODEX_HOME", "/tmp/codex")
+    environment = safe_subprocess_env("codex")
+    assert environment["PATH"] == "/usr/bin"
+    assert environment["CODEX_HOME"] == "/tmp/codex"
+    assert "DATABASE_URL" not in environment
+    assert environment["OPENAI_API_KEY"] == "secret"
+
+
+def test_gemini_prompt_includes_the_json_schema(tmp_path):
+    schema = tmp_path / "schema.json"
+    schema.write_text('{"type":"object"}', encoding="utf-8")
+    command = GeminiSummarizer().command("prompt", schema)
+    assert "JSON Schema:" in command[command.index("--prompt") + 1]
+
+
+def test_overlong_one_liner_is_rejected_for_repair():
+    value = {**VALID, "one_liner": "x" * 141}
+    import json
+    with pytest.raises(ValueError):
+        parse_model_json(json.dumps(value), RepoSummary)
+
+
+def test_timeout_kills_the_cli_process_group(monkeypatch):
+    import subprocess
+
+    killed = []
+
+    class TimedOutProcess:
+        pid = 1234
+        returncode = None
+
+        def __init__(self):
+            self.calls = 0
+
+        def communicate(self, **_kwargs):
+            self.calls += 1
+            if self.calls == 1:
+                raise subprocess.TimeoutExpired("codex", 1)
+            return "", ""
+
+    monkeypatch.setattr(subprocess, "Popen", lambda *_args, **_kwargs: TimedOutProcess())
+    monkeypatch.setattr("repo_atlas.summarizers.os.killpg", lambda pid, sig: killed.append((pid, sig)))
+    with pytest.raises(RuntimeError, match="timed out"):
+        CodexSummarizer().invoke("prompt", RepoSummary, timeout=1)
+    assert killed and killed[0][0] == 1234

@@ -4,8 +4,9 @@ import base64
 import os
 import subprocess
 import time
+from collections.abc import Iterable
 from dataclasses import dataclass
-from typing import Any, Iterable
+from typing import Any
 
 import httpx
 
@@ -18,9 +19,14 @@ def resolve_token() -> str:
     for name in ("GITHUB_TOKEN", "GH_TOKEN"):
         if value := os.environ.get(name):
             return value
-    result = subprocess.run(
-        ["gh", "auth", "token"], capture_output=True, text=True, check=False,
-    )
+    try:
+        result = subprocess.run(
+            ["gh", "auth", "token"], capture_output=True, text=True, check=False,
+        )
+    except FileNotFoundError as exc:
+        raise GitHubError(
+            "No GitHub token found and the `gh` CLI is not installed. Set GITHUB_TOKEN."
+        ) from exc
     if result.returncode == 0 and result.stdout.strip():
         return result.stdout.strip()
     raise GitHubError("No GitHub token found. Set GITHUB_TOKEN or run `gh auth login`.")
@@ -53,14 +59,24 @@ class GitHubClient:
         for attempt in range(6):
             response = self.client.get(path, params=params or None)
             remaining = int(response.headers.get("X-RateLimit-Remaining", "5000"))
-            if remaining < 100:
+            rate_limited = response.status_code == 403 and remaining == 0
+            if rate_limited:
                 reset = int(response.headers.get("X-RateLimit-Reset", "0"))
-                time.sleep(max(0, reset - int(time.time()) + 1))
-            if response.status_code < 500 and response.status_code not in (429,):
+                wait = max(0, reset - int(time.time()) + 1)
+                if wait > 60:
+                    raise GitHubError(
+                        f"GitHub rate limit exhausted; retry after {time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime(reset))}."
+                    )
+                time.sleep(wait)
+            retryable = response.status_code == 403 or response.status_code == 429 or response.status_code >= 500
+            if not retryable:
                 return response
             if attempt == 5:
                 break
-            retry_after = float(response.headers.get("Retry-After", delay))
+            try:
+                retry_after = float(response.headers.get("Retry-After", delay))
+            except ValueError:
+                retry_after = delay
             time.sleep(retry_after)
             delay = min(delay * 2, 16)
         raise GitHubError(f"GitHub request failed after retries: {path}")
@@ -93,4 +109,3 @@ class GitHubClient:
             return base64.b64decode(payload["content"]).decode("utf-8", errors="replace")
         except (KeyError, ValueError) as exc:
             raise GitHubError(f"Malformed README response for {full_name}") from exc
-

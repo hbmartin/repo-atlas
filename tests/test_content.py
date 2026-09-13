@@ -1,4 +1,9 @@
-from repo_atlas.content import clean_readme, excluded_path, tracked_file_count, tree_digest
+from repo_atlas.content import (
+    clean_readme,
+    excluded_path,
+    tracked_file_count,
+    tree_digest,
+)
 
 
 def test_readme_cleaning_removes_boilerplate_and_truncates_code():
@@ -12,10 +17,20 @@ def test_readme_cleaning_removes_boilerplate_and_truncates_code():
     assert "Kept." in cleaned
 
 
+def test_readme_headings_and_badges_inside_fences_are_preserved_as_code():
+    source = """# Tool\n```md\n## License\n![badge](https://img.shields.io/x)\n```\n## Notes\nKept.\n"""
+    cleaned = clean_readme(source)
+    assert "## License" in cleaned
+    assert "shields.io" in cleaned
+    assert "Kept." in cleaned
+
+
 def test_file_exclusions_cover_dependencies_and_generated_files():
     assert excluded_path("node_modules/pkg/index.js")
     assert excluded_path("src/schema.generated.ts")
     assert excluded_path("pnpm-lock.yaml")
+    assert excluded_path("NODE_MODULES/pkg/index.js")
+    assert not excluded_path(".../src/main.ts")
     assert not excluded_path("src/main.ts")
     tree = [
         {"type": "blob", "path": "src/main.ts"},
@@ -33,4 +48,3 @@ def test_tree_digest_is_stable_and_structural():
     ]
     assert tree_digest(list(reversed(tree))) == tree_digest(tree)
     assert tree_digest(tree)["notable_files"]["package.json"] == 1
-
