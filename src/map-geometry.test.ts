@@ -1,13 +1,78 @@
 import { describe, expect, it } from 'vitest'
-import { zoomIdentity } from 'd3-zoom'
-import { fitBounds, fitOverview, overlaps, placeRegionLabels, resizeTransform, smoothRing, wrapLabel } from './map-geometry'
+import { zoomIdentity, type ZoomTransform } from 'd3-zoom'
+import { BoxGrid, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, wrapLabel, type Label, type Size } from './map-geometry'
 import { makeAtlas, makeRepo } from './test-fixtures'
 import { pointerToMapPoint } from './view-utils'
 import { fileSizeScale } from './presentation'
 import fixture from './test-data/region-layout.json'
-import type { AtlasData } from './types'
+import type { AtlasData, Point } from './types'
 
 const measure = (text: string) => text.length * 7
+const exhaustiveOffsets = Array.from({ length: 17 * 17 }, (_, i) => {
+  const dx = (i % 17) * 24 - 192
+  const dy = Math.floor(i / 17) * 24 - 192
+  return { dx, dy, distance: Math.hypot(dx, dy) }
+})
+function inside(point: Point, ring: Point[]) {
+  let result = false
+  for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
+    const [xi, yi] = ring[i]
+    const [xj, yj] = ring[j]
+    if ((yi > point[1]) !== (yj > point[1]) && point[0] < (xj - xi) * (point[1] - yi) / (yj - yi) + xi) result = !result
+  }
+  return result
+}
+function exhaustivePlacement(
+  data: AtlasData,
+  alt: boolean,
+  transform: ZoomTransform,
+  size: Size,
+  radius: (count: number | null) => number,
+  fontSize: number,
+  prepared = prepareRegionLabels(data, alt, measure, fontSize),
+) {
+  const placed: Label[] = []
+  const dots = new BoxGrid()
+  const labels = new BoxGrid()
+  for (const repo of data.repos) {
+    const [x, y] = transform.apply(alt ? [repo.x_alt, repo.y_alt] : [repo.x, repo.y])
+    const r = radius(repo.file_count) + 3
+    if (x + r < 11 || x - r > size.width - 11 || y + r < 15 || y - r > size.height - 73) continue
+    dots.add({ left: x - r, right: x + r, top: y - r, bottom: y + r })
+  }
+  for (const item of prepared) {
+    const [ax, ay] = transform.apply([item.anchor.x, item.anchor.y])
+    let best: Label | undefined
+    let bestScore = Infinity
+    for (const { dx, dy, distance } of exhaustiveOffsets) {
+      const x = ax + dx
+      const y = ay + dy
+      const box = {
+        id: item.id,
+        x,
+        y,
+        lines: item.lines,
+        left: x - item.width / 2,
+        right: x + item.width / 2,
+        top: y - item.height / 2,
+        bottom: y + item.height / 2,
+      }
+      if (box.left < 12 || box.right > size.width - 12 || box.top < 16 || box.bottom > size.height - 74) continue
+      if (labels.hits(box, 8) || dots.hits(box, 1)) continue
+      const point: Point = [item.anchor.x + dx / transform.k, item.anchor.y + dy / transform.k]
+      const score = distance + (item.rings.some(ring => inside(point, ring)) ? 0 : 48)
+      if (score < bestScore) {
+        best = box
+        bestScore = score
+      }
+    }
+    if (best) {
+      placed.push(best)
+      labels.add(best)
+    }
+  }
+  return placed
+}
 
 describe('map geometry', () => {
   it('fits a wide dataset inside a rectangular viewport with HUD clearance', () => {
@@ -64,6 +129,23 @@ describe('map geometry', () => {
       expect(label.bottom).toBeLessThanOrEqual(height - 74)
       expect(labels.slice(i + 1).some(other => overlaps(label, other))).toBe(false)
     })
+  })
+  it.each([[1120, 766], [944, 578], [704, 584]])('matches exhaustive placement across transforms in a %sx%s map', (width, height) => {
+    const data = { ...makeAtlas(fixture.repos.map((repo, i) => makeRepo({ ...repo, full_name: `fixture/${i}` }))), clusters: fixture.clusters as AtlasData['clusters'] }
+    const size = { width, height }
+    const scale = fileSizeScale(data.repos)
+    const prepared = prepareRegionLabels(data, false, measure, 13)
+    const fit = fitOverview(data, false, size, scale.radius, measure, 13, prepared)
+    const transforms = [
+      fit,
+      zoomIdentity.translate(fit.x + 31, fit.y - 17).scale(fit.k),
+      zoomIdentity.translate(width / 2 + 20, height / 2 - 10).scale(fit.k * 1.8).translate(-500, -500),
+    ]
+    for (const transform of transforms) {
+      const radius = (count: number | null) => scale.radius(count) * transform.k / fit.k
+      expect(placeRegionLabels(data, false, transform, size, radius, measure, 13, prepared))
+        .toEqual(exhaustivePlacement(data, false, transform, size, radius, 13, prepared))
+    }
   })
 })
 

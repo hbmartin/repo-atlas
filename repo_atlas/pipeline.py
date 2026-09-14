@@ -38,7 +38,7 @@ from .summarizers import (
 
 STAGES = ("discover", "acquire", "summarize", "embed", "cluster", "label", "project", "emit")
 PROMPT_VERSION = "summary-v2"
-LABEL_PROMPT_VERSION = "label-v1"
+LABEL_PROMPT_VERSION = "label-v2"
 TEMPLATE_VERSION = "embed-v1"
 ALGORITHM_VERSION = "analysis-v2"
 ACQUIRE_VERSION = "acquire-v2"
@@ -423,17 +423,28 @@ class AtlasPipeline:
         executor = ThreadPoolExecutor(max_workers=workers)
         try:
             remaining = iter(pending)
-            active = set()
+            active = {}
             # Only running work is submitted: a failed worker must not start another item
             # before the main thread observes its failure and cancels the provider.
             for _ in range(workers):
                 item = next(remaining, None)
                 if item is not None:
-                    active.add(executor.submit(work, item))
+                    active[executor.submit(work, item)] = item[0]
             while active:
-                completed, active = wait(active, return_when=FIRST_COMPLETED)
-                # Inspect the entire batch before persistence or replenishing workers.
-                results = sorted(future.result() for future in completed)
+                completed, _pending_futures = wait(active, return_when=FIRST_COMPLETED)
+                completed = sorted(completed, key=active.__getitem__)
+                for future in completed:
+                    active.pop(future)
+                results = []
+                fatal: BaseException | None = None
+                # Resolve the whole completed batch so successful work is durable even
+                # when a sibling future reports a stage-fatal error.
+                for future in completed:
+                    try:
+                        results.append(future.result())
+                    except BaseException as exc:  # noqa: BLE001 - re-raised after persistence
+                        if fatal is None:
+                            fatal = exc
                 for _index, name, success, failure in results:
                     if success:
                         with self.cache.connect() as con:
@@ -448,10 +459,12 @@ class AtlasPipeline:
                             ) VALUES (?,?,?,?,?,?,?)""",
                             failure,
                         )
+                if fatal is not None:
+                    raise fatal
                 for _ in completed:
                     item = next(remaining, None)
                     if item is not None:
-                        active.add(executor.submit(work, item))
+                        active[executor.submit(work, item)] = item[0]
         except BaseException:
             provider.cancel()
             executor.shutdown(wait=False, cancel_futures=True)
@@ -701,13 +714,13 @@ class AtlasPipeline:
                             f"[label] warning: model labeling failed for cluster {cluster_id}; "
                             f"using {value.label!r}: {type(exc).__name__}: {exc}", file=sys.stderr,
                         )
-            if not override:
-                value = self._deduplicate_label(value, cluster_id, used | reserved)
             if generated:
                 payload = value.model_dump()
                 if cluster_id in self.fallback_label_ids:
                     payload = {"source": "fallback", "value": payload}
                 self.cache.set_stage("label", stage_key, payload, now())
+            if not override:
+                value = self._deduplicate_label(value, cluster_id, used | reserved)
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
             print(f"[label] {cluster_id}: {value.label}")

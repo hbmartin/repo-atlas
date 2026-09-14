@@ -8,6 +8,18 @@ import { atlasPresentation } from '../presentation'
 import { makeAtlas, makeRepo } from '../test-fixtures'
 import { MapView } from './MapView'
 
+const { placementSpy } = vi.hoisted(() => ({ placementSpy: vi.fn() }))
+vi.mock('../map-geometry', async (importOriginal) => {
+  const original = await importOriginal<typeof import('../map-geometry')>()
+  return {
+    ...original,
+    placeRegionLabels: (...args: Parameters<typeof original.placeRegionLabels>) => {
+      placementSpy()
+      return original.placeRegionLabels(...args)
+    },
+  }
+})
+
 const empty: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
 const first = makeRepo({ x: 200, y: 200, x_alt: 250, y_alt: 250 })
 const second = makeRepo({ full_name: 'owner/second', name: 'second', x: 700, y: 600, x_alt: 650, y_alt: 550, cluster_id: 1 })
@@ -21,6 +33,7 @@ let resize: (() => void) | undefined
 
 beforeEach(() => {
   vi.useFakeTimers()
+  placementSpy.mockClear()
   width = 1000; height = 700
   resize = undefined
   vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { resize = callback } observe() {} disconnect() {} })
@@ -107,6 +120,13 @@ describe('measured camera navigation', () => {
     expect(current[1]).toBeCloseTo(old[1])
     expect(screen.getByLabelText('Zoom level').textContent).toBe(oldZoom)
   })
+  it('renders label placement once with the resized fit and camera', () => {
+    render(<MapView {...props} />)
+    placementSpy.mockClear()
+    width = 768; height = 550
+    act(() => resize?.())
+    expect(placementSpy).toHaveBeenCalledTimes(1)
+  })
 })
 
 describe('click sequences', () => {
@@ -176,6 +196,29 @@ describe('click sequences', () => {
     expect(onRegion).toHaveBeenCalledTimes(1)
     expect(zoomTransform(container.querySelector('svg')!).toString()).toBe(before)
   })
+  it('focuses a region after a prior drag left stale map pointer state', () => {
+    const onRegion = vi.fn()
+    const { container } = render(<MapView {...props} onRegion={onRegion} />)
+    const svg = container.querySelector('svg')!
+    const label = screen.getByRole('button', { name: 'Focus region: Developer Tools' })
+    fireEvent.pointerDown(svg, { clientX: 100, clientY: 100, pointerType: 'mouse', buttons: 1 })
+    fireEvent.pointerMove(svg, { clientX: 200, clientY: 100, pointerType: 'mouse', buttons: 1 })
+    fireEvent.pointerDown(label, { clientX: 300, clientY: 200, pointerType: 'mouse', buttons: 1 })
+    fireEvent.pointerMove(svg, { clientX: 500, clientY: 200, pointerType: 'mouse', buttons: 0 })
+    fireEvent.click(label, { detail: 1 })
+    act(() => vi.advanceTimersByTime(300))
+    expect(onRegion).toHaveBeenCalledExactlyOnceWith('Developer Tools', expect.any(Number))
+  })
+  it('does not treat pointer movement with no active button as a drag', () => {
+    const { container } = render(<Harness />)
+    const svg = container.querySelector('svg')!
+    const point = zoomTransform(svg).apply([second.x, second.y])
+    fireEvent.pointerDown(svg, { clientX: 5, clientY: 5, pointerType: 'mouse', buttons: 1 })
+    fireEvent.pointerMove(svg, { clientX: point[0], clientY: point[1], pointerType: 'mouse', buttons: 0 })
+    fireEvent.click(svg, { clientX: point[0], clientY: point[1], detail: 1 })
+    act(() => vi.advanceTimersByTime(300))
+    expect(screen.getByTestId('selected').textContent).toBe(second.full_name)
+  })
 })
 
 it('clears a removed label highlight while retaining a guide-originated highlight', () => {
@@ -221,4 +264,16 @@ it('does not zoom when region placement moves the second click onto the SVG ance
   fireEvent.doubleClick(svg, { clientX: 400, clientY: 300, detail: 2 })
   expect(onRegion).toHaveBeenCalledTimes(1)
   expect(zoomTransform(svg).toString()).toBe(before)
+})
+
+it('renders duplicate wrapped lines without duplicate React keys', () => {
+  const repeated = makeAtlas()
+  repeated.clusters[0] = { ...repeated.clusters[0], label: 'RepeatedLongWord RepeatedLongWord' }
+  const errors = vi.spyOn(console, 'error').mockImplementation(() => undefined)
+  const { container } = render(
+    <MapView {...props} data={repeated} presentation={atlasPresentation(repeated)} />,
+  )
+  const lines = [...container.querySelectorAll('.cluster-label tspan')]
+  expect(lines.map(line => line.textContent)).toEqual(['RepeatedLongWord', 'RepeatedLongWord'])
+  expect(errors.mock.calls.flat().join(' ')).not.toContain('same key')
 })

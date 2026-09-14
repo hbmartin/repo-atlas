@@ -136,15 +136,49 @@ describe('App mobile filters', () => {
     const data = makeAtlas([makeRepo({ primary_language: 'Java' })])
     data.languages = [{ name: 'Java', color: '#000', count: 1 }]
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
-    let execute: ((input: unknown) => { languages: string[] }) | undefined
+    let execute: ((input: unknown) => { languages: string[]; regions: string[] }) | undefined
     Object.defineProperty(document, 'modelContext', { configurable: true, value: { registerTool(tool: { execute: typeof execute }) { execute = tool.execute } } })
     render(<App />)
     await waitFor(() => expect(execute).toBeDefined())
     act(() => {
-      expect(execute!({ languages: ['Java', 'Java'] }).languages).toEqual(['Java'])
+      const result = execute!({
+        languages: ['Java', 'Java'],
+        regions: ['Developer Tools', 'Developer Tools'],
+      })
+      expect(result.languages).toEqual(['Java'])
+      expect(result.regions).toEqual(['Developer Tools'])
       expect(execute!({ repo: 'owner/example' }).languages).toEqual(['Java'])
     })
     expect(window.location.search).toContain('lang=Java')
+    expect(new URLSearchParams(window.location.search).get('region')).toBe('Developer Tools')
+    expect(currentMap().view.regions).toEqual(['Developer Tools'])
+  })
+
+  it('preserves unknown URL state and the hash until an explicit atlas change', async () => {
+    const user = userEvent.setup()
+    window.history.replaceState(null, '', '/?lang=TypeScript&wat=1#saved-place')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    expect(window.location.search).toBe('?lang=TypeScript&wat=1')
+    expect(window.location.hash).toBe('#saved-place')
+    expect(screen.getByRole('status').textContent).toContain('wat')
+    await user.click(screen.getByRole('button', { name: 'Filter by TypeScript: 1 repositories' }))
+    expect(window.location.search).toBe('')
+    expect(window.location.hash).toBe('')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
+  it('preserves unknown URL state and the hash during popstate restoration', async () => {
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    act(() => {
+      window.history.pushState(null, '', '/?region=Developer+Tools&wat=1#history-place')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(currentMap().view.regions).toEqual(['Developer Tools'])
+    expect(window.location.search).toBe('?region=Developer+Tools&wat=1')
+    expect(window.location.hash).toBe('#history-place')
+    expect(screen.getByRole('status').textContent).toContain('wat')
   })
 
   it('restores normalized filter state on history navigation', async () => {

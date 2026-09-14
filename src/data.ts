@@ -1,5 +1,7 @@
-import { knownLanguage, normalizeLanguages } from './presentation'
+import { knownLanguage, normalizeLanguages, normalizeRegions } from './presentation'
 import type { AtlasData, AtlasRepo, ViewState } from './types'
+
+export { monthIndex, monthValue } from './month'
 
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/
 const DAY = /^\d{4}-(0[1-9]|1[0-2])-(0[1-9]|[12]\d|3[01])$/
@@ -175,7 +177,7 @@ export function parseViewState(search: string, data: AtlasData): ViewState {
   return {
     repo: repo && data.repos.some((item) => item.full_name === repo) ? repo : null,
     languages: normalizeLanguages((params.get('lang') ?? '').split(',').filter((value) => knownLanguage(data, value))),
-    regions: [...new Set((params.get('region') ?? '').split(',').filter((value) => knownRegions.has(value)))],
+    regions: normalizeRegions((params.get('region') ?? '').split(',').filter((value) => knownRegions.has(value))),
     since: since && validMonth(since) ? since : null,
     layoutAlt: params.get('layout') === 'alt',
   }
@@ -201,7 +203,7 @@ export function writeViewState(state: ViewState): string {
   const params = new URLSearchParams()
   if (state.repo) params.set('repo', state.repo)
   if (state.languages.length) params.set('lang', normalizeLanguages(state.languages).join(','))
-  if (state.regions.length) params.set('region', state.regions.join(','))
+  if (state.regions.length) params.set('region', normalizeRegions(state.regions).join(','))
   if (state.since) params.set('since', state.since)
   if (state.layoutAlt) params.set('layout', 'alt')
   const value = params.toString()
@@ -232,13 +234,4 @@ export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
     .sort((a, b) => b.score - a.score || a.repo.name.localeCompare(b.repo.name))
     .slice(0, 8)
     .map((entry) => entry.repo)
-}
-
-export function monthIndex(value: string): number {
-  const [year, month] = value.slice(0, 7).split('-').map(Number)
-  return year * 12 + month - 1
-}
-
-export function monthValue(index: number): string {
-  return `${Math.floor(index / 12)}-${String(index % 12 + 1).padStart(2, '0')}`
 }
