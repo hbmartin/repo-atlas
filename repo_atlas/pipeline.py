@@ -8,7 +8,7 @@ import os
 import sqlite3
 import sys
 from collections import Counter, defaultdict
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import quote
@@ -19,6 +19,7 @@ from pydantic import ValidationError
 from .cache import Cache
 from .content import clean_readme, content_hash, tracked_file_count, tree_digest
 from .embeddings import OfflineFallbackEmbedder, get_embedder
+from .errors import AtlasError
 from .layouts import (
     density_contours,
     force_layout,
@@ -27,8 +28,10 @@ from .layouts import (
 )
 from .models import UNCLUSTERED_LABEL, ClusterLabel, RepoSummary
 from .summarizers import (
+    CodexPreflightCache,
     SummarizerCancelledError,
     SummarizerConfigurationError,
+    SummarizerInvocationError,
     get_summarizer,
     openai_summary_model,
 )
@@ -108,6 +111,7 @@ class AtlasPipeline:
         self._summary_snapshot: list[sqlite3.Row] | None = None
         self._vector_snapshot: tuple[list[str], np.ndarray, str] | None = None
         self._best_effort_excluded: set[str] = set()
+        self._codex_preflight_cache = CodexPreflightCache()
 
     def _invalidate_snapshots(self) -> None:
         self._summary_snapshot = None
@@ -143,20 +147,23 @@ class AtlasPipeline:
 
     def _apply_cached_exclusions(self) -> None:
         excluded = self._exclude_names()
-        if not excluded:
-            return
-        rows = self.cache.rows("SELECT full_name FROM repos ORDER BY full_name")
-        matched = [row["full_name"] for row in rows if row["full_name"].casefold() in excluded]
+        rows = self.cache.rows("SELECT full_name,archived FROM repos ORDER BY full_name")
+        matched = [
+            row["full_name"] for row in rows
+            if row["archived"] or row["full_name"].casefold() in excluded
+        ]
         for full_name in matched:
             self.cache.execute("DELETE FROM repos WHERE full_name=?", (full_name,))
             print(f"[exclude] removed cached {full_name}")
 
     def _summarizer(self):
         if self.summarizer_name in {"codex", "claude", "gemini"} and not self.allow_agent_summarizer:
-            raise RuntimeError(
+            raise AtlasError(
                 "Agent CLI summarizers can access local credentials and files. Use the default "
                 "structured-output OpenAI API adapter, or pass --allow-agent-summarizer to opt in."
             )
+        if self.summarizer_name == "codex":
+            return get_summarizer("codex", codex_preflight_cache=self._codex_preflight_cache)
         return get_summarizer(self.summarizer_name)
 
     def discover(self) -> None:
@@ -176,6 +183,8 @@ class AtlasPipeline:
             print(f"[discover {index}/{len(items)}] {full_name}", flush=True)
             if full_name.casefold() in excluded:
                 matched_exclusions.add(full_name.casefold())
+                continue
+            if repo.get("archived"):
                 continue
             if not repo.get("default_branch") or repo.get("size", 0) == 0:
                 continue
@@ -237,7 +246,7 @@ class AtlasPipeline:
             seen.add(full_name)
         with self.cache.connect() as con:
             if not seen:
-                raise RuntimeError(
+                raise AtlasError(
                     "Discovery retained zero repositories; existing cache was left unchanged. "
                     "Check authentication and exclusions."
                 )
@@ -267,7 +276,7 @@ class AtlasPipeline:
                 self.cache.execute("DELETE FROM repos WHERE full_name=?", (full_name,))
                 continue
             if response.status_code >= 400:
-                raise RuntimeError(f"Tree fetch failed for {full_name}: {response.status_code}")
+                raise AtlasError(f"Tree fetch failed for {full_name}: {response.status_code}")
             tree_payload = response.json()
             tree = tree_payload.get("tree", [])
             truncated = bool(tree_payload.get("truncated"))
@@ -339,12 +348,12 @@ class AtlasPipeline:
                     file=sys.stderr,
                 )
             else:
-                raise RuntimeError(
+                raise AtlasError(
                     f"{len(stale)} repositories lack a current successful summary "
                     f"({sample}{suffix}). Run the summarize stage first."
                 )
         if not current:
-            raise RuntimeError("No current successful summaries are available.")
+            raise AtlasError("No current successful summaries are available.")
         self._summary_snapshot = current
         return current
 
@@ -384,16 +393,9 @@ class AtlasPipeline:
             print(f"[summarize {index}/{len(rows)}] {repo['full_name']}", flush=True)
             try:
                 summary = provider.summarize(context, low_confidence=low)
-                text = embedding_text(summary)
-                success = (
-                    repo["full_name"], context_key, PROMPT_VERSION,
-                    self.summary_provider_id, summary.model_dump_json(), text,
-                    hashlib.sha256(text.encode()).hexdigest(), TEMPLATE_VERSION, low, "ok", now(),
-                )
-                failure = None
             except (SummarizerConfigurationError, SummarizerCancelledError):
                 raise
-            except Exception as exc:  # noqa: BLE001 - isolate individual model failures
+            except (SummarizerInvocationError, ValueError) as exc:
                 error_kind = type(exc).__name__
                 error_message = str(exc)
                 print(
@@ -406,13 +408,33 @@ class AtlasPipeline:
                     repo["full_name"], context_key, PROMPT_VERSION,
                     self.summary_provider_id, error_kind, error_message[:1000], now(),
                 )
+            else:
+                text = embedding_text(summary)
+                success = (
+                    repo["full_name"], context_key, PROMPT_VERSION,
+                    self.summary_provider_id, summary.model_dump_json(), text,
+                    hashlib.sha256(text.encode()).hexdigest(), TEMPLATE_VERSION, low, "ok", now(),
+                )
+                failure = None
             return index, repo["full_name"], success, failure
 
         workers = max(1, min(8, int(os.environ.get("ATLAS_SUMMARY_WORKERS", "4"))))
         failures: list[str] = []
-        with ThreadPoolExecutor(max_workers=workers) as executor:
-            try:
-                for _index, name, success, failure in executor.map(work, pending):
+        executor = ThreadPoolExecutor(max_workers=workers)
+        try:
+            remaining = iter(pending)
+            active = set()
+            # Only running work is submitted: a failed worker must not start another item
+            # before the main thread observes its failure and cancels the provider.
+            for _ in range(workers):
+                item = next(remaining, None)
+                if item is not None:
+                    active.add(executor.submit(work, item))
+            while active:
+                completed, active = wait(active, return_when=FIRST_COMPLETED)
+                # Inspect the entire batch before persistence or replenishing workers.
+                results = sorted(future.result() for future in completed)
+                for _index, name, success, failure in results:
                     if success:
                         with self.cache.connect() as con:
                             con.execute("INSERT OR REPLACE INTO summaries VALUES (?,?,?,?,?,?,?,?,?,?,?)", success)
@@ -426,13 +448,19 @@ class AtlasPipeline:
                             ) VALUES (?,?,?,?,?,?,?)""",
                             failure,
                         )
-            except BaseException:
-                provider.cancel()
-                executor.shutdown(wait=False, cancel_futures=True)
-                raise
+                for _ in completed:
+                    item = next(remaining, None)
+                    if item is not None:
+                        active.add(executor.submit(work, item))
+        except BaseException:
+            provider.cancel()
+            executor.shutdown(wait=False, cancel_futures=True)
+            raise
+        else:
+            executor.shutdown(wait=True)
         if failures:
             if not self.best_effort:
-                raise RuntimeError(
+                raise AtlasError(
                     f"Summarization failed for {len(failures)} repositories; last-known-good "
                     "summaries were preserved and downstream stages were not run."
                 )
@@ -462,7 +490,7 @@ class AtlasPipeline:
             if self.embedder_name != "hosted" or not any(marker in message for marker in ("insufficient_quota", "credit_balance_exhausted", "no credits")):
                 raise
             if not self.allow_fallback:
-                raise RuntimeError(
+                raise AtlasError(
                     "Hosted embedding quota is exhausted. Rerun with --allow-fallback to "
                     "explicitly permit the lower-quality TF-IDF/SVD fallback."
                 ) from exc
@@ -521,7 +549,7 @@ class AtlasPipeline:
                 return None
             dimensions = {row["dim"] for row in current}
             if len(dimensions) != 1 or any(len(row["vector"]) != row["dim"] * 4 for row in current):
-                raise RuntimeError(f"Embedding corpus {model_id} has inconsistent vector dimensions.")
+                raise AtlasError(f"Embedding corpus {model_id} has inconsistent vector dimensions.")
             return current
 
         model_id = self.effective_embedder_id or embedder.model_id
@@ -534,17 +562,17 @@ class AtlasPipeline:
             rows = complete_rows(model_id)
         if rows is None:
             if fallback_available and not self.allow_fallback:
-                raise RuntimeError(
+                raise AtlasError(
                     "A complete fallback embeddings corpus exists, but using it requires "
                     "--allow-fallback."
                 )
             fallback_note = " A complete fallback corpus was not found." if self.allow_fallback else ""
-            raise RuntimeError(
+            raise AtlasError(
                 f"Embedding corpus {model_id} is incomplete for the current summaries. "
                 f"Run the embed stage first.{fallback_note}"
             )
         if model_id == OfflineFallbackEmbedder.model_id and not self.allow_fallback:
-            raise RuntimeError(
+            raise AtlasError(
                 "The current analysis uses fallback embeddings. Rerun with --allow-fallback."
             )
         names = [row["full_name"] for row in rows]
@@ -606,7 +634,7 @@ class AtlasPipeline:
         _names, _vectors, key = self._vectors()
         payload = self.cache.get_stage("cluster", key)
         if not payload:
-            raise RuntimeError("No current cluster result. Run the cluster stage first.")
+            raise AtlasError("No current cluster result. Run the cluster stage first.")
         self.analysis = payload
         return payload
 
@@ -633,11 +661,11 @@ class AtlasPipeline:
             signature = signatures[cluster_id]
             override = overrides.get(cluster_id)
             stage_key = content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id)
-            cached = label_cache.get(stage_key)
+            cached, cached_fallback = self._label_cache_value(label_cache.get(stage_key))
             value: ClusterLabel | None = None
             if override:
                 value = override
-            elif cached and not (isinstance(cached, dict) and cached.get("source") == "fallback"):
+            elif cached and not cached_fallback:
                 try:
                     value = ClusterLabel.model_validate(cached)
                 except ValidationError as exc:
@@ -645,41 +673,49 @@ class AtlasPipeline:
                         f"[label] ignored invalid cached label for cluster {cluster_id}: {exc}",
                         file=sys.stderr,
                     )
-            if value is None:
+            generated = value is None
+            if generated:
                 provider = provider or self._summarizer()
                 descriptions = [summaries[name].one_liner for name in members[cluster_id]][:40]
                 try:
                     value = provider.label(descriptions)
                     if value.label.casefold() in used | reserved:
                         value = provider.label(descriptions, collision=value.label)
-                    self.cache.set_stage("label", stage_key, value.model_dump(), now())
                 except (SummarizerConfigurationError, SummarizerCancelledError):
                     raise
-                except OSError as exc:
-                    raise SummarizerConfigurationError(
-                        f"Could not run {self.summarizer_name} labeling: {type(exc).__name__}."
-                    ) from exc
-                except (RuntimeError, ValueError) as exc:
-                    if not self.best_effort:
-                        raise RuntimeError(
-                            f"Labeling failed for cluster {cluster_id}: {exc}. "
-                            "Rerun with --best-effort to permit fallback labels."
-                        ) from exc
-                    value = self._fallback_cluster_label(cluster_id, members[cluster_id], summaries)
-                    self.fallback_label_ids.add(cluster_id)
-                    self.cache.set_stage("label", stage_key, {
-                        "source": "fallback", "value": value.model_dump(),
-                    }, now())
-                    print(
-                        f"[label] warning: model labeling failed for cluster {cluster_id}; "
-                        f"using {value.label!r}: {type(exc).__name__}: {exc}",
-                        file=sys.stderr,
-                    )
+                except (SummarizerInvocationError, ValueError) as exc:
+                    if value is not None:
+                        print(
+                            f"[label] collision retry failed for cluster {cluster_id}; "
+                            f"deduplicating {value.label!r}: {exc}", file=sys.stderr,
+                        )
+                    else:
+                        if not self.best_effort:
+                            raise AtlasError(
+                                f"Labeling failed for cluster {cluster_id}: {exc}. "
+                                "Rerun with --best-effort to permit fallback labels."
+                            ) from exc
+                        value = self._fallback_cluster_label(cluster_id, members[cluster_id], summaries)
+                        self.fallback_label_ids.add(cluster_id)
+                        print(
+                            f"[label] warning: model labeling failed for cluster {cluster_id}; "
+                            f"using {value.label!r}: {type(exc).__name__}: {exc}", file=sys.stderr,
+                        )
             if not override:
                 value = self._deduplicate_label(value, cluster_id, used | reserved)
+            if generated:
+                payload = value.model_dump()
+                if cluster_id in self.fallback_label_ids:
+                    payload = {"source": "fallback", "value": payload}
+                self.cache.set_stage("label", stage_key, payload, now())
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
             print(f"[label] {cluster_id}: {value.label}")
+
+    @staticmethod
+    def _label_cache_value(payload: object) -> tuple[object, bool]:
+        fallback = isinstance(payload, dict) and payload.get("source") == "fallback"
+        return (payload.get("value") if fallback else payload), fallback
 
     @staticmethod
     def _fallback_cluster_label(
@@ -754,7 +790,7 @@ class AtlasPipeline:
         collisions = [ids for ids in by_label.values() if len(ids) > 1]
         if collisions:
             clusters = ", ".join(str(value) for ids in collisions for value in ids)
-            raise RuntimeError(
+            raise AtlasError(
                 f"Locked label overrides must be unique; resolve clusters {clusters}."
             )
         return signatures, overrides, set(by_label) | {UNCLUSTERED_LABEL.casefold()}
@@ -777,18 +813,18 @@ class AtlasPipeline:
             if override:
                 value = override
             elif cached:
-                if isinstance(cached, dict) and cached.get("source") == "fallback":
-                    if not self.best_effort:
-                        raise RuntimeError(
-                            "Restoring fallback labels requires --best-effort. "
-                            "Run the label stage to retry model labeling."
-                        )
-                    self.fallback_label_ids.add(cluster_id)
-                    cached = cached.get("value")
+                cached, fallback = self._label_cache_value(cached)
+                if fallback and not self.best_effort:
+                    raise AtlasError(
+                        "Restoring fallback labels requires --best-effort. "
+                        "Run the label stage to retry model labeling."
+                    )
                 try:
                     value = ClusterLabel.model_validate(cached)
                 except ValidationError:
                     continue
+                if fallback:
+                    self.fallback_label_ids.add(cluster_id)
             else:
                 continue
             if not override:
@@ -820,7 +856,7 @@ class AtlasPipeline:
         expected = self._cluster_ids(analysis)
         missing = expected.difference(self.labels)
         if missing:
-            raise RuntimeError(
+            raise AtlasError(
                 f"Labels are incomplete for clusters: {', '.join(map(str, sorted(missing)))}. "
                 "Run the label stage first."
             )
@@ -833,7 +869,7 @@ class AtlasPipeline:
         )
         counts = {row["full_name"]: row["file_count"] for row in rows}
         if set(counts) != set(names):
-            raise RuntimeError("Repository metadata is incomplete for the current vector corpus.")
+            raise AtlasError("Repository metadata is incomplete for the current vector corpus.")
         return [counts[name] for name in names]
 
     def _project_cache_key(self, vector_key: str, names: list[str]) -> tuple[str, list[int | None]]:
@@ -848,7 +884,7 @@ class AtlasPipeline:
         analysis = self._load_analysis()
         names, vectors, key = self._vectors()
         if analysis["names"] != names or analysis["key"] != key:
-            raise RuntimeError("Cluster assignment does not match the current vector corpus.")
+            raise AtlasError("Cluster assignment does not match the current vector corpus.")
         if not self.labels:
             self._restore_labels(analysis)
         self._require_complete_labels(analysis)
@@ -988,24 +1024,24 @@ class AtlasPipeline:
         analysis = self._load_analysis()
         names, _vectors, vector_key = self._vectors()
         if analysis["names"] != names or analysis["key"] != vector_key:
-            raise RuntimeError("Cluster assignment does not match the current vector corpus.")
+            raise AtlasError("Cluster assignment does not match the current vector corpus.")
         if not self.labels:
             self._restore_labels(analysis)
         self._require_complete_labels(analysis)
         project_key, _file_counts = self._project_cache_key(vector_key, names)
         self.final_payload = self.cache.get_stage("project", project_key)
         if not self.final_payload:
-            raise RuntimeError("No current projection is available. Run the project stage first.")
+            raise AtlasError("No current projection is available. Run the project stage first.")
         if self.final_payload.get("names") != names:
-            raise RuntimeError("Cached projection does not match the current repository corpus.")
+            raise AtlasError("Cached projection does not match the current repository corpus.")
         return self.final_payload
 
     def emit(self) -> None:
         projected = self._load_project()
         if projected.get("fallback_label_ids") and not self.best_effort:
-            raise RuntimeError("Publishing fallback labels requires --best-effort.")
+            raise AtlasError("Publishing fallback labels requires --best-effort.")
         if projected.get("embedding_model") == OfflineFallbackEmbedder.model_id and not self.allow_fallback:
-            raise RuntimeError(
+            raise AtlasError(
                 "Refusing to publish fallback embeddings without --allow-fallback."
             )
         names = projected["names"]
@@ -1019,7 +1055,7 @@ class AtlasPipeline:
         )
         rows_by_name = {row["full_name"]: row for row in repo_rows}
         if set(rows_by_name) != set(names):
-            raise RuntimeError("Projection repository set does not match current summaries.")
+            raise AtlasError("Projection repository set does not match current summaries.")
         primary_counts: dict[str, int] = defaultdict(int)
         for name in names:
             primary_counts[rows_by_name[name]["primary_language"] or "Unknown"] += 1

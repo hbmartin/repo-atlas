@@ -1,20 +1,21 @@
 // @vitest-environment jsdom
-import { cleanup, fireEvent, render } from '@testing-library/react'
+import { zoomTransform } from 'd3-zoom'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas } from '../test-fixtures'
 import type { ViewState } from '../types'
 import {
-  clusterGlossesVisible,
-  clusterLabelX,
   mobileMapTargetY,
   nearestRepoAtPoint,
   pointerToMapPoint,
 } from '../view-utils'
 import { MapView } from './MapView'
+import { atlasPresentation } from '../presentation'
 
 const view: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
 
 beforeEach(() => {
+  vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700, x: 0, y: 0, toJSON() {} })
   vi.stubGlobal('ResizeObserver', class {
     observe() {}
     disconnect() {}
@@ -28,15 +29,11 @@ beforeEach(() => {
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
+  vi.restoreAllMocks()
+  vi.useRealTimers()
 })
 
 describe('MapView', () => {
-  it('keeps region labels inside the map bounds', () => {
-    expect(clusterLabelX(20, 'Android and Kotlin', '', false)).toBeGreaterThan(20)
-    expect(clusterLabelX(980, 'Undocumented Projects', '', false)).toBeLessThan(980)
-    expect(clusterLabelX(500, 'Developer Tools', '', false)).toBe(500)
-  })
-
   it('chooses the geometrically nearest repository in overlapping hit areas', () => {
     const first = makeAtlas().repos[0]
     const second = { ...first, full_name: 'owner/second', name: 'second', x: 515 }
@@ -80,47 +77,37 @@ describe('MapView', () => {
     }
   })
 
-  it('shows region glosses on ordinary desktop maps', () => {
-    expect(clusterGlossesVisible(1, 800)).toBe(true)
-    expect(clusterGlossesVisible(1, 600)).toBe(false)
-    expect(clusterGlossesVisible(2, 800)).toBe(false)
-    expect(clusterGlossesVisible(1, 800, true)).toBe(false)
-    expect(clusterLabelX(80, 'AI', 'A'.repeat(100), clusterGlossesVisible(1, 800, true))).toBe(80)
-  })
-
-  it('omits invisible tablet glosses and their positioning space', () => {
+  it('never renders overview descriptions', () => {
     const data = makeAtlas()
-    data.clusters[0].label = 'AI'
-    data.clusters[0].label_anchor.x = 80
-    data.clusters[0].gloss = 'A'.repeat(100)
-    const { container } = render(
-      <MapView data={data} view={view} visible={new Set(data.repos.map((repo) => repo.full_name))}
-        selected={null} onSelect={vi.fn()} />,
-    )
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
     expect(container.querySelector('.cluster-gloss')).toBeNull()
-    expect(container.querySelector('.cluster-label')?.getAttribute('transform')).toContain('translate(80 ')
+    expect(container.textContent).not.toContain(data.clusters[0].gloss)
+    expect(container.querySelector('.map-grid')).toBeNull()
   })
 
   it('uses map-level hit testing instead of overlapping transparent circles', () => {
     const data = makeAtlas()
+    vi.useFakeTimers()
     const onSelect = vi.fn()
     const { container } = render(
-      <MapView data={data} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={onSelect} />,
+      <MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={onSelect} />,
     )
     const svg = container.querySelector('svg')!
     vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({
       left: 0, top: 0, width: 1000, height: 1000, right: 1000, bottom: 1000,
       x: 0, y: 0, toJSON: () => ({}),
     })
-    fireEvent.pointerDown(svg, { clientX: 510, clientY: 500 })
-    fireEvent.click(svg, { clientX: 510, clientY: 500, detail: 1 })
+    const [clientX, clientY] = zoomTransform(svg).apply([500, 500])
+    fireEvent.pointerDown(svg, { clientX, clientY })
+    fireEvent.click(svg, { clientX, clientY, detail: 1 })
     expect(container.querySelector('.touch-target')).toBeNull()
-    expect(onSelect).toHaveBeenCalledWith(data.repos[0])
+    act(() => vi.advanceTimersByTime(300))
+    expect(onSelect).toHaveBeenCalledWith(data.repos[0], expect.objectContaining({ clickToken: expect.any(Number) }))
   })
 
   it('centers selected repositories in the visible map area above the mobile sheet', () => {
-    expect(mobileMapTargetY({ left: 0, top: 176, width: 390, height: 668 }, 338)).toBeCloseTo(207.69, 1)
-    expect(mobileMapTargetY({ left: 0, top: 0, width: 800, height: 800 }, 480)).toBe(300)
+    expect(mobileMapTargetY({ left: 0, top: 176, width: 390, height: 668 }, 338)).toBe(81)
+    expect(mobileMapTargetY({ left: 0, top: 0, width: 800, height: 800 }, 480)).toBe(240)
     expect(pointerToMapPoint(
       195,
       176,
@@ -129,12 +116,78 @@ describe('MapView', () => {
     ).y).toBe(0)
   })
 
+  it('zooms by 1.25 and resets to fit without changing selection or filters', () => {
+    const data = makeAtlas()
+    const onSelect = vi.fn()
+    const { container, rerender } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={onSelect} />)
+    const initial = container.querySelector('.map-geometry')!.getAttribute('transform')
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('125%')
+    const zoomed = container.querySelector('.map-geometry')!.getAttribute('transform')
+    rerender(<MapView data={data} presentation={atlasPresentation(data)} view={{ ...view, languages: ['Other'] }} visible={new Set()} selected={null} onSelect={onSelect} />)
+    expect(container.querySelector('.map-geometry')!.getAttribute('transform')).toBe(zoomed)
+    fireEvent.click(screen.getByRole('button', { name: 'Reset view' }))
+    expect(container.querySelector('.map-geometry')!.getAttribute('transform')).toBe(initial)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('100%')
+    expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('double-clicks to zoom around the pointer without selecting a repository', () => {
+    const data = makeAtlas()
+    const onSelect = vi.fn()
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={onSelect} />)
+    const svg = container.querySelector('svg')!
+    vi.spyOn(svg, 'getBoundingClientRect').mockReturnValue({
+      left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700,
+      x: 0, y: 0, toJSON: () => ({}),
+    })
+    const pointer: [number, number] = [725, 275]
+    const initial = zoomTransform(svg)
+    const point = initial.invert(pointer)
+
+    fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
+
+    const zoomed = zoomTransform(svg)
+    expect(zoomed.k).toBeCloseTo(initial.k * 2)
+    expect(zoomed.apply(point)[0]).toBeCloseTo(pointer[0])
+    expect(zoomed.apply(point)[1]).toBeCloseTo(pointer[1])
+    expect(onSelect).not.toHaveBeenCalled()
+
+    for (let index = 0; index < 8; index += 1) {
+      fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
+    }
+    expect(zoomTransform(svg).k).toBeCloseTo(initial.k * 10)
+  })
+
+  it('preserves an explicit region fit through the resize caused by wrapping filter counts', () => {
+    let width = 390, height = 670
+    let resize: (() => void) | undefined
+    vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { resize = callback } observe() {} disconnect() {} })
+    vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('max-width'), addEventListener() {}, removeEventListener() {} }))
+    const bounds = vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 170, width, height, right: width, bottom: height + 170, x: 0, y: 170, toJSON() {} }))
+    const first = makeAtlas().repos[0]
+    const data = makeAtlas([{ ...first, x: 100, y: 100 }, { ...first, full_name: 'owner/far', x: 900, y: 900, cluster_id: 1 }])
+    data.clusters.push({ ...data.clusters[0], id: 1, label: 'Far Away' })
+    const props = { data, presentation: atlasPresentation(data), view, visible: new Set(data.repos.map(repo => repo.full_name)), selected: null, onSelect: vi.fn() }
+    const { rerender } = render(<MapView {...props} />)
+    rerender(<MapView {...props} navigationRequest={{ kind: 'region', target: 'Developer Tools', nonce: 1 }} />)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('400%')
+    height = 655
+    act(() => resize?.())
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('400%')
+    width = 768
+    act(() => resize?.())
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('400%')
+    bounds.mockRestore()
+  })
+
   it('closes details with Escape even after focus moves outside the map', () => {
     const data = makeAtlas()
     const onSelect = vi.fn()
     render(
       <MapView
         data={data}
+        presentation={atlasPresentation(data)}
         view={{ ...view, repo: data.repos[0].full_name }}
         visible={new Set([data.repos[0].full_name])}
         selected={data.repos[0]}
@@ -153,6 +206,7 @@ describe('MapView', () => {
     render(
       <MapView
         data={data}
+        presentation={atlasPresentation(data)}
         view={{ ...view, repo: first.full_name }}
         visible={new Set(data.repos.map((repo) => repo.full_name))}
         selected={first}
@@ -171,6 +225,7 @@ describe('MapView', () => {
     render(
       <MapView
         data={data}
+        presentation={atlasPresentation(data)}
         view={{ ...view, repo: first.full_name }}
         visible={new Set(data.repos.map((repo) => repo.full_name))}
         selected={first}

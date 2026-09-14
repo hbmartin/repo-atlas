@@ -60,6 +60,7 @@ export interface AtlasData {
   generated_at: string
   owner: string
   embedding_model?: string
+  fallback_label_ids?: number[]
   layout: 'umap' | 'force'
   layout_alt: 'umap' | 'force'
   bounds: { x: [number, number]; y: [number, number] }
@@ -96,3 +97,6 @@ export interface WebModelContext {
 declare global {
   interface Document { readonly modelContext?: WebModelContext }
 }
+
+export type MapNavigationRequest = { nonce: number; kind: 'repo' | 'region'; target: string; clickToken?: number }
+export type SelectionOptions = { navigate?: boolean; clickToken?: number }

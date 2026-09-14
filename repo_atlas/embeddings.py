@@ -4,6 +4,8 @@ from abc import ABC, abstractmethod
 
 import numpy as np
 
+from .errors import AtlasError
+
 
 def l2_normalize(vectors: np.ndarray) -> np.ndarray:
     values = np.asarray(vectors, dtype=np.float32)
@@ -44,7 +46,7 @@ class LocalEmbedder(Embedder):
         try:
             from sentence_transformers import SentenceTransformer
         except ImportError as exc:
-            raise RuntimeError("Install the local extra with `uv sync --extra local`.") from exc
+            raise AtlasError("Install the local extra with `uv sync --extra local`.") from exc
         model = SentenceTransformer(self.model_id)
         return l2_normalize(model.encode(texts, batch_size=16, show_progress_bar=True))
 

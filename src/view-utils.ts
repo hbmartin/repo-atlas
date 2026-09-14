@@ -16,12 +16,10 @@ export function pointerToMapPoint(
   bounds: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
   transform: { x: number; y: number; k: number },
 ) {
-  const scale = Math.min(bounds.width, bounds.height) / 1000
-  const offsetX = (bounds.width - 1000 * scale) / 2
   return {
-    x: ((clientX - bounds.left - offsetX) / scale - transform.x) / transform.k,
-    y: ((clientY - bounds.top) / scale - transform.y) / transform.k,
-    unitsPerPixel: 1 / scale / transform.k,
+    x: (clientX - bounds.left - transform.x) / transform.k,
+    y: (clientY - bounds.top - transform.y) / transform.k,
+    unitsPerPixel: 1 / transform.k,
   }
 }
 
@@ -29,13 +27,7 @@ export function mobileMapTargetY(
   bounds: Pick<DOMRect, 'left' | 'top' | 'width' | 'height'>,
   occlusionTop: number,
 ) {
-  const scale = Math.min(bounds.width, bounds.height) / 1000
-  if (!Number.isFinite(scale) || scale <= 0) return 210
-  const contentTop = bounds.top
-  const contentBottom = contentTop + 1000 * scale
-  const visibleBottom = Math.min(contentBottom, occlusionTop)
-  const visibleHeight = Math.max(0, visibleBottom - contentTop)
-  return Math.max(30, Math.min(500, visibleHeight / (2 * scale)))
+  return Math.max(24, Math.min(bounds.height, occlusionTop - bounds.top) / 2)
 }
 
 export function nearestRepoInDirection(
@@ -107,29 +99,13 @@ export function nearestRepoAtPoint(
   return nearest
 }
 
-export function clusterGlossesVisible(zoomScale: number, mapSize: number, compact: boolean = false) {
-  return !compact && zoomScale < 1.5 && mapSize >= 700
-}
-
-export function clusterLabelX(
-  anchorX: number,
-  label: string,
-  gloss: string,
-  showGloss: boolean,
-) {
-  const estimatedWidth = Math.min(
-    960,
-    Math.max(label.length * 9, showGloss ? gloss.length * 5.5 : 0),
-  )
-  const halfWidth = estimatedWidth / 2
-  return Math.max(halfWidth + 10, Math.min(990 - halfWidth, anchorX))
-}
-
 export function toggleValue(values: string[], value: string) {
   return values.includes(value)
     ? values.filter((item) => item !== value)
     : [...values, value]
 }
+
+export const COMPACT_MEDIA_QUERY = '(max-width: 1023px)'
 
 export function useMediaQuery(queryText: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(queryText).matches)

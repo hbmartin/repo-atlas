@@ -61,9 +61,10 @@ export function Filters({
         </div>
       </details>
       <label className="date-filter">
-        <span>{view.since ? `Updated since ${formatDate(view.since)}` : 'All update dates'}</span>
+        <span>Updated since <strong>{view.since ? formatDate(view.since) : 'All dates'}</strong></span>
         <input
           aria-label="Earliest repository update month"
+          aria-valuetext={view.since ? formatDate(view.since) : 'All dates'}
           type="range"
           min={minMonth}
           max={maxMonth}
@@ -74,13 +75,16 @@ export function Filters({
           }}
         />
       </label>
+      <details className="filter-popover map-options"><summary>Map options</summary><div className="filter-menu">
+      <p>Switch the projection to explore another arrangement of the same repositories.</p>
       <button
         className={`layout-toggle ${view.layoutAlt ? 'active' : ''}`}
         aria-pressed={view.layoutAlt}
         onClick={() => setView({ ...view, layoutAlt: !view.layoutAlt })}
       >
-        Compare layout
+        Alternate layout
       </button>
+      </div></details>
     </div>
   )
 }

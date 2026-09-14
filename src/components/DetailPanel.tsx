@@ -1,10 +1,12 @@
 import { useEffect, useRef } from 'react'
 import type { AtlasCluster, AtlasRepo } from '../types'
 import { formatDate } from '../view-utils'
+import { FallbackLabel, FALLBACK_LABEL_EXPLANATION } from './FallbackLabel'
 
 export function DetailPanel({
   repo,
   cluster,
+  fallbackLabel = false,
   reposByName,
   onSelect,
   onRegion,
@@ -12,6 +14,7 @@ export function DetailPanel({
 }: {
   repo: AtlasRepo | null
   cluster: AtlasCluster | undefined
+  fallbackLabel?: boolean
   reposByName: Map<string, AtlasRepo>
   onSelect: (repo: AtlasRepo) => void
   onRegion: (label: string) => void
@@ -22,14 +25,7 @@ export function DetailPanel({
   useEffect(() => {
     if (repo) panel.current?.focus({ preventScroll: true })
   }, [repo])
-  if (!repo) return (
-    <aside className="detail-panel empty">
-      <div className="empty-orbit" aria-hidden="true"><i /><i /><i /></div>
-      <h2>Select a repository</h2>
-      <p>Choose any point to see what it does and which projects live nearby.</p>
-      <span>Tip: press <kbd>/</kbd> to search</span>
-    </aside>
-  )
+  if (!repo) return null
   return (
     <aside
       ref={panel}
@@ -89,6 +85,7 @@ export function DetailPanel({
       {cluster && (
         <button className="region-card" onClick={() => onRegion(cluster.label)}>
           <small>Region</small><strong>{cluster.label}</strong><span>{cluster.gloss}</span>
+          {fallbackLabel && <><FallbackLabel /><span>{FALLBACK_LABEL_EXPLANATION}</span></>}
         </button>
       )}
       {repo.topics.length > 0 && (

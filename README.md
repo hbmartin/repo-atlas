@@ -20,7 +20,7 @@ pnpm install --frozen-lockfile
 uv run atlas doctor
 ```
 
-Create `config/exclude.txt` from the provided example when repositories should be omitted. The real file is intentionally ignored.
+Archived repositories are omitted automatically. Create `config/exclude.txt` from the provided example when additional repositories should be omitted. The real file is intentionally ignored.
 
 ## Build the atlas
 
@@ -29,7 +29,7 @@ uv run atlas run
 pnpm run build
 ```
 
-The default run uses OpenAI's structured-output API for summaries and `text-embedding-3-large` for embeddings. The API summarizer has no filesystem, shell, or browser tools. Local agent CLIs remain available with `--summarizer claude|codex|gemini --allow-agent-summarizer`; that flag is an explicit acknowledgement that an agent CLI may access local files and its provider credentials. The Codex adapter checks CLI compatibility offline and disables all reported configurable features before sending evidence; it fails if required isolation controls are unavailable. This is defense in depth, not a zero-tools guarantee. Select embedding implementations with `--embedder hosted|local`, and install BGE-M3 with `uv sync --extra local`. Hosted embedding failures fail closed by default. Pass `--allow-fallback` only when deliberately accepting the lower-fidelity deterministic TF-IDF/SVD representation; the generated metadata records `tfidf-svd-v2-fallback` so it cannot be mistaken for hosted embeddings.
+The default run uses OpenAI's structured-output API for summaries and `text-embedding-3-large` for embeddings. The API summarizer has no filesystem, shell, or browser tools. Local agent CLIs remain available with `--summarizer claude|codex|gemini --allow-agent-summarizer`; that flag is an explicit acknowledgement that an agent CLI may access local files and its provider credentials. The Codex adapter checks CLI compatibility offline, validates the generated exec arguments, and disables all reported active configurable features before sending evidence; it fails if required isolation controls are unavailable. Checks run in an isolated configuration directory and can be cancelled. Successful checks are shared across stages for the same executable; authenticated execution retains the provider environment while ignoring user configuration. These checks verify adapter controls, not every aspect of the CLI runtime. This is defense in depth, not a zero-tools guarantee. Select embedding implementations with `--embedder hosted|local`, and install BGE-M3 with `uv sync --extra local`. Hosted embedding failures fail closed by default. Pass `--allow-fallback` only when deliberately accepting the lower-fidelity deterministic TF-IDF/SVD representation; the generated metadata records `tfidf-svd-v2-fallback` so it cannot be mistaken for hosted embeddings.
 
 Runs are resumable and stage-addressable:
 
@@ -48,7 +48,7 @@ uv run atlas cache stats
 uv run atlas cache prune --keep-runs 20 --keep-stage-entries 20
 ```
 
-Each repository is committed to `.atlas/cache.db` as it completes. Summaries are frozen against content, prompt, provider, and template versions; unchanged runs make no model calls. A failed refresh is recorded separately and never overwrites the last good summary. Runs require a complete current summary corpus by default; `--best-effort` explicitly permits failed repositories to be omitted without publishing their stale summaries and permits deterministic fallback cluster labels after model failures. Fallback labels are cached with provenance for resuming with `--best-effort`; rerunning the label stage retries model labeling. Missing executables and configuration errors always stop the run. Incremental vectors are added automatically because model-specific rows do not overwrite one another. A complete hosted corpus always wins over fallback vectors; fallback use still requires `--allow-fallback`. Fallback vectors are replaced atomically as a complete corpus; older v1 fallback caches must be rebuilt. Successful GitHub responses are returned immediately, even with low remaining quota. When GitHub rejects a request because of a rate limit, quota resets are awaited for up to 3660 seconds by default; lower that bound with `--max-rate-limit-wait` when fail-fast behavior is preferred.
+Each repository is committed to `.atlas/cache.db` as it completes. Summaries are frozen against content, prompt, provider, and template versions; unchanged runs make no model calls. A failed refresh is recorded separately and never overwrites the last good summary. Runs require a complete current summary corpus by default; `--best-effort` explicitly permits failed repositories to be omitted without publishing their stale summaries and permits deterministic fallback cluster labels after model failures. Fallback labels are cached with provenance for resuming with `--best-effort`; rerunning the label stage retries model labeling. Missing executables and configuration errors always stop the run. Temporary process-start failures are retried up to three times; nonretryable item failures such as oversized arguments can be omitted or use fallback labels under `--best-effort`. A failed collision-label retry preserves and deduplicates the first model label. Fallback labels are marked in the atlas guide and repository region cards. Provider CLI diagnostics remain detailed in logs, failure records, and repair prompts, with best-effort masking of forwarded credential values and URL authentication; redaction is not a guarantee against every transformed secret. Incremental vectors are added automatically because model-specific rows do not overwrite one another. A complete hosted corpus always wins over fallback vectors; fallback use still requires `--allow-fallback`. Fallback vectors are replaced atomically as a complete corpus; older v1 fallback caches must be rebuilt. Successful GitHub responses are returned immediately, even with low remaining quota. When GitHub rejects a request because of a rate limit, quota resets are awaited for up to 3660 seconds by default; lower that bound with `--max-rate-limit-wait` when fail-fast behavior is preferred.
 
 The legacy `labels set --lock` spelling remains supported. `labels set --unlock` reports a migration message directing you to `atlas labels unlock ID`.
 
@@ -80,6 +80,12 @@ and rollback. Cloudflare deploys the committed atlas snapshot; Python and model
 credentials are only needed when regenerating that snapshot locally.
 
 ## Verification
+
+The frontend uses the language categories and colors emitted in `atlas.json`.
+Region buttons focus one region; the filter checkboxes toggle membership. Mouse
+selection waits 300 ms to distinguish a click from double-click zoom. Navigation
+requests are consumed once after map measurement; resizing preserves a navigated
+camera, and switching between list and map starts a fresh overview.
 
 ```bash
 uv run pytest --cov=repo_atlas --cov-report=term-missing --cov-fail-under=35

@@ -1,3 +1,4 @@
+import { knownLanguage, normalizeLanguages } from './presentation'
 import type { AtlasData, AtlasRepo, ViewState } from './types'
 
 const MONTH = /^\d{4}-(0[1-9]|1[0-2])$/
@@ -103,6 +104,16 @@ export function validateAtlas(value: unknown): AtlasData {
       }
     }
   })
+  if (data.fallback_label_ids !== undefined) {
+    if (!Array.isArray(data.fallback_label_ids)) throw new Error('fallback_label_ids must be an array')
+    const seen = new Set<number>()
+    for (const id of data.fallback_label_ids) {
+      if (!Number.isInteger(id) || !clusterIds.has(id) || seen.has(id)) {
+        throw new Error('fallback_label_ids must contain unique existing integer cluster IDs')
+      }
+      seen.add(id)
+    }
+  }
   const repoNames = new Set<string>()
   data.repos.forEach((repo, index) => {
     const path = `repos[${index}]`
@@ -158,13 +169,12 @@ export async function loadAtlas(): Promise<AtlasData> {
 
 export function parseViewState(search: string, data: AtlasData): ViewState {
   const params = new URLSearchParams(search)
-  const knownLanguages = new Set(data.languages.map((language) => language.name))
   const knownRegions = new Set([...data.clusters.map((cluster) => cluster.label), 'Unclustered'])
   const repo = params.get('repo')
   const since = params.get('since')
   return {
     repo: repo && data.repos.some((item) => item.full_name === repo) ? repo : null,
-    languages: [...new Set((params.get('lang') ?? '').split(',').filter((value) => knownLanguages.has(value)))],
+    languages: normalizeLanguages((params.get('lang') ?? '').split(',').filter((value) => knownLanguage(data, value))),
     regions: [...new Set((params.get('region') ?? '').split(',').filter((value) => knownRegions.has(value)))],
     since: since && validMonth(since) ? since : null,
     layoutAlt: params.get('layout') === 'alt',
@@ -177,8 +187,7 @@ export function unknownViewParameters(search: string, data: AtlasData): string[]
   const unknown = [...new Set([...params.keys()].filter((key) => !knownKeys.has(key)))]
   const repo = params.get('repo')
   if (repo && !data.repos.some((item) => item.full_name === repo)) unknown.push(`repo=${repo}`)
-  const languages = new Set(data.languages.map((item) => item.name))
-  for (const value of (params.get('lang') ?? '').split(',').filter(Boolean)) if (!languages.has(value)) unknown.push(`lang=${value}`)
+  for (const value of (params.get('lang') ?? '').split(',').filter(Boolean)) if (!knownLanguage(data, value)) unknown.push(`lang=${value}`)
   const regions = new Set([...data.clusters.map((item) => item.label), 'Unclustered'])
   for (const value of (params.get('region') ?? '').split(',').filter(Boolean)) if (!regions.has(value)) unknown.push(`region=${value}`)
   const since = params.get('since')
@@ -191,7 +200,7 @@ export function unknownViewParameters(search: string, data: AtlasData): string[]
 export function writeViewState(state: ViewState): string {
   const params = new URLSearchParams()
   if (state.repo) params.set('repo', state.repo)
-  if (state.languages.length) params.set('lang', state.languages.join(','))
+  if (state.languages.length) params.set('lang', normalizeLanguages(state.languages).join(','))
   if (state.regions.length) params.set('region', state.regions.join(','))
   if (state.since) params.set('since', state.since)
   if (state.layoutAlt) params.set('layout', 'alt')
