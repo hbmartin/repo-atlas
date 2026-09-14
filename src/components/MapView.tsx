@@ -157,8 +157,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (!viewport.measured || viewport.alt !== view.layoutAlt) return
     zoomRef.current?.scaleExtent([fit.k * .6, fit.k * 10])
       .constrain(next => constrainMapTransform(next, size, bounds))
-    apply(transform)
-  }, [viewport.measured, viewport.alt, view.layoutAlt, fit.k, size, bounds, transform, apply])
+    apply(transformRef.current)
+  }, [viewport.measured, viewport.alt, view.layoutAlt, fit.k, size, bounds, apply])
 
   const centeredProjection = useRef(view.layoutAlt)
   useLayoutEffect(() => {
