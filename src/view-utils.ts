@@ -106,6 +106,8 @@ export function toggleValue(values: string[], value: string) {
 }
 
 export const COMPACT_MEDIA_QUERY = '(max-width: 1023px)'
+export const REDUCED_MOTION_MEDIA_QUERY = '(prefers-reduced-motion: reduce)'
+export const MAP_TRANSITION_DURATION = 250
 
 export function useMediaQuery(queryText: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(queryText).matches)
@@ -120,5 +122,5 @@ export function useMediaQuery(queryText: string) {
 }
 
 export function useReducedMotion() {
-  return useMediaQuery('(prefers-reduced-motion: reduce)')
+  return useMediaQuery(REDUCED_MOTION_MEDIA_QUERY)
 }
