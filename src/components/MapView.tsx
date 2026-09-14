@@ -1,13 +1,13 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { select } from 'd3-selection'
-import 'd3-transition'
-import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from 'd3-zoom'
+import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
 import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
 import { UNKNOWN_LANGUAGE_COLOR, type AtlasPresentation } from '../presentation'
 import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, type Box, type Size } from '../map-geometry'
 
 const PLACEHOLDER_SIZE = { width: 1000, height: 700 }
+const easeCubicInOut = (value: number) => ((value *= 2) <= 1 ? value ** 3 : (value -= 2) * value ** 2 + 2) / 2
 type ClickGesture = {
   token: number; kind: 'repo' | 'region'; target: AtlasRepo | string | null
   selection: AtlasRepo | null; camera: ZoomTransform; committed: boolean
@@ -30,11 +30,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   highlightRegion?: number | null; onRegion?: (label: string, clickToken?: number) => void
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
-  const geometryRef = useRef<SVGGElement>(null)
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
-  const liveTransformRef = useRef(zoomIdentity)
-  const targetTransformRef = useRef(zoomIdentity)
-  const syncingCamera = useRef(false)
+  const programmaticTransform = useRef(false)
   const navigated = useRef(false)
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
@@ -47,6 +44,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const clickGesture = useRef<ClickGesture | null>(null)
   const clickSequence = useRef(0)
   const frame = useRef<number | null>(null)
+  const animationFrame = useRef<number | null>(null)
+  const animationToken = useRef(0)
   const compact = useMediaQuery(COMPACT_MEDIA_QUERY)
   const reduced = useReducedMotion()
   const fontSize = compact ? 12 : 13
@@ -72,11 +71,11 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     return { size: PLACEHOLDER_SIZE, fit, transform: fit, measured: false, alt: view.layoutAlt, layoutToken: preparedLabels }
   })
   const viewportRef = useRef(viewport)
+  const targetTransformRef = useRef(viewport.transform)
+  const boundsRef = useRef(bounds)
+  useLayoutEffect(() => { boundsRef.current = bounds }, [bounds])
   useLayoutEffect(() => { viewportRef.current = viewport }, [viewport])
   const { size, fit, transform } = viewport
-  const renderGeometry = useCallback((next: ZoomTransform) => {
-    geometryRef.current?.setAttribute('transform', next.toString())
-  }, [])
   const commitTransform = useCallback((next: ZoomTransform) => {
     if (frame.current != null) cancelAnimationFrame(frame.current)
     frame.current = null
@@ -86,35 +85,70 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (frame.current != null) return
     frame.current = requestAnimationFrame(() => {
       frame.current = null
-      const next = liveTransformRef.current
-      setViewport(current => sameTransform(current.transform, next) ? current : { ...current, transform: next })
+      if (svgRef.current) commitTransform(zoomTransform(svgRef.current))
     })
+  }, [commitTransform])
+  const cancelCameraAnimation = useCallback(() => {
+    animationToken.current += 1
+    if (animationFrame.current != null) cancelAnimationFrame(animationFrame.current)
+    animationFrame.current = null
   }, [])
-  const setGeometryNode = useCallback((node: SVGGElement | null) => {
-    geometryRef.current = node
-    if (node) node.setAttribute('transform', liveTransformRef.current.toString())
+  const writeTransform = useCallback((next: ZoomTransform) => {
+    if (!svgRef.current || !zoomRef.current) return
+    programmaticTransform.current = true
+    try {
+      select(svgRef.current).call(zoomRef.current.transform, next)
+    } finally {
+      programmaticTransform.current = false
+    }
+  }, [])
+  const animateTransform = useCallback((next: ZoomTransform) => {
+    const node = svgRef.current
+    const behavior = zoomRef.current
+    if (!node || !behavior) return
+    const rect = node.getBoundingClientRect()
+    const width = Math.max(rect.width, rect.height)
+    if (width <= 0) { writeTransform(next); return }
+    const center: [number, number] = [rect.width / 2, rect.height / 2]
+    const current = zoomTransform(node)
+    if (sameTransform(current, next)) { writeTransform(next); return }
+    const currentCenter = current.invert(center)
+    const nextCenter = next.invert(center)
+    const interpolate = behavior.interpolate()(
+      [currentCenter[0], currentCenter[1], width / current.k],
+      [nextCenter[0], nextCenter[1], width / next.k],
+    )
+    const started = performance.now()
+    const token = ++animationToken.current
+    const tick = () => {
+      if (token !== animationToken.current) return
+      const progress = Math.min(1, (performance.now() - started) / MAP_TRANSITION_DURATION)
+      if (progress === 1) {
+        writeTransform(next)
+        animationFrame.current = null
+        return
+      }
+      const [x, y, interpolatedWidth] = interpolate(easeCubicInOut(progress))
+      const k = width / interpolatedWidth
+      writeTransform(new ZoomTransform(k, center[0] - x * k, center[1] - y * k))
+      animationFrame.current = requestAnimationFrame(tick)
+    }
+    animationFrame.current = requestAnimationFrame(tick)
+  }, [writeTransform])
+  const configureZoom = useCallback((behavior: ZoomBehavior<SVGSVGElement, unknown>, currentFit: ZoomTransform) => {
+    behavior.scaleExtent([currentFit.k * .6, currentFit.k * 10])
+      .constrain(next => constrainMapTransform(next, viewportRef.current.size, boundsRef.current))
   }, [])
   const pointX = useCallback((repo: AtlasRepo) => view.layoutAlt ? repo.x_alt : repo.x, [view.layoutAlt])
   const pointY = useCallback((repo: AtlasRepo) => view.layoutAlt ? repo.y_alt : repo.y, [view.layoutAlt])
   const apply = useCallback((next: ZoomTransform, animate = false) => {
     if (!svgRef.current || !zoomRef.current) return
     const constrained = constrainMapTransform(next, size, bounds)
+    cancelCameraAnimation()
     targetTransformRef.current = constrained
-    const selection = select(svgRef.current)
-    if (animate && !reduced) {
-      selection.interrupt().transition().duration(MAP_TRANSITION_DURATION).call(zoomRef.current.transform, constrained)
-    } else {
-      syncingCamera.current = true
-      try {
-        selection.interrupt().call(zoomRef.current.transform, constrained)
-      } finally {
-        syncingCamera.current = false
-      }
-      liveTransformRef.current = constrained
-      renderGeometry(constrained)
-      commitTransform(constrained)
-    }
-  }, [reduced, size, bounds, renderGeometry, commitTransform])
+    if (animate && !reduced) animateTransform(constrained)
+    else writeTransform(constrained)
+  }, [reduced, size, bounds, cancelCameraAnimation, animateTransform, writeTransform])
   const availableCenter = useCallback((): [number, number] => {
     const rect = svgRef.current?.getBoundingClientRect()
     const top = document.querySelector<HTMLElement>('.detail-panel.populated')?.getBoundingClientRect().top
@@ -130,36 +164,30 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const node = svgRef.current!
     const behavior = zoom<SVGSVGElement, unknown>()
       .extent((): [[number, number], [number, number]] => [[0, 0], [node.getBoundingClientRect().width, node.getBoundingClientRect().height]])
-      .on('start', event => {
-        if (event.sourceEvent) targetTransformRef.current = event.transform
-      })
       .on('zoom', event => {
-        liveTransformRef.current = event.transform
-        renderGeometry(event.transform)
-        if (event.sourceEvent) {
+        if (programmaticTransform.current) {
+          commitTransform(event.transform)
+        } else {
+          cancelCameraAnimation()
           targetTransformRef.current = event.transform
           navigated.current = true
           cancelClick()
+          scheduleTransform()
         }
-        if (!syncingCamera.current) scheduleTransform()
-      })
-      .on('end', event => {
-        liveTransformRef.current = event.transform
-        renderGeometry(event.transform)
-        if (event.sourceEvent) targetTransformRef.current = event.transform
-        if (!syncingCamera.current) commitTransform(event.transform)
       })
     zoomRef.current = behavior
+    configureZoom(behavior, viewportRef.current.fit)
     select(node).call(behavior).on('dblclick.zoom', null)
+    writeTransform(viewportRef.current.transform)
     return () => {
-      syncingCamera.current = true
-      select(node).interrupt().on('.zoom', null)
-      syncingCamera.current = false
+      cancelCameraAnimation()
+      select(node).on('.zoom', null)
+      zoomRef.current = null
       cancelClick()
       if (frame.current != null) cancelAnimationFrame(frame.current)
       frame.current = null
     }
-  }, [cancelClick, renderGeometry, scheduleTransform, commitTransform])
+  }, [cancelClick, cancelCameraAnimation, scheduleTransform, commitTransform, configureZoom, writeTransform])
 
   useLayoutEffect(() => {
     const node = svgRef.current!
@@ -167,6 +195,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       const rect = node.getBoundingClientRect()
       if (rect.width <= 0 || rect.height <= 0) return
       const current = viewportRef.current
+      const behavior = zoomRef.current!
+      configureZoom(behavior, current.fit)
       const nextSize = current.size.width === rect.width && current.size.height === rect.height
         ? current.size : { width: rect.width, height: rect.height }
       const inputsChanged = current.layoutToken !== preparedLabels
@@ -185,29 +215,22 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         size: nextSize, fit: nextFit, transform: nextTransform, measured: true,
         alt: view.layoutAlt, layoutToken: preparedLabels,
       }
+      cancelCameraAnimation()
       targetTransformRef.current = nextTransform
-      liveTransformRef.current = nextTransform
       viewportRef.current = nextViewport
-      const behavior = zoomRef.current!
-      behavior.scaleExtent([nextFit.k * .6, nextFit.k * 10])
-        .constrain(next => constrainMapTransform(next, nextSize, bounds))
-      syncingCamera.current = true
-      try {
-        select(node).interrupt().call(behavior.transform, nextTransform)
-      } finally {
-        syncingCamera.current = false
-      }
-      renderGeometry(nextTransform)
+      configureZoom(behavior, nextFit)
       setViewport(nextViewport)
+      writeTransform(nextTransform)
     }
     const observer = new ResizeObserver(resize)
     observer.observe(node)
     resize()
     return () => observer.disconnect()
-  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick, renderGeometry])
+  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick, cancelCameraAnimation, configureZoom, writeTransform])
 
   useLayoutEffect(() => {
-    if (reduced && !sameTransform(liveTransformRef.current, targetTransformRef.current)) apply(targetTransformRef.current)
+    const node = svgRef.current
+    if (reduced && node && !sameTransform(zoomTransform(node), targetTransformRef.current)) apply(targetTransformRef.current)
   }, [reduced, apply])
 
   const centeredProjection = useRef(view.layoutAlt)
@@ -303,8 +326,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   if (hoverRegion != null && !renderedLabelIds.has(hoverRegion)) setHoverRegion(null)
   if (focusedRegion != null && !renderedLabelIds.has(focusedRegion)) setFocusedRegion(null)
   const activeRegion = activeRepo?.cluster_id ?? hoverRegion ?? focusedRegion ?? highlightRegion ?? selected?.cluster_id
-  const hitRepo = (clientX: number, clientY: number) => {
-    const point = pointerToMapPoint(clientX, clientY, svgRef.current!.getBoundingClientRect(), liveTransformRef.current)
+  const currentTransform = () => svgRef.current ? zoomTransform(svgRef.current) : viewportRef.current.transform
+  const hitRepo = (clientX: number, clientY: number, camera: ZoomTransform) => {
+    const point = pointerToMapPoint(clientX, clientY, svgRef.current!.getBoundingClientRect(), camera)
     return nearestRepoAtPoint(data.repos, visible, point.x, point.y, 22 * point.unitsPerPixel, view.layoutAlt, drawnRadius, selected?.full_name)
   }
   const changeZoom = (factor: number) => {
@@ -331,9 +355,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (gesture.kind === 'repo') onSelect(gesture.target as AtlasRepo | null, { clickToken: gesture.token })
     else onRegion?.(gesture.target as string, gesture.token)
   }
-  const queueClick = (kind: 'repo' | 'region', target: AtlasRepo | string | null) => {
+  const queueClick = (kind: 'repo' | 'region', target: AtlasRepo | string | null, camera = currentTransform()) => {
     cancelClick()
-    const gesture: ClickGesture = { token: ++clickSequence.current, kind, target, selection: selected, camera: targetTransformRef.current, committed: false }
+    const gesture: ClickGesture = { token: ++clickSequence.current, kind, target, selection: selected, camera, committed: false }
     gesture.timer = setTimeout(() => commitClick(gesture), 300)
     clickGesture.current = gesture
   }
@@ -368,9 +392,10 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         const start = pointerStart.current; pointerStart.current = null
         if (start?.dragged) return
         if (event.detail > 1) return
-        const repo = hitRepo(event.clientX, event.clientY)
+        const camera = currentTransform()
+        const repo = hitRepo(event.clientX, event.clientY, camera)
         if (start?.type === 'touch') selectImmediately(repo)
-        else queueClick('repo', repo)
+        else queueClick('repo', repo, camera)
       }}
       onDoubleClick={event => {
         event.preventDefault()
@@ -386,7 +411,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         zoomAtPointer(event.clientX, event.clientY, gesture?.kind === 'repo' ? gesture.camera : undefined)
       }}>
       <rect width={size.width} height={size.height} className="map-bg" />
-      <g ref={setGeometryNode} className="map-geometry">{mapGeometry}</g>
+      <g transform={transform.toString()} className="map-geometry">{mapGeometry}</g>
       <g className="region-leaders" aria-hidden="true">
         {labels.map(label => {
           const cluster = clustersById.get(label.id)!

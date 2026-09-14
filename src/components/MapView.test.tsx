@@ -1,26 +1,21 @@
 // @vitest-environment jsdom
+import { StrictMode } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { zoomTransform } from 'd3-zoom'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas } from '../test-fixtures'
-import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia } from '../test-dom'
+import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia, uninstallCameraClock } from '../test-dom'
 import type { ViewState } from '../types'
 import {
   mobileMapTargetY,
   nearestRepoAtPoint,
   pointerToMapPoint,
 } from '../view-utils'
+import { atlasBounds, constrainMapTransform } from '../map-geometry'
 import { atlasPresentation } from '../presentation'
+import { MapView } from './MapView'
 
 const view: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
-let MapView: typeof import('./MapView').MapView
-let zoomTransform: typeof import('d3-zoom').zoomTransform
-
-beforeAll(async () => {
-  vi.useFakeTimers({ toNotFake: ['performance'] })
-  ;({ MapView } = await import('./MapView'))
-  ;({ zoomTransform } = await import('d3-zoom'))
-})
-afterAll(() => vi.useRealTimers())
 
 beforeEach(() => {
   installCameraClock()
@@ -33,6 +28,7 @@ beforeEach(() => {
 })
 afterEach(() => {
   cleanup()
+  uninstallCameraClock()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
 })
@@ -178,6 +174,37 @@ describe('MapView', () => {
 
     expect(zoomTransform(svg).k / initial.k).toBeCloseTo(1.25 ** 2)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('156%')
+  })
+
+  it('keeps queued HUD zooms independent from an active wheel gesture', () => {
+    stubMedia({ compact: false, reduced: false })
+    const data = makeAtlas()
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
+    const svg = container.querySelector('svg')!
+
+    fireEvent.wheel(svg, { clientX: 500, clientY: 350, deltaY: -100 })
+    const wheeled = zoomTransform(svg)
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    advanceCameraBy(60)
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    finishCameraTransition()
+
+    expect(zoomTransform(svg).k).toBeCloseTo(wheeled.k * 1.25 ** 2)
+  })
+
+  it('lets wheel input interrupt an animated camera command', () => {
+    stubMedia({ compact: false, reduced: false })
+    const data = makeAtlas()
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
+    const svg = container.querySelector('svg')!
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    advanceCameraBy(60)
+    fireEvent.wheel(svg, { clientX: 500, clientY: 350, deltaY: 100 })
+    const interrupted = zoomTransform(svg).toString()
+    finishCameraTransition()
+
+    expect(zoomTransform(svg).toString()).toBe(interrupted)
   })
 
   it('double-clicks to zoom around the pointer without selecting a repository', () => {
@@ -341,5 +368,21 @@ describe('MapView', () => {
     window.dispatchEvent(event)
     expect(event.defaultPrevented).toBe(false)
     expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('configures zoom limits when Strict Mode recreates the behavior', () => {
+    const data = makeAtlas()
+    const { container } = render(<StrictMode><MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} /></StrictMode>)
+    const svg = container.querySelector('svg')!
+    const fit = zoomTransform(svg)
+
+    fireEvent.wheel(svg, { clientX: 500, clientY: 350, deltaY: -100_000 })
+    const maximum = zoomTransform(svg)
+    expect(maximum.k).toBeCloseTo(fit.k * 10)
+    expect(maximum.toString()).toBe(constrainMapTransform(maximum, { width: 1000, height: 700 }, atlasBounds(data, false)).toString())
+    fireEvent.wheel(svg, { clientX: 500, clientY: 350, deltaY: 100_000 })
+    const minimum = zoomTransform(svg)
+    expect(minimum.k).toBeCloseTo(fit.k * .6)
+    expect(minimum.toString()).toBe(constrainMapTransform(minimum, { width: 1000, height: 700 }, atlasBounds(data, false)).toString())
   })
 })
