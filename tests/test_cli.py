@@ -2,6 +2,7 @@ import subprocess
 from types import SimpleNamespace
 
 import httpx
+import pytest
 from typer.testing import CliRunner
 
 import repo_atlas.cli as cli_module
@@ -65,10 +66,11 @@ def test_run_formats_github_transport_errors(tmp_path, monkeypatch):
     monkeypatch.setattr(cli_module, "project_root", lambda: tmp_path)
     monkeypatch.setattr(cli_module, "resolve_token", lambda: "token")
     monkeypatch.setattr(httpx.Client, "get", fail)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", lambda _delay: None)
     monkeypatch.setattr(cli_module.AtlasPipeline, "run", run)
     result = CliRunner().invoke(cli_module.app, ["run", "--only", "discover"])
     assert result.exit_code == 1
-    assert "Error: GitHub request failed for /user/repos: DNS lookup failed" in result.output
+    assert "Error: GitHub request failed after retries for /user/repos: DNS lookup failed" in result.output
     assert "Traceback" not in result.output
     assert isinstance(result.exception, SystemExit)
 
@@ -181,3 +183,37 @@ def test_command_version_check_treats_timeouts_as_missing(monkeypatch):
         lambda *_args, **_kwargs: (_ for _ in ()).throw(subprocess.TimeoutExpired("node", 5)),
     )
     assert cli_module.command_major_version("node") is None
+
+
+@pytest.mark.parametrize('during_construction', [False, True])
+def test_expected_operational_errors_have_concise_exit_one(tmp_path, monkeypatch, during_construction):
+    from repo_atlas.errors import AtlasError
+
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):
+            if during_construction:
+                raise AtlasError('unsupported cache schema')
+        def run(self, *args):
+            raise AtlasError('expected pipeline failure')
+    monkeypatch.setattr(cli_module, 'AtlasPipeline', FakePipeline)
+    monkeypatch.setattr(cli_module, 'project_root', lambda: tmp_path)
+    result = CliRunner().invoke(cli_module.app, ['run', '--only', 'summarize'])
+    assert result.exit_code == 1
+    assert result.output.startswith('Error: ')
+    assert 'Traceback' not in result.output
+
+
+@pytest.mark.parametrize('error_type', [RuntimeError, RecursionError, NotImplementedError])
+def test_unexpected_errors_preserve_the_original_exception(tmp_path, monkeypatch, error_type):
+    error = error_type('original programming failure')
+    class FakePipeline:
+        def __init__(self, *args, **kwargs):
+            pass
+        def run(self, *args):
+            raise error
+    monkeypatch.setattr(cli_module, 'AtlasPipeline', FakePipeline)
+    monkeypatch.setattr(cli_module, 'project_root', lambda: tmp_path)
+    result = CliRunner().invoke(cli_module.app, ['run', '--only', 'summarize'])
+    assert result.exception is error
+    assert result.exc_info[2] is not None
+    assert 'Error: original programming failure' not in result.output

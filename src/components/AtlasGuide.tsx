@@ -1,14 +1,15 @@
 import { useMemo, useState } from 'react'
 import type { AtlasData, ViewState } from '../types'
-import { fileSizeScale, languageCategories, regionColors } from '../presentation'
+import type { AtlasPresentation } from '../presentation'
+import { FallbackLabel, FALLBACK_LABEL_EXPLANATION } from './FallbackLabel'
 
-export function AtlasGuide({ data, view, onLanguage, onRegion, onHighlight }: {
-  data: AtlasData; view: ViewState; onLanguage: (name: string) => void
+export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onHighlight }: {
+  data: AtlasData; presentation: AtlasPresentation; view: ViewState; onLanguage: (name: string) => void
   onRegion: (name: string) => void; onHighlight: (id: number | null) => void
 }) {
-  const languages = useMemo(() => languageCategories(data), [data])
-  const sizes = useMemo(() => fileSizeScale(data.repos), [data.repos])
-  const colors = useMemo(() => regionColors(data), [data])
+  const { languages, sizes, colors } = presentation
+  const currentRegion = view.regions.length === 1 ? view.regions[0] : null
+  const fallbackLabels = useMemo(() => new Set(data.fallback_label_ids ?? []), [data.fallback_label_ids])
   const [expanded, setExpanded] = useState<number | null>(null)
   return <div className="atlas-guide">
     <header><span className="eyebrow">EXPLORE THE LANDSCAPE</span><h2>Atlas guide</h2>
@@ -27,20 +28,22 @@ export function AtlasGuide({ data, view, onLanguage, onRegion, onHighlight }: {
     </section>
     <section className="guide-regions"><h3>Regions <small>select to focus</small></h3>
       {data.clusters.toSorted((a, b) => a.label.localeCompare(b.label)).map(cluster => <div key={cluster.id}>
-        <button aria-pressed={view.regions.includes(cluster.label)} onClick={() => onRegion(cluster.label)}
+        <button aria-current={currentRegion === cluster.label ? 'true' : undefined} onClick={() => onRegion(cluster.label)}
           onPointerEnter={() => { onHighlight(cluster.id); setExpanded(cluster.id) }}
           onPointerLeave={() => { onHighlight(null); setExpanded(null) }}
           onFocus={() => { onHighlight(cluster.id); setExpanded(cluster.id) }}
           onBlur={() => { onHighlight(null); setExpanded(null) }}>
-          <i style={{ background: colors.get(cluster.id) }} /><span>{cluster.label}</span><small>{cluster.member_count}</small>
+          <i style={{ background: colors.get(cluster.id) }} /><span>{cluster.label} {fallbackLabels.has(cluster.id) && <FallbackLabel />}</span><small>{cluster.member_count}</small>
         </button>
-        {(expanded === cluster.id || view.regions.includes(cluster.label)) && <p>{cluster.gloss}</p>}
+        {(expanded === cluster.id || view.regions.includes(cluster.label)) && <p>{cluster.gloss}
+          {fallbackLabels.has(cluster.id) && <span className="fallback-explanation">{FALLBACK_LABEL_EXPLANATION}</span>}
+        </p>}
       </div>)}
-      {data.stats.noise_count > 0 && <button onClick={() => onRegion('Unclustered')} aria-pressed={view.regions.includes('Unclustered')}>Unclustered <small>{data.stats.noise_count}</small></button>}
+      {data.stats.noise_count > 0 && <button onClick={() => onRegion('Unclustered')} aria-current={currentRegion === 'Unclustered' ? 'true' : undefined}>Unclustered <small>{data.stats.noise_count}</small></button>}
     </section>
     <details className="guide-method"><summary>How this map works</summary>
       <p>Each README is normalized to a fixed schema, embedded by meaning, clustered in full-dimensional space, then projected here. Distance is an approximation; nearest-neighbor lists use the original embeddings.</p>
-      <p>Region colors distinguish groups; point colors identify languages. Other combines less common languages.</p>
+      <p>Region colors distinguish groups; point colors identify languages. Language categories and colors come from the generated atlas; Other combines languages grouped by the pipeline.</p>
       <p>Generated {data.generated_at.slice(0, 10)}{data.embedding_model && <> · {data.embedding_model}</>}</p>
       <a href="/atlas-list.html">Plain HTML list</a><a href="https://github.com/hbmartin/repo-atlas">Source & method ↗</a>
     </details>

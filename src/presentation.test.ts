@@ -1,22 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { displayLanguage, fileSizeScale, languageCategories, normalizeLanguages, regionColors } from './presentation'
+import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, normalizeLanguages, regionColors } from './presentation'
 import { parseViewState, unknownViewParameters, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
 describe('atlas presentation', () => {
-  it('aggregates retired languages while preserving Rust and Unknown', () => {
-    const data = makeAtlas(['HTML', 'Java', 'Other', 'Rust', 'Unknown'].map((primary_language, i) => makeRepo({ full_name: `owner/${i}`, primary_language })))
-    expect(languageCategories(data).map(({ name, count }) => [name, count])).toEqual([['Rust', 1], ['Other', 3], ['Unknown', 1]])
-    expect(displayLanguage('Python')).toBe('Python')
-    expect(normalizeLanguages(['HTML', 'Java', 'Other', 'Rust'])).toEqual(['Other', 'Rust'])
+  it('preserves emitted categories, counts, order and colors including unfamiliar languages', () => {
+    const data = makeAtlas(['HTML', 'Java', 'Other', 'Gleam'].map((primary_language, i) => makeRepo({ full_name: `owner/${i}`, primary_language })))
+    data.languages[3].color = '#abcdef'
+    expect(languageCategories(data)).toBe(data.languages)
+    expect(atlasPresentation(data).languageColors.get('Gleam')).toBe('#abcdef')
+    expect(normalizeLanguages(['HTML', 'Java', 'Other', 'Java'])).toEqual(['HTML', 'Java', 'Other'])
   })
-  it('reads retired URL filters and writes their canonical category', () => {
+  it('preserves exact URL categories and reports missing ones', () => {
     const data = makeAtlas([makeRepo({ primary_language: 'Java' })])
-    data.languages = [{ name: 'Java', count: 1, color: '#000' }]
-    const parsed = parseViewState('?lang=Java,Other&layout=alt', data)
-    expect(parsed.languages).toEqual(['Other'])
-    expect(unknownViewParameters('?lang=Java,Other', data)).toEqual([])
-    expect(writeViewState(parsed)).toBe('?lang=Other&layout=alt')
+    const parsed = parseViewState('?lang=Java,Other,Java&layout=alt', data)
+    expect(parsed.languages).toEqual(['Java'])
+    expect(unknownViewParameters('?lang=Java,Other', data)).toEqual(['lang=Other'])
+    expect(writeViewState(parsed)).toBe('?lang=Java&layout=alt')
+  })
+  it('retains equivalent filter arrays', () => {
+    const previous = ['Java', 'HTML']
+    expect(preserveValues(previous, normalizeLanguages(['Java', 'HTML', 'Java']))).toBe(previous)
+    expect(preserveValues(previous, ['HTML', 'Java'])).not.toBe(previous)
   })
   it('caps logarithmic radii and uses the same function for legend examples', () => {
     const scale = fileSizeScale([0, 10, 100, 1000, 10000].map(file_count => makeRepo({ file_count })))

@@ -49,3 +49,14 @@ describe('atlas data utilities', () => {
     expect(() => validateAtlas(data)).toThrow('reserved')
   })
 })
+
+it('accepts legacy payloads and valid fallback provenance', () => {
+  const data = makeAtlas()
+  expect(validateAtlas(data).fallback_label_ids).toBeUndefined()
+  data.fallback_label_ids = [0]
+  expect(validateAtlas(data).fallback_label_ids).toEqual([0])
+})
+
+it.each([null, '0', [0, 0], [99], [0.5], ['0']])('rejects malformed fallback provenance: %j', value => {
+  expect(() => validateAtlas({ ...makeAtlas(), fallback_label_ids: value })).toThrow('fallback_label_ids')
+})

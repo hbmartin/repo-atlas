@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import os
+import ssl
 import subprocess
 import sys
 import time
@@ -11,9 +12,22 @@ from typing import Any
 
 import httpx
 
+from .errors import AtlasError
 
-class GitHubError(RuntimeError):
+
+class GitHubError(AtlasError):
     pass
+
+
+def retryable_request_error(error: httpx.RequestError) -> bool:
+    cause: BaseException | None = error
+    seen: set[int] = set()
+    while cause is not None and id(cause) not in seen:
+        seen.add(id(cause))
+        if isinstance(cause, ssl.SSLCertVerificationError):
+            return False
+        cause = cause.__cause__ or cause.__context__
+    return isinstance(error, (httpx.TimeoutException, httpx.NetworkError, httpx.RemoteProtocolError))
 
 
 def resolve_token() -> str:
@@ -63,7 +77,13 @@ class GitHubClient:
             try:
                 response = self.client.get(path, params=params or None)
             except httpx.RequestError as exc:
-                raise GitHubError(f"GitHub request failed for {path}: {exc}") from exc
+                if not retryable_request_error(exc):
+                    raise GitHubError(f"GitHub request failed for {path}: {exc}") from exc
+                if attempt == 5:
+                    raise GitHubError(f"GitHub request failed after retries for {path}: {exc}") from exc
+                time.sleep(delay)
+                delay = min(delay * 2, 16)
+                continue
             last_status = response.status_code
             remaining = int(response.headers.get("X-RateLimit-Remaining", "5000"))
             retry_after_header = response.headers.get("Retry-After")

@@ -1,3 +1,4 @@
+import ssl
 import subprocess
 from types import SimpleNamespace
 
@@ -5,6 +6,70 @@ import httpx
 import pytest
 
 from repo_atlas.github import GitHubClient, GitHubError, resolve_token
+
+
+@pytest.mark.parametrize("error_type", [httpx.ConnectError, httpx.ReadTimeout, httpx.ReadError, httpx.RemoteProtocolError])
+def test_transport_failures_share_retry_budget_with_http_errors(monkeypatch, error_type):
+    client = GitHubClient("token")
+    outcomes = iter([error_type("temporary"), httpx.Response(503), error_type("again"), httpx.Response(200)])
+    sleeps = []
+
+    def request(*_args, **_kwargs):
+        result = next(outcomes)
+        if isinstance(result, Exception):
+            raise result
+        return result
+
+    monkeypatch.setattr(client.client, "get", request)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", sleeps.append)
+    try:
+        assert client.get("/repos").status_code == 200
+        assert sleeps == [1, 2, 4]
+    finally:
+        client.close()
+
+
+def test_transport_retry_exhaustion_preserves_final_cause(monkeypatch):
+    client = GitHubClient("token")
+    errors = []
+    sleeps = []
+
+    def request(*_args, **_kwargs):
+        errors.append(httpx.ConnectError(f"failure {len(errors) + 1}"))
+        raise errors[-1]
+
+    monkeypatch.setattr(client.client, "get", request)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", sleeps.append)
+    try:
+        with pytest.raises(GitHubError, match="failure 6") as caught:
+            client.get("/repos")
+        assert caught.value.__cause__ is errors[-1]
+        assert len(errors) == 6
+        assert sleeps == [1, 2, 4, 8, 16]
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("error", [httpx.UnsupportedProtocol("bad scheme"), httpx.LocalProtocolError("bad request"), httpx.RequestError("unknown"), httpx.ConnectError("certificate")])
+def test_permanent_transport_failures_do_not_retry(monkeypatch, error):
+    client = GitHubClient("token")
+    if isinstance(error, httpx.ConnectError):
+        error.__cause__ = ssl.SSLCertVerificationError("certificate expired")
+    calls = []
+
+    def request(*_args, **_kwargs):
+        calls.append(1)
+        raise error
+
+    monkeypatch.setattr(client.client, "get", request)
+    monkeypatch.setattr("repo_atlas.github.time.sleep", lambda _delay: pytest.fail("Unexpected backoff"))
+    try:
+        with pytest.raises(GitHubError) as caught:
+            client.get("/repos")
+        assert caught.value.__cause__ is error
+        assert len(calls) == 1
+    finally:
+        client.close()
 
 
 @pytest.mark.parametrize("error", [
@@ -17,6 +82,7 @@ from repo_atlas.github import GitHubClient, GitHubError, resolve_token
 ])
 def test_request_errors_are_normalized(monkeypatch, error):
     client = GitHubClient("token")
+    monkeypatch.setattr("repo_atlas.github.time.sleep", lambda _delay: None)
 
     def fail(*_args, **_kwargs):
         raise error

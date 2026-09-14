@@ -105,6 +105,8 @@ export function toggleValue(values: string[], value: string) {
     : [...values, value]
 }
 
+export const COMPACT_MEDIA_QUERY = '(max-width: 1023px)'
+
 export function useMediaQuery(queryText: string) {
   const [matches, setMatches] = useState(() => window.matchMedia(queryText).matches)
   useEffect(() => {

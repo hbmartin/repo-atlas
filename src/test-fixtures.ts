@@ -51,7 +51,7 @@ export function makeAtlas(repos: AtlasRepo[] = [makeRepo()]): AtlasData {
       noise_count: 0,
       low_confidence_count: 0,
     },
-    languages: [{ name: 'TypeScript', count: repos.length, color: '#3178c6' }],
+    languages: [...new Set(repos.map(repo => repo.primary_language))].map(name => ({ name, count: repos.filter(repo => repo.primary_language === name).length, color: '#3178c6' })),
     clusters: [{
       id: 0,
       label: 'Developer Tools',

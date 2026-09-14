@@ -11,6 +11,7 @@ from pydantic import ValidationError
 
 from . import __version__
 from .cache import Cache
+from .errors import AtlasError
 from .github import GitHubClient, GitHubError, resolve_token
 from .models import ClusterLabel
 from .pipeline import STAGES, AtlasPipeline, now
@@ -103,15 +104,15 @@ def run(
         if token != "unused" else None
     )
     try:
-        pipeline = AtlasPipeline(
-            project_root(), github, summarizer, embedder, yes, allow_fallback,
-            allow_agent_summarizer, best_effort,
-        )
         try:
+            pipeline = AtlasPipeline(
+                project_root(), github, summarizer, embedder, yes, allow_fallback,
+                allow_agent_summarizer, best_effort,
+            )
             pipeline.run(from_stage, selected)
         except SummarizerConfigurationError as exc:
             raise typer.BadParameter(str(exc)) from exc
-        except RuntimeError as exc:
+        except AtlasError as exc:
             typer.echo(f"Error: {exc}", err=True)
             raise typer.Exit(1) from exc
     finally:

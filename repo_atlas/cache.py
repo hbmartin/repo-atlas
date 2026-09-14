@@ -7,6 +7,8 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
+from .errors import AtlasError
+
 SCHEMA_VERSION = 3
 # Label cache entries are keyed by cluster signature rather than by run. Retaining
 # only the newest global N entries makes stable labels churn as soon as an atlas
@@ -134,7 +136,7 @@ class Cache:
     def _initialize(self) -> None:
         version = int(self._connection.execute("PRAGMA user_version").fetchone()[0])
         if version > SCHEMA_VERSION:
-            raise RuntimeError(
+            raise AtlasError(
                 f"Cache schema {version} is newer than supported schema {SCHEMA_VERSION}."
             )
         # Version zero includes legacy caches created before schema tracking.

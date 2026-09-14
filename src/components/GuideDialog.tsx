@@ -8,7 +8,7 @@ export function GuideDialog({ children, onClose }: { children: ReactNode; onClos
     dialog.showModal()
     return () => { dialog.close(); previous?.focus({ preventScroll: true }) }
   }, [])
-  return <dialog ref={ref} className="guide-dialog" aria-label="Atlas guide" onCancel={(event) => { event.preventDefault(); onClose() }}>
+  return <dialog ref={ref} className="guide-dialog" aria-label="Atlas guide" onClose={event => { if (!event.currentTarget.open) onClose() }} onCancel={(event) => { event.preventDefault(); onClose() }}>
     <button className="guide-close" onClick={onClose} aria-label="Close atlas guide">Close ×</button>
     {children}
   </dialog>

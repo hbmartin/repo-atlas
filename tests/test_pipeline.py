@@ -1,4 +1,6 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
+from threading import Event
 from types import SimpleNamespace
 
 import numpy as np
@@ -18,6 +20,7 @@ from repo_atlas.pipeline import (
 from repo_atlas.summarizers import (
     SummarizerCancelledError,
     SummarizerConfigurationError,
+    SummarizerInvocationError,
 )
 
 SUMMARY = RepoSummary(
@@ -535,7 +538,7 @@ def test_label_stage_uses_deterministic_fallback_after_model_failures(tmp_path, 
 
     class BrokenLabeler:
         def label(self, *_args, **_kwargs):
-            raise RuntimeError("invalid labels")
+            raise SummarizerInvocationError("invalid labels")
 
     monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: BrokenLabeler())
     pipeline.label()
@@ -564,8 +567,8 @@ def test_label_stage_uses_deterministic_fallback_after_model_failures(tmp_path, 
 
 
 @pytest.mark.parametrize(("best_effort", "error", "expected"), [
-    (False, RuntimeError("request failed"), RuntimeError),
-    (True, FileNotFoundError("codex"), SummarizerConfigurationError),
+    (False, SummarizerInvocationError("request failed"), RuntimeError),
+    (True, SummarizerConfigurationError("Cannot start codex"), SummarizerConfigurationError),
     (True, SummarizerConfigurationError("configuration"), SummarizerConfigurationError),
 ])
 def test_label_failures_do_not_silently_publish(tmp_path, monkeypatch, best_effort, error, expected):
@@ -599,7 +602,7 @@ def test_fallback_labels_resume_through_project_and_emit(tmp_path, monkeypatch):
     analysis = {"key": key, "names": names, "cluster_ids": [0], "algorithm": "none"}
     pipeline.cache.set_stage("cluster", key, analysis, pipeline_module.now())
     def fail(*_args, **_kwargs):
-        raise RuntimeError("synthetic provider failure")
+        raise SummarizerInvocationError("synthetic provider failure")
     monkeypatch.setattr(pipeline_module, "get_summarizer", lambda _name: SimpleNamespace(label=fail))
     pipeline.run(start="label")
     output = tmp_path / "public" / "atlas.json"
@@ -820,3 +823,216 @@ def test_partial_restored_labels_are_rejected(tmp_path):
     pipeline.labels = {0: pipeline_module.ClusterLabel(label="One", gloss="First.")}
     with pytest.raises(RuntimeError, match="clusters: 1"):
         pipeline._require_complete_labels(analysis)
+
+
+@pytest.mark.parametrize('best_effort', [False, True])
+def test_failed_collision_retry_preserves_model_label(tmp_path, monkeypatch, best_effort):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=best_effort)
+    for name in ['owner/one', 'owner/two']:
+        insert_repo(pipeline, name)
+        insert_summary_and_fallback(pipeline, name)
+    pipeline.analysis = {'names': ['owner/one', 'owner/two'], 'cluster_ids': [0, 1]}
+    def label(descriptions, collision=None):
+        if collision:
+            raise SummarizerInvocationError('temporary collision request failure')
+        return pipeline_module.ClusterLabel(label='Tooling', gloss='Model-generated gloss.')
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda name: SimpleNamespace(label=label))
+    pipeline.label()
+    assert pipeline.labels[0].label == 'Tooling'
+    assert pipeline.labels[1].label == 'Tooling 2'
+    assert pipeline.labels[1].gloss == 'Model-generated gloss.'
+    assert not pipeline.fallback_label_ids
+    cached = [json.loads(row[0]) for row in pipeline.cache.rows("SELECT payload_json FROM stage_cache WHERE stage='label'")]
+    assert {entry['label'] for entry in cached} == {'Tooling', 'Tooling 2'}
+    assert all('source' not in entry for entry in cached)
+    pipeline._restore_labels(pipeline.analysis)
+    assert pipeline.labels[1].label == 'Tooling 2'
+
+
+@pytest.mark.parametrize('error_type', [SummarizerConfigurationError, SummarizerCancelledError, RuntimeError])
+def test_collision_retry_propagates_fatal_and_unexpected_errors(tmp_path, monkeypatch, error_type):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    for name in ['owner/one', 'owner/two']:
+        insert_repo(pipeline, name)
+        insert_summary_and_fallback(pipeline, name)
+    pipeline.analysis = {'names': ['owner/one', 'owner/two'], 'cluster_ids': [0, 1]}
+    error = error_type('do not hide this failure')
+    def label(descriptions, collision=None):
+        if collision:
+            raise error
+        return pipeline_module.ClusterLabel(label='Tooling', gloss='Generated.')
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda name: SimpleNamespace(label=label))
+    with pytest.raises(error_type) as caught:
+        pipeline.label()
+    assert caught.value is error
+    assert not pipeline.fallback_label_ids
+
+
+def test_label_cache_errors_do_not_trigger_fallback(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    insert_repo(pipeline, 'owner/repo')
+    insert_summary_and_fallback(pipeline, 'owner/repo')
+    pipeline.analysis = {'names': ['owner/repo'], 'cluster_ids': [0]}
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda name: SimpleNamespace(
+        label=lambda *a, **k: pipeline_module.ClusterLabel(label='Tooling', gloss='Generated.'),
+    ))
+    def fail(*args, **kwargs):
+        raise ValueError('cache write failure')
+    monkeypatch.setattr(pipeline.cache, 'set_stage', fail)
+    with pytest.raises(ValueError, match='cache write failure'):
+        pipeline.label()
+    assert not pipeline.fallback_label_ids
+
+
+@pytest.mark.parametrize('failure_site', ['provider', 'serialization'])
+def test_unexpected_summary_failures_propagate_without_failure_cache(tmp_path, monkeypatch, failure_site):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    insert_repo(pipeline, 'owner/repo')
+    error = RuntimeError('unexpected programming failure')
+    def broken(*args, **kwargs):
+        raise error
+    provider = SimpleNamespace(summarize=broken if failure_site == 'provider' else lambda *a, **k: SUMMARY, cancel=lambda: None)
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda name: provider)
+    if failure_site == 'serialization':
+        monkeypatch.setattr(pipeline_module, 'embedding_text', broken)
+    with pytest.raises(RuntimeError) as caught:
+        pipeline.summarize()
+    assert caught.value is error
+    assert not pipeline.cache.rows('SELECT * FROM summary_failures')
+
+
+def test_pipeline_shares_only_codex_compatibility_metadata(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None, summarizer='codex', allow_agent_summarizer=True)
+    summarize_provider = pipeline._summarizer()
+    label_provider = pipeline._summarizer()
+    assert summarize_provider is not label_provider
+    assert summarize_provider._preflight_cache is label_provider._preflight_cache
+    summarize_provider.cancel()
+    assert not label_provider._cancelled.is_set()
+
+
+def test_best_effort_handles_nonretryable_item_failures(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    for name in ['owner/good', 'owner/bad']:
+        insert_repo(pipeline, name)
+    def summarize(context, **kwargs):
+        if context['full_name'] == 'owner/bad':
+            raise SummarizerInvocationError('E2BIG: argument list too long', retryable=False)
+        return SUMMARY
+    def label(*args, **kwargs):
+        raise SummarizerInvocationError('E2BIG: argument list too long', retryable=False)
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda name: SimpleNamespace(summarize=summarize, label=label))
+    pipeline.summarize()
+    assert [row['full_name'] for row in pipeline._current_summary_rows()] == ['owner/good']
+    assert pipeline.cache.rows('SELECT full_name FROM summary_failures')[0][0] == 'owner/bad'
+    pipeline.analysis = {'names': ['owner/good'], 'cluster_ids': [0]}
+    pipeline.label()
+    assert pipeline.fallback_label_ids == {0}
+
+
+def test_sanitized_provider_diagnostics_reach_summary_failure_cache(tmp_path, monkeypatch, capsys):
+    import subprocess
+
+    from repo_atlas.summarizers import ClaudeSummarizer
+
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    for name in ['owner/good', 'owner/bad']:
+        insert_repo(pipeline, name)
+        insert_summary_and_fallback(pipeline, name)
+    pipeline.cache.execute("UPDATE repos SET languages_json=? WHERE full_name='owner/bad'", ('{"Rust":100}',))
+    monkeypatch.setenv('ANTHROPIC_API_KEY', 'synthetic-secret-token')
+    prompts = []
+    class FailedProcess:
+        returncode = 1
+        def communicate(self, **kwargs):
+            return '', 'Useful provider detail: synthetic-secret-\ntoken'
+    def start(command, **kwargs):
+        prompts.append(command[-1])
+        return FailedProcess()
+    monkeypatch.setattr(subprocess, 'Popen', start)
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda name: ClaudeSummarizer())
+    pipeline.summarize()
+    message = pipeline.cache.rows('SELECT error_message FROM summary_failures')[0][0]
+    output = capsys.readouterr().err
+    for diagnostic in [message, output, *prompts[1:]]:
+        assert 'Useful provider detail: [redacted]' in diagnostic
+        assert 'synthetic-secret' not in diagnostic
+
+
+def test_invalid_cached_fallback_does_not_mark_a_missing_label(tmp_path):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=True)
+    insert_repo(pipeline, 'owner/repo')
+    analysis = {'names': ['owner/repo'], 'cluster_ids': [0]}
+    signature = pipeline_module.content_hash(['owner/repo'])
+    key = pipeline_module.content_hash(signature, pipeline_module.LABEL_PROMPT_VERSION, pipeline.summary_provider_id)
+    pipeline.cache.set_stage('label', key, {'source': 'fallback', 'value': {'label': ''}}, pipeline_module.now())
+    pipeline._restore_labels(analysis)
+    assert not pipeline.labels and not pipeline.fallback_label_ids
+
+
+@pytest.mark.parametrize('error_type', [SummarizerConfigurationError, SummarizerCancelledError, RuntimeError])
+@pytest.mark.parametrize('best_effort', [False, True])
+def test_later_worker_failure_cancels_blocked_earlier_worker(tmp_path, monkeypatch, error_type, best_effort):
+    pipeline = AtlasPipeline(tmp_path, None, best_effort=best_effort)
+    for name in ('owner/a', 'owner/b', 'owner/c'):
+        insert_repo(pipeline, name)
+    started = Event()
+    cancelled = Event()
+    calls = []
+    error = error_type('stop now')
+
+    class Provider:
+        def summarize(self, context, **_kwargs):
+            name = context['full_name']
+            calls.append(name)
+            if name == 'owner/a':
+                started.set()
+                assert cancelled.wait(5), 'Earlier worker was not cancelled promptly'
+                return SUMMARY
+            assert started.wait(5)
+            raise error
+
+        def cancel(self):
+            cancelled.set()
+
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda _name: Provider())
+    monkeypatch.setenv('ATLAS_SUMMARY_WORKERS', '2')
+    with ThreadPoolExecutor(max_workers=1) as runner:
+        future = runner.submit(pipeline.summarize)
+        try:
+            with pytest.raises(error_type) as caught:
+                future.result(timeout=4)
+            assert caught.value is error
+            assert cancelled.is_set()
+            assert sorted(calls) == ['owner/a', 'owner/b']
+            assert not pipeline.cache.rows('SELECT * FROM summary_failures')
+        finally:
+            cancelled.set()
+
+
+def test_completed_summary_is_persisted_before_replenishing_workers(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None)
+    for name in ('owner/a', 'owner/b', 'owner/c'):
+        insert_repo(pipeline, name)
+    started = Event()
+    release = Event()
+
+    class Provider:
+        def summarize(self, context, **_kwargs):
+            if context['full_name'] == 'owner/a':
+                started.set()
+                assert release.wait(5)
+            elif context['full_name'] == 'owner/b':
+                assert started.wait(5)
+            else:
+                assert pipeline.cache.rows("SELECT * FROM summaries WHERE full_name='owner/b'")
+                release.set()
+            return SUMMARY
+
+        def cancel(self):
+            release.set()
+
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda _name: Provider())
+    monkeypatch.setenv('ATLAS_SUMMARY_WORKERS', '2')
+    pipeline.summarize()
+    assert [row['full_name'] for row in pipeline._current_summary_rows()] == ['owner/a', 'owner/b', 'owner/c']

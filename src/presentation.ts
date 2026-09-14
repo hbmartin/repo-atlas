@@ -1,25 +1,30 @@
 import type { AtlasData, AtlasRepo } from './types'
 
-export const LANGUAGE_COLORS: Record<string, string> = {
-  Python: '#70C78C', TypeScript: '#64A8F5', Kotlin: '#B897F4', JavaScript: '#E8D76C',
-  Swift: '#F49A63', Go: '#69D4D0', Ruby: '#E780B0', Rust: '#C6A27E',
-  Other: '#A0A7B1', Unknown: '#D4DAE0',
+export const UNKNOWN_LANGUAGE_COLOR = '#87909e'
+export const normalizeLanguages = (names: string[]) => [...new Set(names)]
+export const languageCategories = (data: AtlasData) => data.languages
+export const knownLanguage = (data: AtlasData, name: string) => data.languages.some(item => item.name === name)
+
+export function preserveValues(previous: string[], next: string[]) {
+  return previous.length === next.length && previous.every((value, i) => value === next[i]) ? previous : next
 }
-export const displayLanguage = (name: string) => Object.hasOwn(LANGUAGE_COLORS, name) ? name : 'Other'
-export const normalizeLanguages = (names: string[]) => [...new Set(names.map(displayLanguage))]
-export function languageCategories(data: AtlasData) {
-  const counts = new Map<string, number>()
+
+export function atlasPresentation(data: AtlasData) {
+  const languages = data.languages
+  const languageColors = new Map(languages.map(item => [item.name, item.color]))
+  const reposByName = new Map(data.repos.map(repo => [repo.full_name, repo]))
+  const clustersById = new Map(data.clusters.map(cluster => [cluster.id, cluster]))
+  let minMonth = Infinity, maxMonth = -Infinity
   for (const repo of data.repos) {
-    const name = displayLanguage(repo.primary_language)
-    counts.set(name, (counts.get(name) ?? 0) + 1)
+    const [year, month] = repo.pushed_at.split('-').map(Number)
+    const value = year * 12 + month - 1
+    minMonth = Math.min(minMonth, value)
+    maxMonth = Math.max(maxMonth, value)
   }
-  return Object.entries(LANGUAGE_COLORS).filter(([name]) => counts.has(name))
-    .map(([name, color]) => ({ name, color, count: counts.get(name)! }))
+  return { languages, languageColors, reposByName, clustersById, minMonth, maxMonth,
+    sizes: fileSizeScale(data.repos), colors: regionColors(data) }
 }
-export function knownLanguage(data: AtlasData, name: string) {
-  return data.languages.some((item) => item.name === name)
-    || languageCategories(data).some((item) => item.name === name)
-}
+export type AtlasPresentation = ReturnType<typeof atlasPresentation>
 
 function percentile(values: number[], fraction: number) {
   if (!values.length) return 0

@@ -2,23 +2,22 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   AtlasRequestError,
   loadAtlas,
-  monthIndex,
   parseViewState,
   unknownViewParameters,
   validMonth,
   writeViewState,
 } from './data'
-import type { AtlasData, AtlasRepo, ViewState } from './types'
+import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from './types'
 import { DetailPanel } from './components/DetailPanel'
 import { Filters } from './components/Filters'
 import { ListView } from './components/ListView'
 import { Loading } from './components/Loading'
 import { MapView } from './components/MapView'
 import { SearchBox } from './components/SearchBox'
-import { formatDate, toggleValue } from './view-utils'
+import { COMPACT_MEDIA_QUERY, formatDate, toggleValue, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { displayLanguage, knownLanguage, normalizeLanguages, languageCategories } from './presentation'
+import { atlasPresentation, knownLanguage, normalizeLanguages, preserveValues } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -40,16 +39,24 @@ const FOCUSABLE = [
 ].join(',')
 
 export default function App() {
+  const compact = useMediaQuery(COMPACT_MEDIA_QUERY)
   const [data, setData] = useState<AtlasData | null>(null)
   const [error, setError] = useState<Error | null>(null)
   const [view, setViewState] = useState<ViewState>(EMPTY_VIEW)
   const [listMode, setListMode] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
   const [highlightRegion, setHighlightRegion] = useState<number | null>(null)
-  const [regionRequest, setRegionRequest] = useState<{ label: string; nonce: number } | null>(null)
+  const [navigationRequest, setNavigationRequest] = useState<MapNavigationRequest | null>(null)
   const [mobileFilters, setMobileFilters] = useState(false)
+  if (mobileFilters && !compact) setMobileFilters(false)
   const [urlWarning, setUrlWarning] = useState<string[]>([])
-  const regionSequence = useRef(0)
+  const navigationSequence = useRef(0)
+  const requestNavigation = useCallback((kind: 'repo' | 'region', target: string, clickToken?: number) => {
+    setNavigationRequest({ kind, target, clickToken, nonce: ++navigationSequence.current })
+  }, [])
+  const acknowledgeNavigation = useCallback((nonce: number) => {
+    setNavigationRequest(current => current?.nonce === nonce ? null : current)
+  }, [])
   const viewRef = useRef(view)
   const filterButton = useRef<HTMLButtonElement>(null)
   const filterDialog = useRef<HTMLDivElement>(null)
@@ -63,18 +70,27 @@ export default function App() {
         const initial = parseViewState(window.location.search, atlas)
         viewRef.current = initial
         setViewState(initial)
+        if (initial.repo) requestNavigation('repo', initial.repo)
         window.history.replaceState(null, '', writeViewState(initial))
         setUrlWarning(warning)
       })
       .catch((reason) => setError(reason instanceof Error ? reason : new Error(String(reason))))
-  }, [])
+  }, [requestNavigation])
 
-  const setView = useCallback((next: ViewState) => {
-    const normalized = { ...next, languages: normalizeLanguages(next.languages) }
+  const setView = useCallback((next: ViewState, options?: SelectionOptions) => {
+    const current = viewRef.current
+    const normalized = { ...next,
+      languages: preserveValues(current.languages, normalizeLanguages(next.languages)),
+      regions: preserveValues(current.regions, next.regions) }
+    if (options?.navigate !== false && next.repo && (next.repo !== current.repo || options?.navigate)) {
+      requestNavigation('repo', next.repo, options?.clickToken)
+    } else if (!next.repo || options?.navigate === false || normalized.languages !== current.languages || normalized.regions !== current.regions || next.since !== current.since) {
+      setNavigationRequest(null)
+    }
     viewRef.current = normalized
     setViewState(normalized)
     window.history.replaceState(null, '', writeViewState(normalized))
-  }, [])
+  }, [requestNavigation])
 
   useEffect(() => {
     if (!data) return
@@ -83,12 +99,14 @@ export default function App() {
       const restored = parseViewState(window.location.search, data)
       viewRef.current = restored
       setViewState(restored)
+      if (restored.repo) requestNavigation('repo', restored.repo)
+      else setNavigationRequest(null)
       setUrlWarning(warning)
       window.history.replaceState(null, '', writeViewState(restored))
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
-  }, [data])
+  }, [data, requestNavigation])
 
   const closeMobileFilters = useCallback(() => {
     setMobileFilters(false)
@@ -128,17 +146,6 @@ export default function App() {
       document.body.style.overflow = previousOverflow
     }
   }, [closeMobileFilters, mobileFilters])
-
-  useEffect(() => {
-    if (!mobileFilters) return
-    const query = window.matchMedia('(max-width: 1023px)')
-    const closeAtDesktopWidth = () => {
-      if (!query.matches) setMobileFilters(false)
-    }
-    closeAtDesktopWidth()
-    query.addEventListener('change', closeAtDesktopWidth)
-    return () => query.removeEventListener('change', closeAtDesktopWidth)
-  }, [mobileFilters])
 
   useEffect(() => {
     if (!data || !document.modelContext?.registerTool) return
@@ -196,29 +203,21 @@ export default function App() {
     return () => lifecycle.abort()
   }, [data, setView])
 
+  const presentation = useMemo(() => data ? atlasPresentation(data) : null, [data])
   const derived = useMemo(() => {
-    if (!data) return null
-    const clusterNames = new Map(data.clusters.map((cluster) => [cluster.id, cluster.label]))
-    let minMonth = Number.POSITIVE_INFINITY
-    let maxMonth = Number.NEGATIVE_INFINITY
-    const reposByName = new Map<string, AtlasRepo>()
-    for (const repo of data.repos) {
-      reposByName.set(repo.full_name, repo)
-      const value = monthIndex(repo.pushed_at)
-      minMonth = Math.min(minMonth, value)
-      maxMonth = Math.max(maxMonth, value)
-    }
+    if (!data || !presentation) return null
+    const { clustersById } = presentation
     const visible = new Set(data.repos.filter((repo) => {
-      const languageMatch = !view.languages.length || view.languages.includes(displayLanguage(repo.primary_language))
-      const region = clusterNames.get(repo.cluster_id ?? -1) ?? 'Unclustered'
+      const languageMatch = !view.languages.length || view.languages.includes(repo.primary_language)
+      const region = clustersById.get(repo.cluster_id ?? -1)?.label ?? 'Unclustered'
       const regionMatch = !view.regions.length || view.regions.includes(region)
       const dateMatch = !view.since || repo.pushed_at.slice(0, 7) >= view.since
       return languageMatch && regionMatch && dateMatch
     }).map((repo) => repo.full_name))
     const matchingRegions = new Set(data.repos.filter(repo => visible.has(repo.full_name)).flatMap(repo => repo.cluster_id == null ? [] : [repo.cluster_id])).size
     const matchingUnclustered = data.repos.filter(repo => visible.has(repo.full_name) && repo.cluster_id == null).length
-    return { clusterNames, minMonth, maxMonth, reposByName, visible, matchingRegions, matchingUnclustered, filterData: { ...data, languages: languageCategories(data) } }
-  }, [data, view.languages, view.regions, view.since])
+    return { visible, matchingRegions, matchingUnclustered }
+  }, [data, presentation, view.languages, view.regions, view.since])
 
   if (error) return (
     <main className="fatal">
@@ -228,26 +227,27 @@ export default function App() {
       <a href="/atlas-list.html">Open the accessible repository list ↗</a>
     </main>
   )
-  if (!data || !derived) return <Loading />
+  if (!data || !derived || !presentation) return <Loading />
 
-  const { minMonth, maxMonth, reposByName, visible, matchingRegions, matchingUnclustered, filterData } = derived
+  const { visible, matchingRegions, matchingUnclustered } = derived
+  const { minMonth, maxMonth, reposByName } = presentation
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
-  const selectRepo = (repo: AtlasRepo | null) => {
-    setRegionRequest(null)
-    setView({ ...view, repo: repo?.full_name ?? null })
+  const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
+    setHighlightRegion(null)
+    setView({ ...viewRef.current, repo: repo?.full_name ?? null }, { ...options, navigate: options?.navigate ?? true })
   }
   const backgroundInert = mobileFilters || guideOpen ? true : undefined
   const profileUrl = `https://github.com/${encodeURIComponent(data.owner)}`
 
-  const chooseRegion = (label: string) => {
+  const chooseRegion = (label: string, clickToken?: number) => {
     setView({ ...view, repo: null, regions: [label] })
-    setRegionRequest({ label, nonce: ++regionSequence.current })
+    requestNavigation('region', label, clickToken)
     setListMode(false)
     setGuideOpen(false)
     setHighlightRegion(null)
   }
-  const guide = <AtlasGuide data={data} view={view}
+  const guide = <AtlasGuide data={data} presentation={presentation} view={view}
     onLanguage={name => setView({ ...view, languages: toggleValue(view.languages, name) })}
     onRegion={chooseRegion} onHighlight={setHighlightRegion} />
 
@@ -274,7 +274,7 @@ export default function App() {
       <section className="controls" inert={backgroundInert}>
         <SearchBox repos={data.repos} onSelect={selectRepo} />
         <div className="desktop-filters">
-          <Filters data={filterData} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
+          <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
         </div>
         <button ref={filterButton} className="mobile-filter-button" onClick={() => setMobileFilters(true)}>
           Filters{filterCount ? ` · ${filterCount}` : ''}
@@ -298,7 +298,7 @@ export default function App() {
               <h2 id="mobile-filter-title">Filter the atlas</h2>
               <button onClick={closeMobileFilters}>Done</button>
             </header>
-            <Filters data={filterData} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
+            <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
           </div>
         </div>
       )}
@@ -306,7 +306,7 @@ export default function App() {
         {listMode ? (
           <ListView data={data} visible={visible} onSelect={(repo) => { selectRepo(repo); setListMode(false) }} />
         ) : (
-          <MapView data={data} view={view} visible={visible} selected={selected} onSelect={selectRepo} regionRequest={regionRequest} highlightRegion={highlightRegion} onHighlight={setHighlightRegion} onRegion={chooseRegion} />
+          <MapView data={data} presentation={presentation} view={view} visible={visible} selected={selected} onSelect={selectRepo} navigationRequest={navigationRequest} onNavigationHandled={acknowledgeNavigation} highlightRegion={highlightRegion} onRegion={chooseRegion} />
         )}
         {visible.size === 0 && (
           <div className="no-results" role="status">No repositories match.{' '}<button onClick={() => setView({ ...EMPTY_VIEW, repo: null, layoutAlt: view.layoutAlt })}>Clear filters</button></div>
@@ -314,6 +314,7 @@ export default function App() {
         {selected ? <DetailPanel
           repo={selected}
           cluster={selected?.cluster_id == null ? undefined : data.clusters.find((cluster) => cluster.id === selected.cluster_id)}
+          fallbackLabel={selected.cluster_id != null && (data.fallback_label_ids ?? []).includes(selected.cluster_id)}
           reposByName={reposByName}
           onSelect={selectRepo}
           onRegion={chooseRegion}

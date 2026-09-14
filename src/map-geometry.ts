@@ -54,36 +54,77 @@ export function wrapLabel(text: string, measure: (text: string) => number, maxWi
   return best
 }
 // All collision tests use CSS pixels. Geometry and anchors stay in the dataset's space.
+export class BoxGrid {
+  private cells = new Map<string, Box[]>()
+  private keys(box: Box, gap = 0) {
+    const keys: string[] = []
+    for (let y = Math.floor((box.top - gap) / 64); y <= Math.floor((box.bottom + gap) / 64); y++) {
+      for (let x = Math.floor((box.left - gap) / 64); x <= Math.floor((box.right + gap) / 64); x++) keys.push(`${x},${y}`)
+    }
+    return keys
+  }
+  add(box: Box) {
+    for (const key of this.keys(box)) {
+      const cell = this.cells.get(key)
+      if (cell) cell.push(box)
+      else this.cells.set(key, [box])
+    }
+  }
+  hits(box: Box, gap = 4) {
+    return this.keys(box, gap).some(key => this.cells.get(key)?.some(other => overlaps(box, other, gap)))
+  }
+}
+
+const OFFSETS = Array.from({ length: 17 * 17 }, (_, i) => {
+  const dx = (i % 17) * 24 - 192, dy = Math.floor(i / 17) * 24 - 192
+  return { dx, dy, distance: Math.hypot(dx, dy) }
+})
+export function prepareRegionLabels(data: AtlasData, alt: boolean, measure: (text: string) => number, fontSize: number) {
+  return data.clusters.toSorted((a, b) => a.id - b.id).map(cluster => {
+    const lines = wrapLabel(cluster.label, measure)
+    return { id: cluster.id, lines, width: Math.max(...lines.map(measure)) + 8,
+      height: lines.length * (fontSize + 3) + 4,
+      anchor: alt ? cluster.label_anchor_alt ?? cluster.label_anchor : cluster.label_anchor,
+      rings: (alt ? cluster.contours_alt ?? cluster.contours : cluster.contours).outer }
+  })
+}
 export function placeRegionLabels(data: AtlasData, alt: boolean, transform: ZoomTransform, size: Size,
-  radius: (count: number | null) => number, measure: (text: string) => number, fontSize: number): Label[] {
+  radius: (count: number | null) => number, measure: (text: string) => number, fontSize: number,
+  prepared = prepareRegionLabels(data, alt, measure, fontSize)): Label[] {
   const placed: Label[] = []
-  const dots = data.repos.map(repo => {
+  const dots = new BoxGrid(), labels = new BoxGrid()
+  for (const repo of data.repos) {
     const [x, y] = transform.apply(alt ? [repo.x_alt, repo.y_alt] : [repo.x, repo.y])
     const r = radius(repo.file_count) + 3
-    return { left: x - r, right: x + r, top: y - r, bottom: y + r }
-  })
-  for (const cluster of data.clusters.toSorted((a, b) => a.id - b.id)) {
-    const anchor = alt ? cluster.label_anchor_alt ?? cluster.label_anchor : cluster.label_anchor
+    // Off-screen circles cannot collide with a candidate inside the label viewport.
+    if (x + r < 11 || x - r > size.width - 11 || y + r < 15 || y - r > size.height - 73) continue
+    dots.add({ left: x - r, right: x + r, top: y - r, bottom: y + r })
+  }
+  for (const { id, lines, width: w, height: h, anchor, rings } of prepared) {
     const [ax, ay] = transform.apply([anchor.x, anchor.y])
-    const rings = (alt ? cluster.contours_alt ?? cluster.contours : cluster.contours).outer
-    const lines = wrapLabel(cluster.label, measure)
-    const w = Math.max(...lines.map(measure)) + 8, h = lines.length * (fontSize + 3) + 4
-    const candidates: { box: Label; score: number }[] = []
-    for (let dy = -192; dy <= 192; dy += 24) for (let dx = -192; dx <= 192; dx += 24) {
+    let best: Label | undefined, bestScore = Infinity
+    for (const { dx, dy, distance } of OFFSETS) {
+      if (distance >= bestScore) continue
       const x = ax + dx, y = ay + dy
-      const box = { id: cluster.id, x, y, lines, left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2 }
+      const box = { id, x, y, lines, left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2 }
       if (box.left < 12 || box.right > size.width - 12 || box.top < 16 || box.bottom > size.height - 74) continue
-      if (placed.some(other => overlaps(box, other, 8))) continue
-      const hits = dots.filter(dot => overlaps(box, dot, 1)).length
+      if (labels.hits(box, 8) || dots.hits(box, 1)) continue
       const inHull = rings.some(ring => inside(transform.invert([x, y]), ring))
-      candidates.push({ box, score: hits * 1e6 + Math.hypot(dx, dy) + (inHull ? 0 : 48) })
+      const score = distance + (inHull ? 0 : 48)
+      if (score < bestScore) { best = box; bestScore = score }
     }
-    candidates.sort((a, b) => a.score - b.score)
-    const best = candidates[0]
-    if (best && best.score < 1e6) placed.push(best.box)
+    if (best) { placed.push(best); labels.add(best) }
   }
   return placed
 }
+
+export function constrainMapTransform(transform: ZoomTransform, size: Size, bounds: Box): ZoomTransform {
+  const marginX = Math.min(24, size.width / 2), marginY = Math.min(24, size.height / 2)
+  const x = Math.max(marginX - bounds.right * transform.k, Math.min(size.width - marginX - bounds.left * transform.k, transform.x))
+  const y = Math.max(marginY - bounds.bottom * transform.k, Math.min(size.height - marginY - bounds.top * transform.k, transform.y))
+  return zoomIdentity.translate(x, y).scale(transform.k)
+}
+
 export function fitOverview(data: AtlasData, alt: boolean, size: Size, radius: (count: number | null) => number,
   measure: (text: string) => number, fontSize: number) {
   const bounds = atlasBounds(data, alt)

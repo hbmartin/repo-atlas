@@ -104,6 +104,16 @@ export function validateAtlas(value: unknown): AtlasData {
       }
     }
   })
+  if (data.fallback_label_ids !== undefined) {
+    if (!Array.isArray(data.fallback_label_ids)) throw new Error('fallback_label_ids must be an array')
+    const seen = new Set<number>()
+    for (const id of data.fallback_label_ids) {
+      if (!Number.isInteger(id) || !clusterIds.has(id) || seen.has(id)) {
+        throw new Error('fallback_label_ids must contain unique existing integer cluster IDs')
+      }
+      seen.add(id)
+    }
+  }
   const repoNames = new Set<string>()
   data.repos.forEach((repo, index) => {
     const path = `repos[${index}]`
