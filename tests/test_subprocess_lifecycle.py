@@ -13,7 +13,7 @@ from repo_atlas.summarizers import (
     CodexSummarizer,
     Summarizer,
     SummarizerCancelledError,
-    SummarizerInvocationError,
+    SummarizerConfigurationError,
 )
 
 
@@ -85,6 +85,7 @@ def test_cancel_kills_and_reaps_every_preflight_phase(tmp_path, monkeypatch, pha
             assert not any('untrusted prompt' in str(call) for call in calls)
             assert all(call[0] != 'exec' or '--help' in call for call in calls)
             assert not summarizer._preflight_cache.results
+            assert not summarizer._preflight_cache.failures
         finally:
             summarizer.cancel()
 
@@ -134,17 +135,18 @@ def test_cancelled_cache_waiter_does_not_wait_for_other_adapter():
 
 @pytest.mark.skipif(os.name != 'posix', reason='POSIX process group behavior')
 def test_probe_timeout_uses_tracked_runner_and_cleans_descendants(tmp_path, monkeypatch):
-    marker, _, heartbeat = fake_codex(tmp_path, monkeypatch, block_phase=0)
+    marker, log, heartbeat = fake_codex(tmp_path, monkeypatch, block_phase=0)
     provider = CodexSummarizer()
     original = Summarizer._run_process
     def shorter_timeout(self, command, **kwargs):
         kwargs['timeout'] = 1
         return original(self, command, **kwargs)
     monkeypatch.setattr(Summarizer, '_run_process', shorter_timeout)
-    with pytest.raises(SummarizerInvocationError, match='timed out') as caught:
+    with pytest.raises(SummarizerConfigurationError, match='after 3 attempts.*timed out'):
         provider._preflight()
-    assert caught.value.retryable and not caught.value.repairable
+    assert len(log.read_text().splitlines()) == 3
     assert not provider._active_processes and not provider._preflight_cache.results
+    assert len(provider._preflight_cache.failures) == 1
     started = json.loads(marker.read_text())
     with pytest.raises(ChildProcessError):
         os.waitpid(started['pid'], os.WNOHANG)

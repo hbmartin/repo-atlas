@@ -13,6 +13,15 @@ type ClickGesture = {
   selection: AtlasRepo | null; camera: ZoomTransform; committed: boolean
   timer?: ReturnType<typeof setTimeout>
 }
+type Viewport = {
+  size: Size
+  fit: ZoomTransform
+  transform: ZoomTransform
+  measured: boolean
+  alt: boolean
+  layoutToken: object
+}
+const sameTransform = (a: ZoomTransform, b: ZoomTransform) => a.x === b.x && a.y === b.y && a.k === b.k
 
 export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
@@ -24,9 +33,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
   const transformRef = useRef(zoomIdentity)
   const navigated = useRef(false)
-  const [transform, setTransform] = useState(zoomIdentity)
-  const [measuredSize, setMeasuredSize] = useState<Size | null>(null)
-  const size = measuredSize ?? PLACEHOLDER_SIZE
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
@@ -58,8 +64,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   }, [])
   const bounds = useMemo(() => atlasBounds(data, view.layoutAlt), [data, view.layoutAlt])
   const preparedLabels = useMemo(() => prepareRegionLabels(data, view.layoutAlt, measure, fontSize), [data, view.layoutAlt, measure, fontSize])
-  const fit = useMemo(() => fitOverview(data, view.layoutAlt, size, sizes.radius, measure, fontSize), [data, view.layoutAlt, size, sizes, measure, fontSize])
-  const previous = useRef<{ size: Size; fit: ZoomTransform; alt: boolean } | null>(null)
+  const [viewport, setViewport] = useState<Viewport>(() => {
+    const fit = fitOverview(data, view.layoutAlt, PLACEHOLDER_SIZE, sizes.radius, measure, fontSize, preparedLabels)
+    return { size: PLACEHOLDER_SIZE, fit, transform: fit, measured: false, alt: view.layoutAlt, layoutToken: preparedLabels }
+  })
+  const viewportRef = useRef(viewport)
+  useLayoutEffect(() => { viewportRef.current = viewport }, [viewport])
+  const { size, fit, transform } = viewport
   const pointX = useCallback((repo: AtlasRepo) => view.layoutAlt ? repo.x_alt : repo.x, [view.layoutAlt])
   const pointY = useCallback((repo: AtlasRepo) => view.layoutAlt ? repo.y_alt : repo.y, [view.layoutAlt])
   const apply = useCallback((next: ZoomTransform, animate = false) => {
@@ -82,13 +93,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
 
   useLayoutEffect(() => {
     const node = svgRef.current!
-    const resize = () => {
-      const rect = node.getBoundingClientRect()
-      if (rect.width > 0 && rect.height > 0) setMeasuredSize(current => current?.width === rect.width && current.height === rect.height ? current : { width: rect.width, height: rect.height })
-    }
-    const observer = new ResizeObserver(resize)
-    observer.observe(node)
-    resize()
     const behavior = zoom<SVGSVGElement, unknown>()
       .extent((): [[number, number], [number, number]] => [[0, 0], [node.getBoundingClientRect().width, node.getBoundingClientRect().height]])
       .on('zoom', event => {
@@ -98,18 +102,18 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
           cancelClick()
           if (frame.current == null) frame.current = requestAnimationFrame(() => {
             frame.current = null
-            setTransform(transformRef.current)
+            const next = transformRef.current
+            setViewport(current => sameTransform(current.transform, next) ? current : { ...current, transform: next })
           })
         } else {
           if (frame.current != null) cancelAnimationFrame(frame.current)
           frame.current = null
-          setTransform(event.transform)
+          setViewport(current => sameTransform(current.transform, event.transform) ? current : { ...current, transform: event.transform })
         }
       })
     zoomRef.current = behavior
     select(node).call(behavior).on('dblclick.zoom', null)
     return () => {
-      observer.disconnect()
       select(node).interrupt().on('.zoom', null)
       cancelClick()
       if (frame.current != null) cancelAnimationFrame(frame.current)
@@ -118,23 +122,55 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   }, [cancelClick])
 
   useLayoutEffect(() => {
-    if (!measuredSize) return
+    const node = svgRef.current!
+    const resize = () => {
+      const rect = node.getBoundingClientRect()
+      if (rect.width <= 0 || rect.height <= 0) return
+      const current = viewportRef.current
+      const nextSize = current.size.width === rect.width && current.size.height === rect.height
+        ? current.size : { width: rect.width, height: rect.height }
+      const inputsChanged = current.layoutToken !== preparedLabels
+      if (current.measured && nextSize === current.size && !inputsChanged) return
+      const nextFit = fitOverview(data, view.layoutAlt, nextSize, sizes.radius, measure, fontSize, preparedLabels)
+      const projectionChanged = current.alt !== view.layoutAlt
+      if (projectionChanged) {
+        navigated.current = false
+        cancelClick()
+      }
+      const camera = !current.measured || projectionChanged || !navigated.current
+        ? nextFit
+        : resizeTransform(transformRef.current, current.size, nextSize, current.fit, nextFit)
+      const nextTransform = constrainMapTransform(camera, nextSize, bounds)
+      transformRef.current = nextTransform
+      setViewport({
+        size: nextSize, fit: nextFit, transform: nextTransform, measured: true,
+        alt: view.layoutAlt, layoutToken: preparedLabels,
+      })
+    }
+    const observer = new ResizeObserver(resize)
+    observer.observe(node)
+    resize()
+    return () => observer.disconnect()
+  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick])
+
+  useLayoutEffect(() => {
+    if (!viewport.measured || viewport.alt !== view.layoutAlt) return
     zoomRef.current?.scaleExtent([fit.k * .6, fit.k * 10])
       .constrain(next => constrainMapTransform(next, size, bounds))
-    const old = previous.current
-    if (old?.size === size && old.fit === fit && old.alt === view.layoutAlt) return
-    const layoutChanged = old && old.alt !== view.layoutAlt
-    const next = !old || layoutChanged || !navigated.current ? fit : resizeTransform(transformRef.current, old.size, size, old.fit, fit)
-    previous.current = { size, fit, alt: view.layoutAlt }
-    if (layoutChanged) { navigated.current = false; cancelClick() }
-    apply(next)
-    if (layoutChanged && selected && !navigationRequest) centerRepo(selected)
-  }, [measuredSize, fit, size, bounds, view.layoutAlt, apply, selected, navigationRequest, centerRepo, cancelClick])
+    apply(transform)
+  }, [viewport.measured, viewport.alt, view.layoutAlt, fit.k, size, bounds, transform, apply])
+
+  const centeredProjection = useRef(view.layoutAlt)
+  useLayoutEffect(() => {
+    if (!viewport.measured || centeredProjection.current === viewport.alt) return
+    centeredProjection.current = viewport.alt
+    if (selected && !navigationRequest) centerRepo(selected)
+  }, [viewport.measured, viewport.alt, selected, navigationRequest, centerRepo])
 
   useLayoutEffect(() => {
     if (!navigationRequest || consumedRequest.current === navigationRequest.nonce) return
     if (navigationRequest.clickToken !== clickGesture.current?.token) cancelClick()
-    if (!measuredSize) return
+    if (!viewport.measured || viewport.alt !== view.layoutAlt) return
     consumedRequest.current = navigationRequest.nonce
     if (navigationRequest.kind === 'repo') {
       const repo = reposByName.get(navigationRequest.target)
@@ -151,7 +187,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       }
     }
     onNavigationHandled?.(navigationRequest.nonce)
-  }, [navigationRequest, measuredSize, data, reposByName, pointX, pointY, size, fit.k, apply, centerRepo, onNavigationHandled, cancelClick])
+  }, [navigationRequest, viewport.measured, viewport.alt, view.layoutAlt, data, reposByName, pointX, pointY, size, fit.k, apply, centerRepo, onNavigationHandled, cancelClick])
 
   useLayoutEffect(() => {
     const old = previousView.current
@@ -257,14 +293,14 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
       onPointerMove={event => {
         const start = pointerStart.current
-        if (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) { start.dragged = true; cancelClick() }
+        if (start && event.buttons !== 0 && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) { start.dragged = true; cancelClick() }
       }}
       onPointerLeave={() => { setHover(null); setHoverRegion(null) }}
       onPointerCancel={() => { pointerStart.current = null; cancelClick() }}
       onClick={event => {
         if (event.detail === 0) return
         const start = pointerStart.current; pointerStart.current = null
-        if (start?.dragged || (start && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6)) return
+        if (start?.dragged) return
         if (event.detail > 1) return
         const repo = hitRepo(event.clientX, event.clientY)
         if (start?.type === 'touch') selectImmediately(repo)
@@ -317,7 +353,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
           return <g key={label.id} className={`cluster-label ${activeRegion === label.id ? 'active' : ''}`}
             transform={`translate(${label.x} ${label.y})`} opacity={relativeZoom > 2.5 && activeRegion !== label.id ? .3 : 1}
             role="button" tabIndex={0} aria-label={`Focus region: ${cluster.label}`}
-            onPointerDown={event => event.stopPropagation()}
+            onPointerDown={event => { pointerStart.current = null; event.stopPropagation() }}
             onClick={event => {
               event.stopPropagation()
               if (event.detail === 0) { cancelClick(); onRegion?.(cluster.label) }
@@ -331,7 +367,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
             }}
             onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cancelClick(); onRegion?.(cluster.label) } }}
             onPointerEnter={() => setHoverRegion(label.id)} onPointerLeave={() => setHoverRegion(null)} onFocus={() => setFocusedRegion(label.id)} onBlur={() => setFocusedRegion(null)}>
-            <text style={{ fontSize }}>{label.lines.map((line, i) => <tspan x="0" y={(i - (label.lines.length - 1) / 2) * (fontSize + 3) + fontSize * .35} key={line}>{line}</tspan>)}</text>
+            <text style={{ fontSize }}>{label.lines.map((line, i) => <tspan x="0" y={(i - (label.lines.length - 1) / 2) * (fontSize + 3) + fontSize * .35} key={i}>{line}</tspan>)}</text>
           </g>
         })}
         {repoLabels.map(label => <text key={label.repo.full_name} className="repo-label" x={label.x} y={label.y}>{label.text}</text>)}

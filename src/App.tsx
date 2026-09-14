@@ -17,7 +17,7 @@ import { SearchBox } from './components/SearchBox'
 import { COMPACT_MEDIA_QUERY, formatDate, toggleValue, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { atlasPresentation, knownLanguage, normalizeLanguages, preserveValues } from './presentation'
+import { atlasPresentation, knownLanguage, normalizeLanguages, normalizeRegions, preserveValues } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -71,7 +71,6 @@ export default function App() {
         viewRef.current = initial
         setViewState(initial)
         if (initial.repo) requestNavigation('repo', initial.repo)
-        window.history.replaceState(null, '', writeViewState(initial))
         setUrlWarning(warning)
       })
       .catch((reason) => setError(reason instanceof Error ? reason : new Error(String(reason))))
@@ -81,7 +80,7 @@ export default function App() {
     const current = viewRef.current
     const normalized = { ...next,
       languages: preserveValues(current.languages, normalizeLanguages(next.languages)),
-      regions: preserveValues(current.regions, next.regions) }
+      regions: preserveValues(current.regions, normalizeRegions(next.regions)) }
     if (options?.navigate !== false && next.repo && (next.repo !== current.repo || options?.navigate)) {
       requestNavigation('repo', next.repo, options?.clickToken)
     } else if (!next.repo || options?.navigate === false || normalized.languages !== current.languages || normalized.regions !== current.regions || next.since !== current.since) {
@@ -89,6 +88,7 @@ export default function App() {
     }
     viewRef.current = normalized
     setViewState(normalized)
+    setUrlWarning([])
     window.history.replaceState(null, '', writeViewState(normalized))
   }, [requestNavigation])
 
@@ -102,7 +102,6 @@ export default function App() {
       if (restored.repo) requestNavigation('repo', restored.repo)
       else setNavigationRequest(null)
       setUrlWarning(warning)
-      window.history.replaceState(null, '', writeViewState(restored))
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
@@ -185,7 +184,7 @@ export default function App() {
         const next = {
           repo,
           languages: normalizeLanguages(languages),
-          regions,
+          regions: normalizeRegions(regions),
           since,
           layoutAlt: value.layoutAlt ?? current.layoutAlt,
         }

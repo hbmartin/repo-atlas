@@ -444,6 +444,25 @@ def test_openai_client_is_reused_for_matching_timeouts(monkeypatch):
     assert clients == [client]
 
 
+@pytest.mark.parametrize(
+    'choices',
+    [[], [SimpleNamespace(message=SimpleNamespace(parsed=None))]],
+)
+def test_openai_empty_or_unparsed_choices_are_repairable(monkeypatch, choices):
+    completion = SimpleNamespace(choices=choices)
+    client = SimpleNamespace(
+        beta=SimpleNamespace(
+            chat=SimpleNamespace(
+                completions=SimpleNamespace(parse=lambda **_kwargs: completion),
+            ),
+        ),
+    )
+    summarizer = OpenAISummarizer()
+    monkeypatch.setattr(summarizer, '_client', lambda _timeout: client)
+    with pytest.raises(ValueError, match='validated structured output'):
+        summarizer.invoke('prompt', RepoSummary)
+
+
 def test_codex_preflight_disables_future_features_and_runs_once(tmp_path, codex_metadata):
     summarizer = CodexSummarizer()
     summarizer._preflight()
@@ -487,10 +506,34 @@ def test_codex_preflight_timeout_retries_without_model_calls(monkeypatch):
         calls.append(args)
         raise SummarizerInvocationError("codex timed out after 10 seconds", repairable=False)
     monkeypatch.setattr(Summarizer, "_run_process", timeout)
-    with pytest.raises(SummarizerInvocationError, match="timed out"):
-        CodexSummarizer().invoke_with_repairs("README", RepoSummary)
+    summarizer = CodexSummarizer()
+    with pytest.raises(SummarizerConfigurationError, match="after 3 attempts.*timed out"):
+        summarizer.invoke_with_repairs("README", RepoSummary)
+    with pytest.raises(SummarizerConfigurationError, match="after 3 attempts.*timed out"):
+        summarizer.invoke_with_repairs("README", RepoSummary)
     assert len(calls) == 3
     assert all(call[1][1] == "features" for call in calls)
+
+
+def test_concurrent_codex_adapters_share_one_failed_preflight_budget(monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+
+    calls = []
+
+    def timeout(*_args, **_kwargs):
+        calls.append(1)
+        raise SummarizerInvocationError('temporary probe start failure', repairable=False)
+
+    monkeypatch.setattr(Summarizer, '_run_process', timeout)
+    cache = CodexPreflightCache()
+    providers = [CodexSummarizer(preflight_cache=cache) for _ in range(4)]
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        futures = [executor.submit(provider._preflight) for provider in providers]
+    for future in futures:
+        with pytest.raises(SummarizerConfigurationError, match='after 3 attempts'):
+            future.result()
+    assert calls == [1, 1, 1]
+    assert not cache.results and len(cache.failures) == 1
 
 
 def test_prompt_echo_cannot_turn_a_provider_failure_into_configuration_error(monkeypatch):
@@ -559,6 +602,17 @@ def test_redaction_precedes_truncation():
         assert safe_stderr_detail("claude", "z" * 1200) == "z" * 1000
 
 
+def test_short_proxy_username_does_not_redact_unrelated_substrings():
+    import os
+    from unittest.mock import patch
+
+    proxy = 'https://a:long-password@example.test'
+    detail = f'a task failed; password long-password; proxy {proxy}'
+    with patch.dict(os.environ, {'HTTPS_PROXY': proxy}, clear=True):
+        redacted = safe_stderr_detail('codex', detail)
+    assert redacted == 'a task failed; password [redacted]; proxy [redacted]'
+
+
 @pytest.mark.parametrize(('number', 'attempts', 'configuration'), [
     (errno.ENOENT, 1, True), (errno.EACCES, 1, True), (errno.ENOEXEC, 1, True),
     (errno.EAGAIN, 3, False), (errno.ENOMEM, 3, False), (errno.EMFILE, 3, False),
@@ -598,6 +652,27 @@ def test_temporary_startup_failure_recovers_without_repair_prompt(monkeypatch):
     monkeypatch.setattr(subprocess, 'Popen', start)
     assert ClaudeSummarizer().invoke_with_repairs('original', RepoSummary).domain == VALID['domain']
     assert prompts == ['original', 'original']
+
+
+def test_nonrepairable_retry_keeps_the_existing_repair_hint(monkeypatch):
+    summarizer = CodexSummarizer()
+    prompts = []
+
+    def invoke(prompt, _model):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            raise ValueError('output failed validation')
+        if len(prompts) == 2:
+            raise SummarizerInvocationError(
+                'temporary process start', repairable=False,
+            )
+        return RepoSummary.model_validate(VALID)
+
+    monkeypatch.setattr(summarizer, 'invoke', invoke)
+    assert summarizer.invoke_with_repairs('original', RepoSummary).domain == VALID['domain']
+    assert 'output failed validation' in prompts[1]
+    assert 'output failed validation' in prompts[2]
+    assert 'temporary process start' not in prompts[2]
 
 
 @pytest.mark.parametrize('error_type', [RuntimeError, NotImplementedError, RecursionError])
@@ -642,6 +717,26 @@ def test_codex_success_cache_is_shared_and_invalidates_when_executable_changes(c
     assert len(codex_metadata) == 6
 
 
+def test_codex_runs_probes_and_models_through_the_unresolved_shim(
+    tmp_path, monkeypatch, codex_metadata,
+):
+    target = tmp_path / 'codex-target'
+    target.write_text('target executable')
+    shim_dir = tmp_path / 'shim'
+    shim_dir.mkdir()
+    shim = shim_dir / 'codex'
+    shim.symlink_to(target)
+    monkeypatch.setattr(
+        'repo_atlas.summarizers.shutil.which', lambda *_args, **_kwargs: str(shim),
+    )
+    summarizer = CodexSummarizer()
+    summarizer._preflight()
+    assert summarizer._executable == str(shim.absolute())
+    assert all(command[0] == str(shim.absolute()) for command, _kwargs in codex_metadata)
+    command = summarizer.command('prompt', tmp_path / 'schema.json')
+    assert command[0] == str(shim.absolute())
+
+
 def test_codex_accepts_retired_required_controls_and_new_feature_names(monkeypatch):
     original = Summarizer._run_process
     def metadata(self, command, **kwargs):
@@ -657,17 +752,23 @@ def test_codex_accepts_retired_required_controls_and_new_feature_names(monkeypat
     assert 'future-tool.v2' in disabled
 
 
-def test_codex_does_not_cache_failed_checks(monkeypatch, codex_metadata):
+def test_codex_caches_failed_checks_until_the_executable_changes(monkeypatch, codex_metadata):
     original = Summarizer._run_process
     cache = CodexPreflightCache()
     def rejected(self, command, **kwargs):
         raise SummarizerConfigurationError('missing isolation control')
     monkeypatch.setattr(Summarizer, '_run_process', rejected)
-    with pytest.raises(SummarizerConfigurationError):
-        CodexSummarizer(preflight_cache=cache)._preflight()
-    assert not cache.results
+    summarizer = CodexSummarizer(preflight_cache=cache)
+    with pytest.raises(SummarizerConfigurationError, match='missing isolation control'):
+        summarizer._preflight()
+    assert not cache.results and len(cache.failures) == 1
     monkeypatch.setattr(Summarizer, '_run_process', original)
-    CodexSummarizer(preflight_cache=cache)._preflight()
+    with pytest.raises(SummarizerConfigurationError, match='missing isolation control'):
+        summarizer._preflight()
+    assert codex_metadata == []
+    from pathlib import Path
+    Path(summarizer._executable).write_text('different synthetic executable')
+    summarizer._preflight()
     assert len(codex_metadata) == 3
 
 

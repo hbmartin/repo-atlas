@@ -1,7 +1,10 @@
 import type { AtlasData, AtlasRepo } from './types'
+import { monthIndex } from './month'
 
 export const UNKNOWN_LANGUAGE_COLOR = '#87909e'
-export const normalizeLanguages = (names: string[]) => [...new Set(names)]
+const uniqueValues = (names: string[]) => [...new Set(names)]
+export const normalizeLanguages = uniqueValues
+export const normalizeRegions = uniqueValues
 export const languageCategories = (data: AtlasData) => data.languages
 export const knownLanguage = (data: AtlasData, name: string) => data.languages.some(item => item.name === name)
 
@@ -16,8 +19,7 @@ export function atlasPresentation(data: AtlasData) {
   const clustersById = new Map(data.clusters.map(cluster => [cluster.id, cluster]))
   let minMonth = Infinity, maxMonth = -Infinity
   for (const repo of data.repos) {
-    const [year, month] = repo.pushed_at.split('-').map(Number)
-    const value = year * 12 + month - 1
+    const value = monthIndex(repo.pushed_at)
     minMonth = Math.min(minMonth, value)
     maxMonth = Math.max(maxMonth, value)
   }

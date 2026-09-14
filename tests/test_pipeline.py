@@ -1,5 +1,6 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import wait as concurrent_wait
 from threading import Event
 from types import SimpleNamespace
 
@@ -843,10 +844,38 @@ def test_failed_collision_retry_preserves_model_label(tmp_path, monkeypatch, bes
     assert pipeline.labels[1].gloss == 'Model-generated gloss.'
     assert not pipeline.fallback_label_ids
     cached = [json.loads(row[0]) for row in pipeline.cache.rows("SELECT payload_json FROM stage_cache WHERE stage='label'")]
-    assert {entry['label'] for entry in cached} == {'Tooling', 'Tooling 2'}
+    assert len(cached) == 2
+    assert {entry['label'] for entry in cached} == {'Tooling'}
     assert all('source' not in entry for entry in cached)
     pipeline._restore_labels(pipeline.analysis)
     assert pipeline.labels[1].label == 'Tooling 2'
+    pipeline._restore_labels({'names': ['owner/two'], 'cluster_ids': [0]})
+    assert pipeline.labels[0].label == 'Tooling'
+
+
+def test_label_v2_ignores_suffixes_cached_by_the_old_version(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None)
+    insert_repo(pipeline, 'owner/repo')
+    insert_summary_and_fallback(pipeline, 'owner/repo')
+    pipeline.analysis = {'names': ['owner/repo'], 'cluster_ids': [0]}
+    signature = pipeline_module.content_hash(['owner/repo'])
+    old_key = pipeline_module.content_hash(signature, 'label-v1', pipeline.summary_provider_id)
+    pipeline.cache.set_stage(
+        'label', old_key, {'label': 'Tooling 2', 'gloss': 'Stale suffix.'}, pipeline_module.now(),
+    )
+    calls = []
+
+    def label(*_args, **_kwargs):
+        calls.append(1)
+        return pipeline_module.ClusterLabel(label='Fresh Tools', gloss='Regenerated.')
+
+    monkeypatch.setattr(
+        pipeline_module, 'get_summarizer', lambda _name: SimpleNamespace(label=label),
+    )
+    pipeline.label()
+    assert pipeline_module.LABEL_PROMPT_VERSION == 'label-v2'
+    assert calls == [1]
+    assert pipeline.labels[0].label == 'Fresh Tools'
 
 
 @pytest.mark.parametrize('error_type', [SummarizerConfigurationError, SummarizerCancelledError, RuntimeError])
@@ -1036,3 +1065,31 @@ def test_completed_summary_is_persisted_before_replenishing_workers(tmp_path, mo
     monkeypatch.setenv('ATLAS_SUMMARY_WORKERS', '2')
     pipeline.summarize()
     assert [row['full_name'] for row in pipeline._current_summary_rows()] == ['owner/a', 'owner/b', 'owner/c']
+
+
+def test_same_batch_success_is_persisted_before_fatal_worker_result(tmp_path, monkeypatch):
+    pipeline = AtlasPipeline(tmp_path, None)
+    for name in ('owner/a', 'owner/b', 'owner/c'):
+        insert_repo(pipeline, name)
+    calls = []
+    provider = SimpleNamespace(cancel=lambda: None)
+
+    def summarize(context, **_kwargs):
+        name = context['full_name']
+        calls.append(name)
+        if name == 'owner/b':
+            raise SummarizerConfigurationError('shared preflight failed')
+        return SUMMARY
+
+    provider.summarize = summarize
+    monkeypatch.setattr(pipeline_module, 'get_summarizer', lambda _name: provider)
+    monkeypatch.setenv('ATLAS_SUMMARY_WORKERS', '2')
+    monkeypatch.setattr(
+        pipeline_module, 'wait', lambda futures, **_kwargs: concurrent_wait(futures),
+    )
+    with pytest.raises(SummarizerConfigurationError, match='shared preflight failed'):
+        pipeline.summarize()
+    assert sorted(calls) == ['owner/a', 'owner/b']
+    assert pipeline.cache.rows("SELECT * FROM summaries WHERE full_name='owner/a'")
+    assert not pipeline.cache.rows("SELECT * FROM summaries WHERE full_name='owner/c'")
+    assert not pipeline.cache.rows('SELECT * FROM summary_failures')

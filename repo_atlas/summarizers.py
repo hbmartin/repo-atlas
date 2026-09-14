@@ -109,6 +109,7 @@ def startup_error(provider: str, exc: OSError) -> AtlasError:
 class CodexPreflightCache:
     lock: Any = field(default_factory=Lock)
     results: dict[tuple, tuple[str, ...]] = field(default_factory=dict)
+    failures: dict[tuple, str] = field(default_factory=dict)
 
 
 def openai_summary_model() -> str:
@@ -141,8 +142,11 @@ def safe_stderr_detail(
         if key in PROXY_ENV_KEYS or key.endswith("_BASE_URL"):
             try:
                 parsed = urlsplit(value)
-                # Also cover clients that log credentials separately or normalize a URL.
-                values.update(part for part in (parsed.username, parsed.password) if part)
+                # Passwords remain sensitive if a client logs them separately. A bare
+                # URL username is not added because substring matching common names can
+                # erase unrelated diagnostics; URL userinfo is covered below.
+                if parsed.password:
+                    values.add(parsed.password)
             except ValueError:
                 pass
     for value in tuple(values):
@@ -365,7 +369,8 @@ class Summarizer(ABC):
                 self._raise_if_cancelled()
                 if not exc.retryable or attempt == 2:
                     raise
-                error = str(exc) if exc.repairable else ""
+                if exc.repairable:
+                    error = str(exc)
             except ValueError as exc:
                 error = str(exc)
         raise SummarizerInvocationError(error)
@@ -418,13 +423,14 @@ class CodexSummarizer(Summarizer):
         if executable is None:
             raise SummarizerConfigurationError("Cannot start codex CLI: executable not found on PATH.")
         try:
-            path = Path(executable).resolve()
-            stat = path.stat()
+            executable_path = Path(os.path.abspath(executable))
+            resolved_path = executable_path.resolve()
+            stat = resolved_path.stat()
         except OSError as exc:
             raise startup_error(self.name, exc) from exc
-        self._executable = str(path)
+        self._executable = str(executable_path)
         key = (
-            self._executable, stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
+            str(resolved_path), stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns,
             stat.st_ctime_ns, self.exec_options, tuple(sorted(self.required_features)),
         )
         cache = self._preflight_cache
@@ -433,8 +439,29 @@ class CodexSummarizer(Summarizer):
             self._raise_if_cancelled()
         try:
             self._raise_if_cancelled()
+            if key in cache.failures:
+                raise SummarizerConfigurationError(cache.failures[key])
             if key not in cache.results:
-                cache.results[key] = self._inspect_features(environment, schema_path)
+                for attempt in range(3):
+                    try:
+                        cache.results[key] = self._inspect_features(environment, schema_path)
+                        break
+                    except SummarizerCancelledError:
+                        raise
+                    except SummarizerConfigurationError as exc:
+                        cache.failures[key] = str(exc)
+                        raise
+                    except SummarizerInvocationError as exc:
+                        if exc.retryable and attempt < 2:
+                            continue
+                        count = attempt + 1
+                        suffix = "attempt" if count == 1 else "attempts"
+                        message = (
+                            f"Codex compatibility check could not complete after "
+                            f"{count} {suffix}: {exc}"
+                        )
+                        cache.failures[key] = message
+                        raise SummarizerConfigurationError(message) from exc
             self._disabled_features = cache.results[key]
             return self._disabled_features
         finally:
@@ -638,6 +665,8 @@ class OpenAISummarizer(Summarizer):
                 ) from exc
             raise SummarizerInvocationError(f"openai request failed: {type(exc).__name__}") from exc
         self._raise_if_cancelled()
+        if not completion.choices:
+            raise ValueError("openai response did not contain validated structured output")
         parsed = completion.choices[0].message.parsed
         if parsed is None:
             raise ValueError("openai response did not contain validated structured output")

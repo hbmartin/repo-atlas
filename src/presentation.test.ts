@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, normalizeLanguages, regionColors } from './presentation'
+import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, normalizeLanguages, normalizeRegions, regionColors } from './presentation'
 import { parseViewState, unknownViewParameters, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
@@ -10,6 +10,7 @@ describe('atlas presentation', () => {
     expect(languageCategories(data)).toBe(data.languages)
     expect(atlasPresentation(data).languageColors.get('Gleam')).toBe('#abcdef')
     expect(normalizeLanguages(['HTML', 'Java', 'Other', 'Java'])).toEqual(['HTML', 'Java', 'Other'])
+    expect(normalizeRegions(['Tools', 'Research', 'Tools'])).toEqual(['Tools', 'Research'])
   })
   it('preserves exact URL categories and reports missing ones', () => {
     const data = makeAtlas([makeRepo({ primary_language: 'Java' })])
@@ -17,6 +18,8 @@ describe('atlas presentation', () => {
     expect(parsed.languages).toEqual(['Java'])
     expect(unknownViewParameters('?lang=Java,Other', data)).toEqual(['lang=Other'])
     expect(writeViewState(parsed)).toBe('?lang=Java&layout=alt')
+    expect(writeViewState({ ...parsed, regions: ['Developer Tools', 'Developer Tools'] }))
+      .toBe('?lang=Java&region=Developer+Tools&layout=alt')
   })
   it('retains equivalent filter arrays', () => {
     const previous = ['Java', 'HTML']

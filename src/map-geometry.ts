@@ -78,8 +78,31 @@ export class BoxGrid {
 const OFFSETS = Array.from({ length: 17 * 17 }, (_, i) => {
   const dx = (i % 17) * 24 - 192, dy = Math.floor(i / 17) * 24 - 192
   return { dx, dy, distance: Math.hypot(dx, dy) }
-})
-export function prepareRegionLabels(data: AtlasData, alt: boolean, measure: (text: string) => number, fontSize: number) {
+}).sort((a, b) => a.distance - b.distance)
+interface PreparedLabel {
+  id: number
+  lines: string[]
+  width: number
+  height: number
+  anchor: { x: number; y: number }
+  rings: Point[][]
+}
+const HULL_MEMBERSHIP = new WeakMap<PreparedLabel, { scale: number; values: (boolean | undefined)[] }>()
+function cachedHullMembership(label: PreparedLabel, offsetIndex: number, scale: number) {
+  let cached = HULL_MEMBERSHIP.get(label)
+  if (!cached || cached.scale !== scale) {
+    cached = { scale, values: [] }
+    HULL_MEMBERSHIP.set(label, cached)
+  }
+  const existing = cached.values[offsetIndex]
+  if (existing !== undefined) return existing
+  const { dx, dy } = OFFSETS[offsetIndex]
+  const point: Point = [label.anchor.x + dx / scale, label.anchor.y + dy / scale]
+  const value = label.rings.some(ring => inside(point, ring))
+  cached.values[offsetIndex] = value
+  return value
+}
+export function prepareRegionLabels(data: AtlasData, alt: boolean, measure: (text: string) => number, fontSize: number): PreparedLabel[] {
   return data.clusters.toSorted((a, b) => a.id - b.id).map(cluster => {
     const lines = wrapLabel(cluster.label, measure)
     return { id: cluster.id, lines, width: Math.max(...lines.map(measure)) + 8,
@@ -100,16 +123,18 @@ export function placeRegionLabels(data: AtlasData, alt: boolean, transform: Zoom
     if (x + r < 11 || x - r > size.width - 11 || y + r < 15 || y - r > size.height - 73) continue
     dots.add({ left: x - r, right: x + r, top: y - r, bottom: y + r })
   }
-  for (const { id, lines, width: w, height: h, anchor, rings } of prepared) {
+  for (const preparedLabel of prepared) {
+    const { id, lines, width: w, height: h, anchor } = preparedLabel
     const [ax, ay] = transform.apply([anchor.x, anchor.y])
     let best: Label | undefined, bestScore = Infinity
-    for (const { dx, dy, distance } of OFFSETS) {
-      if (distance >= bestScore) continue
+    for (let offsetIndex = 0; offsetIndex < OFFSETS.length; offsetIndex++) {
+      const { dx, dy, distance } = OFFSETS[offsetIndex]
+      if (distance >= bestScore) break
       const x = ax + dx, y = ay + dy
       const box = { id, x, y, lines, left: x - w / 2, right: x + w / 2, top: y - h / 2, bottom: y + h / 2 }
       if (box.left < 12 || box.right > size.width - 12 || box.top < 16 || box.bottom > size.height - 74) continue
       if (labels.hits(box, 8) || dots.hits(box, 1)) continue
-      const inHull = rings.some(ring => inside(transform.invert([x, y]), ring))
+      const inHull = cachedHullMembership(preparedLabel, offsetIndex, transform.k)
       const score = distance + (inHull ? 0 : 48)
       if (score < bestScore) { best = box; bestScore = score }
     }
@@ -126,10 +151,11 @@ export function constrainMapTransform(transform: ZoomTransform, size: Size, boun
 }
 
 export function fitOverview(data: AtlasData, alt: boolean, size: Size, radius: (count: number | null) => number,
-  measure: (text: string) => number, fontSize: number) {
+  measure: (text: string) => number, fontSize: number,
+  prepared = prepareRegionLabels(data, alt, measure, fontSize)) {
   const bounds = atlasBounds(data, alt)
   const first = fitBounds(bounds, size, 44, 84)
-  const labels = placeRegionLabels(data, alt, first, size, radius, measure, fontSize)
+  const labels = placeRegionLabels(data, alt, first, size, radius, measure, fontSize, prepared)
   const corners: Point[] = labels.flatMap(label => [first.invert([label.left, label.top]), first.invert([label.right, label.bottom])])
   return fitBounds(boundsOf([[bounds.left, bounds.top], [bounds.right, bounds.bottom], ...corners]), size, 44, 84)
 }
