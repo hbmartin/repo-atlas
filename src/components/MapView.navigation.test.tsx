@@ -1,13 +1,11 @@
 // @vitest-environment jsdom
 import { useMemo, useRef, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { zoomTransform } from 'd3-zoom'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AtlasRepo, MapNavigationRequest, ViewState } from '../types'
 import { atlasPresentation } from '../presentation'
+import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia } from '../test-dom'
 import { makeAtlas, makeRepo } from '../test-fixtures'
-import { COMPACT_MEDIA_QUERY } from '../view-utils'
-import { MapView } from './MapView'
 
 const { placementSpy } = vi.hoisted(() => ({ placementSpy: vi.fn() }))
 vi.mock('../map-geometry', async (importOriginal) => {
@@ -29,24 +27,20 @@ data.clusters[0] = { ...data.clusters[0], label_anchor: { x: 200, y: 200 }, cont
 data.clusters.push({ ...data.clusters[0], id: 1, label: 'Second Region', label_anchor: { x: 700, y: 600 }, contours: { outer: [[[600, 500], [800, 500], [800, 700], [600, 700]]], inner: [] } })
 const presentation = atlasPresentation(data)
 const props = { data, presentation, view: empty, visible: new Set(data.repos.map(repo => repo.full_name)), selected: null, onSelect: vi.fn() }
-const REDUCED_MOTION_MEDIA_QUERY = '(prefers-reduced-motion: reduce)'
 let width = 1000, height = 700
 let resize: (() => void) | undefined
+let MapView: typeof import('./MapView').MapView
+let zoomTransform: typeof import('d3-zoom').zoomTransform
 
-function stubMedia({ compact, reduced }: { compact: boolean; reduced: boolean }) {
-  vi.stubGlobal('matchMedia', (query: string) => ({
-    matches: query === COMPACT_MEDIA_QUERY ? compact : query === REDUCED_MOTION_MEDIA_QUERY ? reduced : false,
-    addEventListener() {},
-    removeEventListener() {},
-  }))
-}
-
-async function finishTransition() {
-  await act(() => new Promise(resolve => setTimeout(resolve, 300)))
-}
+beforeAll(async () => {
+  vi.useFakeTimers({ toNotFake: ['performance'] })
+  ;({ MapView } = await import('./MapView'))
+  ;({ zoomTransform } = await import('d3-zoom'))
+})
+afterAll(() => vi.useRealTimers())
 
 beforeEach(() => {
-  vi.useFakeTimers()
+  installCameraClock()
   placementSpy.mockClear()
   width = 1000; height = 700
   resize = undefined
@@ -54,7 +48,7 @@ beforeEach(() => {
   stubMedia({ compact: true, reduced: true })
   vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, width, height, right: width, bottom: height, x: 0, y: 0, toJSON() {} }))
 })
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 function Harness({ initial = null }: { initial?: AtlasRepo | null }) {
   const [selected, setSelected] = useState(initial)
@@ -107,21 +101,38 @@ describe('measured camera navigation', () => {
     rerender(<MapView {...props} navigationRequest={request} onNavigationHandled={handled} />)
     expect(handled).toHaveBeenCalledTimes(1)
   })
-  it('completes animated repository navigation when reduced motion is off', async () => {
-    vi.useRealTimers()
+  it('completes animated repository navigation when reduced motion is off', () => {
     stubMedia({ compact: false, reduced: false })
     const request = { kind: 'repo' as const, target: second.full_name, nonce: 3 }
     const { container } = render(<MapView {...props} selected={second} navigationRequest={request} />)
     const svg = container.querySelector('svg')!
     const fit = zoomTransform(svg)
 
-    await finishTransition()
+    finishCameraTransition()
 
     const centered = zoomTransform(svg)
     expect(centered.k / fit.k).toBeCloseTo(2.2)
     expect(centered.apply([second.x, second.y])[0]).toBeCloseTo(width / 2)
     expect(centered.apply([second.x, second.y])[1]).toBeCloseTo((height - 48) / 2)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('220%')
+  })
+  it('snaps an in-flight repository navigation to its rebased resize target', () => {
+    stubMedia({ compact: false, reduced: false })
+    const request = { kind: 'repo' as const, target: second.full_name, nonce: 31 }
+    const { container } = render(<MapView {...props} selected={second} navigationRequest={request} />)
+    const svg = container.querySelector('svg')!
+    advanceCameraBy(40)
+    expect(screen.getByLabelText('Zoom level').textContent).not.toBe('220%')
+
+    width = 1010
+    act(() => resize?.())
+
+    const resized = zoomTransform(svg)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('220%')
+    expect(resized.apply([second.x, second.y])[0]).toBeCloseTo(width / 2)
+    expect(resized.apply([second.x, second.y])[1]).toBeCloseTo((height - 48) / 2)
+    finishCameraTransition()
+    expect(zoomTransform(svg).toString()).toBe(resized.toString())
   })
   it.each(['missing', 'Unclustered'])('acknowledges an empty region %s without moving', target => {
     const handled = vi.fn()
@@ -157,6 +168,37 @@ describe('measured camera navigation', () => {
     act(() => resize?.())
     expect(placementSpy).toHaveBeenCalledTimes(1)
   })
+  it('keeps labels live without rebuilding static repository geometry each frame', () => {
+    stubMedia({ compact: false, reduced: false })
+    const currentPresentation = atlasPresentation(data)
+    const languageColor = vi.spyOn(currentPresentation.languageColors, 'get')
+    render(<MapView {...props} presentation={currentPresentation} />)
+    placementSpy.mockClear()
+    languageColor.mockClear()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    advanceCameraBy(120)
+
+    expect(placementSpy.mock.calls.length).toBeGreaterThan(1)
+    expect(languageColor).not.toHaveBeenCalled()
+  })
+  it('centers a repository from the pending reset destination', () => {
+    stubMedia({ compact: false, reduced: false })
+    const result = render(<MapView {...props} />)
+    const svg = result.container.querySelector('svg')!
+    const initial = zoomTransform(svg)
+    for (let index = 0; index < 4; index += 1) fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    finishCameraTransition()
+    expect(zoomTransform(svg).k / initial.k).toBeGreaterThan(2.2)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Reset view' }))
+    advanceCameraBy(40)
+    result.rerender(<MapView {...props} selected={second} navigationRequest={{ kind: 'repo', target: second.full_name, nonce: 32 }} />)
+    finishCameraTransition()
+
+    expect(zoomTransform(svg).k / initial.k).toBeCloseTo(2.2)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('220%')
+  })
 })
 
 describe('click sequences', () => {
@@ -179,6 +221,26 @@ describe('click sequences', () => {
     click(svg, point, 2)
     fireEvent.doubleClick(svg, { clientX: point[0], clientY: point[1], detail: 2 })
     act(() => vi.advanceTimersByTime(400))
+    expect(screen.getByTestId('selected').textContent).toBe(first.full_name)
+    const current = zoomTransform(svg)
+    expect(current.k).toBeCloseTo(before.k * 2)
+    expect(current.apply(before.invert(point))[0]).toBeCloseTo(point[0])
+    expect(current.apply(before.invert(point))[1]).toBeCloseTo(point[1])
+  })
+  it('interrupts animated selection with a late double-click from the original camera basis', () => {
+    stubMedia({ compact: false, reduced: false })
+    const { container } = render(<Harness initial={first} />)
+    const svg = container.querySelector('svg')!
+    const before = zoomTransform(svg)
+    const point = before.apply([second.x, second.y])
+    click(svg, point)
+    advanceCameraBy(340)
+    expect(screen.getByTestId('selected').textContent).toBe(second.full_name)
+
+    click(svg, point, 2)
+    fireEvent.doubleClick(svg, { clientX: point[0], clientY: point[1], detail: 2 })
+    finishCameraTransition()
+
     expect(screen.getByTestId('selected').textContent).toBe(first.full_name)
     const current = zoomTransform(svg)
     expect(current.k).toBeCloseTo(before.k * 2)
@@ -306,4 +368,31 @@ it('renders duplicate wrapped lines without duplicate React keys', () => {
   const lines = [...container.querySelectorAll('.cluster-label tspan')]
   expect(lines.map(line => line.textContent)).toEqual(['RepeatedLongWord', 'RepeatedLongWord'])
   expect(errors.mock.calls.flat().join(' ')).not.toContain('same key')
+})
+
+it('keeps D3 synchronized when a label-only refit changes translation but not scale', () => {
+  const media = stubMedia({ compact: false, reduced: true })
+  const edge = makeRepo({ x: 0, y: 0 })
+  const far = makeRepo({ full_name: 'owner/far', name: 'far', x: 1000, y: 1000 })
+  const edgeData = makeAtlas([edge, far])
+  edgeData.clusters[0] = {
+    ...edgeData.clusters[0],
+    label: 'Long Developer Tooling Region',
+    label_anchor: { x: 0, y: 500 },
+  }
+  const edgeProps = { ...props, data: edgeData, presentation: atlasPresentation(edgeData), visible: new Set(edgeData.repos.map(repo => repo.full_name)) }
+  const { container } = render(<MapView {...edgeProps} />)
+  const svg = container.querySelector('svg')!
+  const before = zoomTransform(svg)
+
+  media.set({ compact: true })
+
+  const refit = zoomTransform(svg)
+  expect(refit.k).toBeCloseTo(before.k)
+  expect(refit.x).not.toBeCloseTo(before.x)
+  expect(container.querySelector('.map-geometry')?.getAttribute('transform')).toBe(refit.toString())
+  mouse(svg, 'mousedown', 400, 300)
+  mouse(window, 'mousemove', 420, 300)
+  mouse(window, 'mouseup', 420, 300)
+  expect(zoomTransform(svg).x - refit.x).toBeCloseTo(20)
 })

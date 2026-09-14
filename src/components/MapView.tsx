@@ -3,7 +3,7 @@ import { select } from 'd3-selection'
 import 'd3-transition'
 import { zoom, zoomIdentity, type ZoomBehavior, type ZoomTransform } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
-import { COMPACT_MEDIA_QUERY, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
+import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
 import { UNKNOWN_LANGUAGE_COLOR, type AtlasPresentation } from '../presentation'
 import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, type Box, type Size } from '../map-geometry'
 
@@ -30,8 +30,11 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   highlightRegion?: number | null; onRegion?: (label: string, clickToken?: number) => void
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
+  const geometryRef = useRef<SVGGElement>(null)
   const zoomRef = useRef<ZoomBehavior<SVGSVGElement, unknown> | null>(null)
-  const transformRef = useRef(zoomIdentity)
+  const liveTransformRef = useRef(zoomIdentity)
+  const targetTransformRef = useRef(zoomIdentity)
+  const syncingCamera = useRef(false)
   const navigated = useRef(false)
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
@@ -71,15 +74,47 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const viewportRef = useRef(viewport)
   useLayoutEffect(() => { viewportRef.current = viewport }, [viewport])
   const { size, fit, transform } = viewport
+  const renderGeometry = useCallback((next: ZoomTransform) => {
+    geometryRef.current?.setAttribute('transform', next.toString())
+  }, [])
+  const commitTransform = useCallback((next: ZoomTransform) => {
+    if (frame.current != null) cancelAnimationFrame(frame.current)
+    frame.current = null
+    setViewport(current => sameTransform(current.transform, next) ? current : { ...current, transform: next })
+  }, [])
+  const scheduleTransform = useCallback(() => {
+    if (frame.current != null) return
+    frame.current = requestAnimationFrame(() => {
+      frame.current = null
+      const next = liveTransformRef.current
+      setViewport(current => sameTransform(current.transform, next) ? current : { ...current, transform: next })
+    })
+  }, [])
+  const setGeometryNode = useCallback((node: SVGGElement | null) => {
+    geometryRef.current = node
+    if (node) node.setAttribute('transform', liveTransformRef.current.toString())
+  }, [])
   const pointX = useCallback((repo: AtlasRepo) => view.layoutAlt ? repo.x_alt : repo.x, [view.layoutAlt])
   const pointY = useCallback((repo: AtlasRepo) => view.layoutAlt ? repo.y_alt : repo.y, [view.layoutAlt])
   const apply = useCallback((next: ZoomTransform, animate = false) => {
     if (!svgRef.current || !zoomRef.current) return
     const constrained = constrainMapTransform(next, size, bounds)
-    const selection = select(svgRef.current).interrupt()
-    if (animate && !reduced) selection.transition().duration(250).call(zoomRef.current.transform, constrained)
-    else selection.call(zoomRef.current.transform, constrained)
-  }, [reduced, size, bounds])
+    targetTransformRef.current = constrained
+    const selection = select(svgRef.current)
+    if (animate && !reduced) {
+      selection.interrupt().transition().duration(MAP_TRANSITION_DURATION).call(zoomRef.current.transform, constrained)
+    } else {
+      syncingCamera.current = true
+      try {
+        selection.interrupt().call(zoomRef.current.transform, constrained)
+      } finally {
+        syncingCamera.current = false
+      }
+      liveTransformRef.current = constrained
+      renderGeometry(constrained)
+      commitTransform(constrained)
+    }
+  }, [reduced, size, bounds, renderGeometry, commitTransform])
   const availableCenter = useCallback((): [number, number] => {
     const rect = svgRef.current?.getBoundingClientRect()
     const top = document.querySelector<HTMLElement>('.detail-panel.populated')?.getBoundingClientRect().top
@@ -88,38 +123,43 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const centerRepo = useCallback((repo: AtlasRepo) => {
     const [x, y] = availableCenter()
     navigated.current = true
-    apply(zoomIdentity.translate(x, y).scale(Math.max(fit.k * 2.2, transformRef.current.k)).translate(-pointX(repo), -pointY(repo)), true)
+    apply(zoomIdentity.translate(x, y).scale(Math.max(fit.k * 2.2, targetTransformRef.current.k)).translate(-pointX(repo), -pointY(repo)), true)
   }, [apply, availableCenter, fit.k, pointX, pointY])
 
   useLayoutEffect(() => {
     const node = svgRef.current!
     const behavior = zoom<SVGSVGElement, unknown>()
       .extent((): [[number, number], [number, number]] => [[0, 0], [node.getBoundingClientRect().width, node.getBoundingClientRect().height]])
+      .on('start', event => {
+        if (event.sourceEvent) targetTransformRef.current = event.transform
+      })
       .on('zoom', event => {
-        transformRef.current = event.transform
+        liveTransformRef.current = event.transform
+        renderGeometry(event.transform)
         if (event.sourceEvent) {
+          targetTransformRef.current = event.transform
           navigated.current = true
           cancelClick()
-          if (frame.current == null) frame.current = requestAnimationFrame(() => {
-            frame.current = null
-            const next = transformRef.current
-            setViewport(current => sameTransform(current.transform, next) ? current : { ...current, transform: next })
-          })
-        } else {
-          if (frame.current != null) cancelAnimationFrame(frame.current)
-          frame.current = null
-          setViewport(current => sameTransform(current.transform, event.transform) ? current : { ...current, transform: event.transform })
         }
+        if (!syncingCamera.current) scheduleTransform()
+      })
+      .on('end', event => {
+        liveTransformRef.current = event.transform
+        renderGeometry(event.transform)
+        if (event.sourceEvent) targetTransformRef.current = event.transform
+        if (!syncingCamera.current) commitTransform(event.transform)
       })
     zoomRef.current = behavior
     select(node).call(behavior).on('dblclick.zoom', null)
     return () => {
+      syncingCamera.current = true
       select(node).interrupt().on('.zoom', null)
+      syncingCamera.current = false
       cancelClick()
       if (frame.current != null) cancelAnimationFrame(frame.current)
       frame.current = null
     }
-  }, [cancelClick])
+  }, [cancelClick, renderGeometry, scheduleTransform, commitTransform])
 
   useLayoutEffect(() => {
     const node = svgRef.current!
@@ -139,26 +179,36 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       }
       const camera = !current.measured || projectionChanged || !navigated.current
         ? nextFit
-        : resizeTransform(transformRef.current, current.size, nextSize, current.fit, nextFit)
+        : resizeTransform(targetTransformRef.current, current.size, nextSize, current.fit, nextFit)
       const nextTransform = constrainMapTransform(camera, nextSize, bounds)
-      transformRef.current = nextTransform
-      setViewport({
+      const nextViewport = {
         size: nextSize, fit: nextFit, transform: nextTransform, measured: true,
         alt: view.layoutAlt, layoutToken: preparedLabels,
-      })
+      }
+      targetTransformRef.current = nextTransform
+      liveTransformRef.current = nextTransform
+      viewportRef.current = nextViewport
+      const behavior = zoomRef.current!
+      behavior.scaleExtent([nextFit.k * .6, nextFit.k * 10])
+        .constrain(next => constrainMapTransform(next, nextSize, bounds))
+      syncingCamera.current = true
+      try {
+        select(node).interrupt().call(behavior.transform, nextTransform)
+      } finally {
+        syncingCamera.current = false
+      }
+      renderGeometry(nextTransform)
+      setViewport(nextViewport)
     }
     const observer = new ResizeObserver(resize)
     observer.observe(node)
     resize()
     return () => observer.disconnect()
-  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick])
+  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick, renderGeometry])
 
   useLayoutEffect(() => {
-    if (!viewport.measured || viewport.alt !== view.layoutAlt) return
-    zoomRef.current?.scaleExtent([fit.k * .6, fit.k * 10])
-      .constrain(next => constrainMapTransform(next, size, bounds))
-    apply(transformRef.current)
-  }, [viewport.measured, viewport.alt, view.layoutAlt, fit.k, size, bounds, apply])
+    if (reduced && !sameTransform(liveTransformRef.current, targetTransformRef.current)) apply(targetTransformRef.current)
+  }, [reduced, apply])
 
   const centeredProjection = useRef(view.layoutAlt)
   useLayoutEffect(() => {
@@ -254,19 +304,19 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   if (focusedRegion != null && !renderedLabelIds.has(focusedRegion)) setFocusedRegion(null)
   const activeRegion = activeRepo?.cluster_id ?? hoverRegion ?? focusedRegion ?? highlightRegion ?? selected?.cluster_id
   const hitRepo = (clientX: number, clientY: number) => {
-    const point = pointerToMapPoint(clientX, clientY, svgRef.current!.getBoundingClientRect(), transformRef.current)
+    const point = pointerToMapPoint(clientX, clientY, svgRef.current!.getBoundingClientRect(), liveTransformRef.current)
     return nearestRepoAtPoint(data.repos, visible, point.x, point.y, 22 * point.unitsPerPixel, view.layoutAlt, drawnRadius, selected?.full_name)
   }
   const changeZoom = (factor: number) => {
     cancelClick()
-    const current = transformRef.current
+    const current = targetTransformRef.current
     const center = availableCenter()
     const point = current.invert(center)
     const k = Math.max(fit.k * .6, Math.min(fit.k * 10, current.k * factor))
     navigated.current = true
     apply(zoomIdentity.translate(...center).scale(k).translate(-point[0], -point[1]), true)
   }
-  const zoomAtPointer = (clientX: number, clientY: number, current = transformRef.current) => {
+  const zoomAtPointer = (clientX: number, clientY: number, current = targetTransformRef.current) => {
     const rect = svgRef.current?.getBoundingClientRect()
     if (!rect) return
     const pointer: [number, number] = [clientX - rect.left, clientY - rect.top]
@@ -283,11 +333,27 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   }
   const queueClick = (kind: 'repo' | 'region', target: AtlasRepo | string | null) => {
     cancelClick()
-    const gesture: ClickGesture = { token: ++clickSequence.current, kind, target, selection: selected, camera: transformRef.current, committed: false }
+    const gesture: ClickGesture = { token: ++clickSequence.current, kind, target, selection: selected, camera: targetTransformRef.current, committed: false }
     gesture.timer = setTimeout(() => commitClick(gesture), 300)
     clickGesture.current = gesture
   }
-  const selectImmediately = (repo: AtlasRepo | null) => { cancelClick(); onSelect(repo) }
+  const selectImmediately = useCallback((repo: AtlasRepo | null) => { cancelClick(); onSelect(repo) }, [cancelClick, onSelect])
+  const mapGeometry = useMemo(() => <>
+    {paths.map(path => <path key={path.key} d={path.path} className={`contour outer ${activeRegion === path.id ? 'active' : ''}`} style={{ fill: colors.get(path.id), stroke: colors.get(path.id) }} />)}
+    {selected?.neighbors.map(neighbor => reposByName.get(neighbor.full_name)).filter((repo): repo is AtlasRepo => Boolean(repo) && visible.has(repo!.full_name)).map(repo => <line key={repo.full_name} className="neighbor-line" x1={pointX(selected)} y1={pointY(selected)} x2={pointX(repo)} y2={pointY(repo)} />)}
+    {data.repos.map(repo => <g key={repo.full_name} transform={`translate(${pointX(repo)} ${pointY(repo)})`}
+      className={`repo-point ${repo === selected ? 'selected' : ''} ${repo.low_confidence ? 'low-confidence' : ''}`}
+      opacity={visible.has(repo.full_name) ? 1 : .1} pointerEvents={visible.has(repo.full_name) ? 'auto' : 'none'}
+      onPointerEnter={event => { setHover(repo); setTooltip({ x: event.clientX, y: event.clientY }) }}
+      onPointerMove={event => setTooltip({ x: event.clientX, y: event.clientY })} onPointerLeave={() => setHover(null)}
+      onFocus={event => { const bounds = event.currentTarget.getBoundingClientRect(); setFocused(repo); setTooltip({ x: bounds.right, y: bounds.top }) }} onBlur={() => setFocused(null)}
+      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
+      onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
+      <circle role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
+        r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : (languageColors.get(repo.primary_language) ?? UNKNOWN_LANGUAGE_COLOR)}
+        stroke={repo.low_confidence ? (languageColors.get(repo.primary_language) ?? UNKNOWN_LANGUAGE_COLOR) : '#06131d'} />
+    </g>)}
+  </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, languageColors, selectImmediately])
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
@@ -320,22 +386,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         zoomAtPointer(event.clientX, event.clientY, gesture?.kind === 'repo' ? gesture.camera : undefined)
       }}>
       <rect width={size.width} height={size.height} className="map-bg" />
-      <g transform={transform.toString()} className="map-geometry">
-        {paths.map(path => <path key={path.key} d={path.path} className={`contour outer ${activeRegion === path.id ? 'active' : ''}`} style={{ fill: colors.get(path.id), stroke: colors.get(path.id) }} />)}
-        {selected?.neighbors.map(neighbor => reposByName.get(neighbor.full_name)).filter((repo): repo is AtlasRepo => Boolean(repo) && visible.has(repo!.full_name)).map(repo => <line key={repo.full_name} className="neighbor-line" x1={pointX(selected)} y1={pointY(selected)} x2={pointX(repo)} y2={pointY(repo)} />)}
-        {data.repos.map(repo => <g key={repo.full_name} transform={`translate(${pointX(repo)} ${pointY(repo)})`}
-          className={`repo-point ${repo === selected ? 'selected' : ''} ${repo.low_confidence ? 'low-confidence' : ''}`}
-          opacity={visible.has(repo.full_name) ? 1 : .1} pointerEvents={visible.has(repo.full_name) ? 'auto' : 'none'}
-          onPointerEnter={event => { setHover(repo); setTooltip({ x: event.clientX, y: event.clientY }) }}
-          onPointerMove={event => setTooltip({ x: event.clientX, y: event.clientY })} onPointerLeave={() => setHover(null)}
-          onFocus={event => { const bounds = event.currentTarget.getBoundingClientRect(); setFocused(repo); setTooltip({ x: bounds.right, y: bounds.top }) }} onBlur={() => setFocused(null)}
-          onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
-          onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
-          <circle role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
-            r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : (languageColors.get(repo.primary_language) ?? UNKNOWN_LANGUAGE_COLOR)}
-            stroke={repo.low_confidence ? (languageColors.get(repo.primary_language) ?? UNKNOWN_LANGUAGE_COLOR) : '#06131d'} />
-        </g>)}
-      </g>
+      <g ref={setGeometryNode} className="map-geometry">{mapGeometry}</g>
       <g className="region-leaders" aria-hidden="true">
         {labels.map(label => {
           const cluster = clustersById.get(label.id)!

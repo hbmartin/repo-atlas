@@ -1,34 +1,29 @@
 // @vitest-environment jsdom
-import { zoomTransform } from 'd3-zoom'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas } from '../test-fixtures'
+import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia } from '../test-dom'
 import type { ViewState } from '../types'
 import {
-  COMPACT_MEDIA_QUERY,
   mobileMapTargetY,
   nearestRepoAtPoint,
   pointerToMapPoint,
 } from '../view-utils'
-import { MapView } from './MapView'
 import { atlasPresentation } from '../presentation'
 
 const view: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
-const REDUCED_MOTION_MEDIA_QUERY = '(prefers-reduced-motion: reduce)'
+let MapView: typeof import('./MapView').MapView
+let zoomTransform: typeof import('d3-zoom').zoomTransform
 
-function stubMedia({ compact, reduced }: { compact: boolean; reduced: boolean }) {
-  vi.stubGlobal('matchMedia', (query: string) => ({
-    matches: query === COMPACT_MEDIA_QUERY ? compact : query === REDUCED_MOTION_MEDIA_QUERY ? reduced : false,
-    addEventListener() {},
-    removeEventListener() {},
-  }))
-}
-
-async function finishTransition() {
-  await act(() => new Promise(resolve => setTimeout(resolve, 300)))
-}
+beforeAll(async () => {
+  vi.useFakeTimers({ toNotFake: ['performance'] })
+  ;({ MapView } = await import('./MapView'))
+  ;({ zoomTransform } = await import('d3-zoom'))
+})
+afterAll(() => vi.useRealTimers())
 
 beforeEach(() => {
+  installCameraClock()
   vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700, x: 0, y: 0, toJSON() {} })
   vi.stubGlobal('ResizeObserver', class {
     observe() {}
@@ -40,7 +35,6 @@ afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()
   vi.restoreAllMocks()
-  vi.useRealTimers()
 })
 
 describe('MapView', () => {
@@ -97,7 +91,6 @@ describe('MapView', () => {
 
   it('uses map-level hit testing instead of overlapping transparent circles', () => {
     const data = makeAtlas()
-    vi.useFakeTimers()
     const onSelect = vi.fn()
     const { container } = render(
       <MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={onSelect} />,
@@ -142,7 +135,7 @@ describe('MapView', () => {
     expect(onSelect).not.toHaveBeenCalled()
   })
 
-  it('completes animated HUD zooms and reset when reduced motion is off', async () => {
+  it('completes animated HUD zooms and reset when reduced motion is off', () => {
     stubMedia({ compact: false, reduced: false })
     const data = makeAtlas()
     const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
@@ -150,25 +143,41 @@ describe('MapView', () => {
     const initial = zoomTransform(svg)
 
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
-    await finishTransition()
+    finishCameraTransition()
     expect(zoomTransform(svg).k / initial.k).toBeCloseTo(1.25)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('125%')
 
     fireEvent.click(screen.getByRole('button', { name: 'Zoom out' }))
-    await finishTransition()
+    finishCameraTransition()
     expect(zoomTransform(svg).k).toBeCloseTo(initial.k)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('100%')
 
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
-    await finishTransition()
+    finishCameraTransition()
     expect(zoomTransform(svg).k / initial.k).toBeCloseTo(1.25)
     fireEvent.click(screen.getByRole('button', { name: 'Reset view' }))
-    await finishTransition()
+    finishCameraTransition()
     const reset = zoomTransform(svg)
     expect(reset.x).toBeCloseTo(initial.x)
     expect(reset.y).toBeCloseTo(initial.y)
     expect(reset.k).toBeCloseTo(initial.k)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('100%')
+  })
+
+  it('accumulates rapid animated HUD zoom commands', () => {
+    stubMedia({ compact: false, reduced: false })
+    const data = makeAtlas()
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
+    const svg = container.querySelector('svg')!
+    const initial = zoomTransform(svg)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    advanceCameraBy(60)
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    finishCameraTransition()
+
+    expect(zoomTransform(svg).k / initial.k).toBeCloseTo(1.25 ** 2)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('156%')
   })
 
   it('double-clicks to zoom around the pointer without selecting a repository', () => {
@@ -198,7 +207,7 @@ describe('MapView', () => {
     expect(zoomTransform(svg).k).toBeCloseTo(initial.k * 10)
   })
 
-  it('completes animated double-click zoom around the pointer when reduced motion is off', async () => {
+  it('completes animated double-click zoom around the pointer when reduced motion is off', () => {
     stubMedia({ compact: false, reduced: false })
     const data = makeAtlas()
     const onSelect = vi.fn()
@@ -209,7 +218,7 @@ describe('MapView', () => {
     const point = initial.invert(pointer)
 
     fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
-    await finishTransition()
+    finishCameraTransition()
 
     const zoomed = zoomTransform(svg)
     expect(zoomed.k).toBeCloseTo(initial.k * 2)
@@ -217,6 +226,42 @@ describe('MapView', () => {
     expect(zoomed.apply(point)[1]).toBeCloseTo(pointer[1])
     expect(screen.getByLabelText('Zoom level').textContent).toBe('200%')
     expect(onSelect).not.toHaveBeenCalled()
+  })
+
+  it('accumulates rapid animated double-click zooms around the pointer', () => {
+    stubMedia({ compact: false, reduced: false })
+    const data = makeAtlas()
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
+    const svg = container.querySelector('svg')!
+    const pointer: [number, number] = [600, 330]
+    const initial = zoomTransform(svg)
+    const point = initial.invert(pointer)
+
+    fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
+    advanceCameraBy(60)
+    fireEvent.doubleClick(svg, { clientX: pointer[0], clientY: pointer[1], detail: 2 })
+    finishCameraTransition()
+
+    const zoomed = zoomTransform(svg)
+    expect(zoomed.k).toBeCloseTo(initial.k * 4)
+    expect(zoomed.apply(point)[0]).toBeCloseTo(pointer[0])
+    expect(zoomed.apply(point)[1]).toBeCloseTo(pointer[1])
+  })
+
+  it('finishes at the pending target when reduced motion is enabled mid-transition', () => {
+    const media = stubMedia({ compact: false, reduced: false })
+    const data = makeAtlas()
+    const { container } = render(<MapView data={data} presentation={atlasPresentation(data)} view={view} visible={new Set([data.repos[0].full_name])} selected={null} onSelect={vi.fn()} />)
+    const svg = container.querySelector('svg')!
+    const initial = zoomTransform(svg)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
+    advanceCameraBy(40)
+    expect(zoomTransform(svg).k).toBeGreaterThan(initial.k)
+    media.set({ reduced: true })
+
+    expect(zoomTransform(svg).k / initial.k).toBeCloseTo(1.25)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('125%')
   })
 
   it('preserves an explicit region fit through the resize caused by wrapping filter counts', () => {
