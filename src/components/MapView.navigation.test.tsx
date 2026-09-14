@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AtlasRepo, MapNavigationRequest, ViewState } from '../types'
 import { atlasPresentation } from '../presentation'
 import { makeAtlas, makeRepo } from '../test-fixtures'
+import { COMPACT_MEDIA_QUERY } from '../view-utils'
 import { MapView } from './MapView'
 
 const { placementSpy } = vi.hoisted(() => ({ placementSpy: vi.fn() }))
@@ -28,8 +29,21 @@ data.clusters[0] = { ...data.clusters[0], label_anchor: { x: 200, y: 200 }, cont
 data.clusters.push({ ...data.clusters[0], id: 1, label: 'Second Region', label_anchor: { x: 700, y: 600 }, contours: { outer: [[[600, 500], [800, 500], [800, 700], [600, 700]]], inner: [] } })
 const presentation = atlasPresentation(data)
 const props = { data, presentation, view: empty, visible: new Set(data.repos.map(repo => repo.full_name)), selected: null, onSelect: vi.fn() }
+const REDUCED_MOTION_MEDIA_QUERY = '(prefers-reduced-motion: reduce)'
 let width = 1000, height = 700
 let resize: (() => void) | undefined
+
+function stubMedia({ compact, reduced }: { compact: boolean; reduced: boolean }) {
+  vi.stubGlobal('matchMedia', (query: string) => ({
+    matches: query === COMPACT_MEDIA_QUERY ? compact : query === REDUCED_MOTION_MEDIA_QUERY ? reduced : false,
+    addEventListener() {},
+    removeEventListener() {},
+  }))
+}
+
+async function finishTransition() {
+  await act(() => new Promise(resolve => setTimeout(resolve, 300)))
+}
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -37,7 +51,7 @@ beforeEach(() => {
   width = 1000; height = 700
   resize = undefined
   vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { resize = callback } observe() {} disconnect() {} })
-  vi.stubGlobal('matchMedia', () => ({ matches: true, addEventListener() {}, removeEventListener() {} }))
+  stubMedia({ compact: true, reduced: true })
   vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, width, height, right: width, bottom: height, x: 0, y: 0, toJSON() {} }))
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals(); vi.useRealTimers() })
@@ -92,6 +106,22 @@ describe('measured camera navigation', () => {
     expect(handled).toHaveBeenCalledExactlyOnceWith(2)
     rerender(<MapView {...props} navigationRequest={request} onNavigationHandled={handled} />)
     expect(handled).toHaveBeenCalledTimes(1)
+  })
+  it('completes animated repository navigation when reduced motion is off', async () => {
+    vi.useRealTimers()
+    stubMedia({ compact: false, reduced: false })
+    const request = { kind: 'repo' as const, target: second.full_name, nonce: 3 }
+    const { container } = render(<MapView {...props} selected={second} navigationRequest={request} />)
+    const svg = container.querySelector('svg')!
+    const fit = zoomTransform(svg)
+
+    await finishTransition()
+
+    const centered = zoomTransform(svg)
+    expect(centered.k / fit.k).toBeCloseTo(2.2)
+    expect(centered.apply([second.x, second.y])[0]).toBeCloseTo(width / 2)
+    expect(centered.apply([second.x, second.y])[1]).toBeCloseTo((height - 48) / 2)
+    expect(screen.getByLabelText('Zoom level').textContent).toBe('220%')
   })
   it.each(['missing', 'Unclustered'])('acknowledges an empty region %s without moving', target => {
     const handled = vi.fn()
