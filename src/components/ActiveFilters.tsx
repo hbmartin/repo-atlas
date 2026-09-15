@@ -1,24 +1,26 @@
+import type { RefObject } from 'react'
 import type { ViewState } from '../types'
 import { formatDate } from '../view-utils'
 
-export function ActiveFilters({ view, setView }: {
+export function ActiveFilters({ view, onRemove, groupRef }: {
   view: ViewState
-  setView: (next: ViewState) => void
+  onRemove: (next: ViewState, index: number) => void
+  groupRef?: RefObject<HTMLDivElement | null>
 }) {
   if (!view.languages.length && !view.regions.length && !view.since) return null
-  return <div className="active-filters" role="group" aria-label="Active filters">
-    {view.languages.map(name => <button key={`language-${name}`} type="button"
+  return <div ref={groupRef} className="active-filters" role="group" aria-label="Active filters">
+    {view.languages.map((name, index) => <button key={`language-${name}`} type="button"
       aria-label={`Remove language filter ${name}`}
-      onClick={() => setView({ ...view, languages: view.languages.filter(value => value !== name) })}>
+      onClick={() => onRemove({ ...view, languages: view.languages.filter(value => value !== name) }, index)}>
       Language · {name}<span aria-hidden="true">×</span>
     </button>)}
-    {view.regions.map(name => <button key={`region-${name}`} type="button"
+    {view.regions.map((name, index) => <button key={`region-${name}`} type="button"
       aria-label={`Remove region filter ${name}`}
-      onClick={() => setView({ ...view, regions: view.regions.filter(value => value !== name) })}>
+      onClick={() => onRemove({ ...view, regions: view.regions.filter(value => value !== name) }, view.languages.length + index)}>
       Region · {name}<span aria-hidden="true">×</span>
     </button>)}
     {view.since && <button type="button" aria-label={`Remove updated since filter ${formatDate(view.since)}`}
-      onClick={() => setView({ ...view, since: null })}>
+      onClick={() => onRemove({ ...view, since: null }, view.languages.length + view.regions.length)}>
       Since · {formatDate(view.since)}<span aria-hidden="true">×</span>
     </button>}
   </div>

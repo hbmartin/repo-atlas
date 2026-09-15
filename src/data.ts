@@ -64,7 +64,9 @@ export function validateAtlas(value: unknown): AtlasData {
   if (data.bounds.x.length !== 2 || data.bounds.y.length !== 2) throw new Error('bounds must have two endpoints per axis')
   data.bounds.x.forEach((item, index) => requireFinite(item, `bounds.x[${index}]`))
   data.bounds.y.forEach((item, index) => requireFinite(item, `bounds.y[${index}]`))
-  if (data.bounds.x[0] > data.bounds.x[1] || data.bounds.y[0] > data.bounds.y[1]) throw new Error('bounds are reversed')
+  if (data.bounds.x[0] >= data.bounds.x[1] || data.bounds.y[0] >= data.bounds.y[1]) {
+    throw new Error('bounds must have a positive span on each axis')
+  }
   if (!isRecord(data.stats)) throw new Error('stats are missing')
   for (const key of ['repo_count', 'cluster_count', 'noise_count', 'low_confidence_count'] as const) {
     requireFinite(data.stats[key], `stats.${key}`)
@@ -164,6 +166,23 @@ export function validateAtlas(value: unknown): AtlasData {
   if (data.stats.repo_count !== data.repos.length || data.stats.cluster_count !== data.clusters.length) {
     throw new Error('Atlas stats do not match its collections')
   }
+  const memberCounts = new Map<number, number>()
+  let noiseCount = 0
+  let lowConfidenceCount = 0
+  for (const repo of data.repos) {
+    if (repo.cluster_id === null) noiseCount += 1
+    else memberCounts.set(repo.cluster_id, (memberCounts.get(repo.cluster_id) ?? 0) + 1)
+    if (repo.low_confidence) lowConfidenceCount += 1
+  }
+  if (data.stats.noise_count !== noiseCount) throw new Error('stats.noise_count does not match repositories')
+  if (data.stats.low_confidence_count !== lowConfidenceCount) {
+    throw new Error('stats.low_confidence_count does not match repositories')
+  }
+  data.clusters.forEach((cluster, index) => {
+    if (cluster.member_count !== (memberCounts.get(cluster.id) ?? 0)) {
+      throw new Error(`clusters[${index}].member_count does not match repositories`)
+    }
+  })
   for (const language of data.languages) {
     if (language.count !== (categoryCounts.get(language.name) ?? 0)) {
       throw new Error(`Language category count is incorrect for ${language.name}`)
@@ -228,9 +247,20 @@ export function writeViewState(state: ViewState): string {
 
 export function searchableText(repo: AtlasRepo): string[] {
   return [
-    repo.name, repo.one_liner, ...repo.techniques,
+    repo.one_liner, ...repo.techniques,
     repo.what_it_does, repo.domain, repo.platform, ...repo.topics,
   ].map((value) => value.toLocaleLowerCase())
+}
+
+function nameTokens(name: string): string[] {
+  const separated = name.split(/[^A-Za-z0-9]+/).filter(Boolean)
+  const divided = name
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
+    .replace(/([A-Z])([A-Z][a-z])/g, '$1 $2')
+    .replace(/([0-9])([A-Za-z])/g, '$1 $2')
+    .split(/[^A-Za-z0-9]+/)
+    .filter(Boolean)
+  return [...new Set([...separated, ...divided].map(token => token.toLocaleLowerCase()))]
 }
 
 export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
@@ -239,18 +269,21 @@ export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
   return repos
     .map((repo) => {
       const fields = searchableText(repo)
-      const weights = [10, 7, ...repo.techniques.map(() => 5), 3, 4, 4, ...repo.topics.map(() => 4)]
+      const weights = [7, ...repo.techniques.map(() => 5), 3, 4, 4, ...repo.topics.map(() => 4)]
       const name = repo.name.toLocaleLowerCase()
       const fullName = repo.full_name.toLocaleLowerCase()
-      const nameScore = fullName === needle ? 2000 : name === needle ? 1500 : name.startsWith(needle) ? 750 : name.includes(needle) ? 500 : 0
-      const primaryScore = repo.primary_language?.toLocaleLowerCase() === needle ? 1 : 0
-      const compositionScore = repo.languages?.some(language => language.name.toLocaleLowerCase() === needle) ? 1 : 0
+      const primaryMatch = repo.primary_language?.toLocaleLowerCase() === needle
+      const compositionMatch = repo.languages?.some(language => language.name.toLocaleLowerCase() === needle)
+      const metadataMatch = [...repo.techniques, ...repo.topics, repo.domain, repo.platform]
+        .some(value => value.toLocaleLowerCase() === needle)
+      const prefixMatch = nameTokens(repo.name).some(token => token.startsWith(needle))
       const textScore = fields.reduce((sum, value, index) => sum + (value.includes(needle) ? weights[index] ?? 1 : 0), 0)
-      return { repo, nameScore, primaryScore, compositionScore, textScore }
+      const tier = fullName === needle ? 7 : name === needle ? 6 : primaryMatch ? 5
+        : compositionMatch ? 4 : metadataMatch ? 3 : prefixMatch ? 2 : textScore ? 1 : 0
+      return { repo, tier, textScore }
     })
-    .filter((entry) => entry.nameScore + entry.primaryScore + entry.compositionScore + entry.textScore > 0)
-    .sort((a, b) => b.nameScore - a.nameScore || b.primaryScore - a.primaryScore
-      || b.compositionScore - a.compositionScore || b.textScore - a.textScore
+    .filter((entry) => entry.tier > 0)
+    .sort((a, b) => b.tier - a.tier || b.textScore - a.textScore
       || a.repo.name.localeCompare(b.repo.name))
     .slice(0, 8)
     .map((entry) => entry.repo)

@@ -433,6 +433,35 @@ it('moves keyboard focus with arrow-key selection after a dot has focus', () => 
   expect(secondDot.closest('.repo-point')?.classList.contains('selected')).toBe(true)
 })
 
+it('keeps the focused tooltip anchored to its dot throughout an arrow-key camera pan', () => {
+  stubMedia({ compact: false, reduced: false })
+  const { container } = render(<Harness initial={first} />)
+  const svg = container.querySelector('svg')!
+  const firstDot = container.querySelector<SVGCircleElement>('.repo-dot[data-full-name="owner/example"]')!
+  const secondDot = container.querySelector<SVGCircleElement>('.repo-dot[data-full-name="owner/second"]')!
+  firstDot.focus()
+  fireEvent.keyDown(firstDot, { key: 'ArrowRight' })
+  expect(document.activeElement).toBe(secondDot)
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip.textContent).toContain('second')
+
+  const expectedPosition = () => {
+    const camera = zoomTransform(svg)
+    const [x, y] = camera.apply([second.x, second.y])
+    const radius = Number(secondDot.getAttribute('r')) * camera.k
+    const rect = svg.getBoundingClientRect()
+    return {
+      left: `${Math.max(8, Math.min(rect.left + x + radius + 14, window.innerWidth - 284))}px`,
+      top: `${Math.max(8, Math.min(rect.top + y - radius + 14, window.innerHeight - 160))}px`,
+    }
+  }
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
+  advanceCameraBy(120)
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
+  finishCameraTransition()
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
+})
+
 it('does not zoom when region placement moves the second click onto the SVG ancestor', () => {
   const onRegion = vi.fn()
   const { container } = render(<MapView {...props} onRegion={onRegion} />)

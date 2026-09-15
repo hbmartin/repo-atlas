@@ -1,18 +1,21 @@
-import { useEffect, useId, useMemo, useRef, useState } from 'react'
+import { useEffect, useId, useMemo, useRef, useState, type RefObject } from 'react'
 import { searchRepos } from '../data'
 import type { AtlasRepo } from '../types'
 
 export function SearchBox({
   repos,
   onSelect,
+  inputRef,
 }: {
   repos: AtlasRepo[]
   onSelect: (repo: AtlasRepo) => void
+  inputRef?: RefObject<HTMLInputElement | null>
 }) {
   const [query, setQuery] = useState('')
   const [debounced, setDebounced] = useState('')
   const [active, setActive] = useState(0)
-  const input = useRef<HTMLInputElement>(null)
+  const localInput = useRef<HTMLInputElement>(null)
+  const input = inputRef ?? localInput
   const resultsId = useId()
   useEffect(() => {
     const timer = window.setTimeout(() => setDebounced(query), 120)
@@ -32,7 +35,7 @@ export function SearchBox({
     }
     window.addEventListener('keydown', listener)
     return () => window.removeEventListener('keydown', listener)
-  }, [])
+  }, [input])
   const results = useMemo(() => searchRepos(repos, debounced), [repos, debounced])
   const activeIndex = Math.min(active, Math.max(0, results.length - 1))
   const choose = (repo: AtlasRepo) => {

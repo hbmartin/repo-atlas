@@ -22,7 +22,15 @@ def main() -> None:
     args = parser.parse_args()
     commit = args.commit
     if commit is None:
-        commit = json.loads(OUTPUT.read_text(encoding="utf-8"))["source_commit"]
+        try:
+            packaged = json.loads(OUTPUT.read_text(encoding="utf-8"))
+        except OSError as exc:
+            parser.error(f"Cannot read packaged source_commit from {OUTPUT}: {exc}; pass --commit")
+        except json.JSONDecodeError as exc:
+            parser.error(f"packaged source_commit in {OUTPUT} is not valid JSON: {exc}; pass --commit")
+        commit = packaged.get("source_commit") if isinstance(packaged, dict) else None
+        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+            parser.error(f"packaged source_commit in {OUTPUT} is missing or invalid; pass --commit")
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         parser.error("--commit must be a full lowercase git SHA")
     with urlopen(SOURCE.format(commit=commit), timeout=30) as response:

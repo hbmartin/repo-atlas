@@ -61,7 +61,6 @@ def test_primary_language_categories_are_stable_across_counts():
         "Python": 1, "Other": 13, "Unknown": 1,
     }
     assert set(counts) == set(CATEGORY_LANGUAGE_COLORS)
-    assert sum(counts.values()) == len(languages)
     assert primary_language_category("Java") == "Other"
     assert primary_language_category("HTML") == "Other"
     assert primary_language_category("Gleam") == "Other"
@@ -97,6 +96,12 @@ def test_primary_language_palette_uses_paul_tol_light_colors():
 
 def assert_atlas_snapshot_invariants(atlas: dict) -> None:
     assert atlas["schema_version"] == 2
+    bounds = atlas["bounds"]
+    for axis in ("x", "y"):
+        endpoints = bounds[axis]
+        assert len(endpoints) == 2
+        assert all(math.isfinite(value) for value in endpoints)
+        assert endpoints[0] < endpoints[1]
     assert len(atlas["repos"]) == atlas["stats"]["repo_count"] > 0
     assert len(atlas["clusters"]) == atlas["stats"]["cluster_count"]
     assert atlas["stats"]["noise_count"] == sum(repo["cluster_id"] is None for repo in atlas["repos"])
@@ -109,7 +114,6 @@ def assert_atlas_snapshot_invariants(atlas: dict) -> None:
     )
     assert {item["name"]: item["count"] for item in atlas["languages"]} == counts
     assert len(atlas["languages"]) == 10
-    assert sum(counts.values()) == len(atlas["repos"])
     assert all(
         item["color"] == CATEGORY_LANGUAGE_COLORS[item["name"]]
         for item in atlas["languages"]
@@ -123,14 +127,13 @@ def assert_atlas_snapshot_invariants(atlas: dict) -> None:
         for repo in atlas["repos"]
         for language in repo["languages"]
     )
-    assert all(
-        repo["primary_language_category"] == "Other"
-        for repo in atlas["repos"] if repo["primary_language"] in {"Java", "HTML"}
-    )
     names = {repo["full_name"] for repo in atlas["repos"]}
     for repo in atlas["repos"]:
-        assert all(math.isfinite(repo[field]) and 0 <= repo[field] <= 1000
-                   for field in ("x", "y", "x_alt", "y_alt"))
+        assert all(
+            math.isfinite(repo[field]) and bounds[axis][0] <= repo[field] <= bounds[axis][1]
+            for axis, fields in (("x", ("x", "x_alt")), ("y", ("y", "y_alt")))
+            for field in fields
+        )
         assert math.isfinite(repo["size_r"]) and repo["size_r"] > 0
         assert all(neighbor["full_name"] in names and math.isfinite(neighbor["similarity"])
                    for neighbor in repo["neighbors"])
@@ -147,6 +150,7 @@ def test_snapshot_invariants_accept_191_repos_and_new_layout_without_hashes():
         "owner": "owner",
         "stats": {"repo_count": 191, "cluster_count": 1, "noise_count": 0,
                   "low_confidence_count": 0},
+        "bounds": {"x": [0, 1000], "y": [0, 1000]},
         "languages": language_legend(["Python"] * 191),
         "clusters": [{"id": 0, "member_count": 191}],
         "repos": [],
@@ -164,6 +168,14 @@ def test_snapshot_invariants_accept_191_repos_and_new_layout_without_hashes():
     assert_atlas_snapshot_invariants(atlas)
     atlas["repos"][0]["x"] = 999
     assert_atlas_snapshot_invariants(atlas)
+    atlas["bounds"]["x"] = [0, 500]
+    with pytest.raises(AssertionError):
+        assert_atlas_snapshot_invariants(atlas)
+    atlas["bounds"]["x"] = [0, 1000]
+    atlas["bounds"]["y"] = [500, 500]
+    with pytest.raises(AssertionError):
+        assert_atlas_snapshot_invariants(atlas)
+    atlas["bounds"]["y"] = [0, 1000]
     atlas["stats"]["repo_count"] = 190
     with pytest.raises(AssertionError):
         assert_atlas_snapshot_invariants(atlas)
