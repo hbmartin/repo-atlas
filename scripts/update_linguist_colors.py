@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--commit", help="Full Linguist git commit SHA (defaults to packaged source_commit)")
     args = parser.parse_args()
     commit = args.commit
+    packaged_commit = commit is None
     if commit is None:
         try:
             packaged = json.loads(OUTPUT.read_text(encoding="utf-8"))
@@ -28,10 +29,12 @@ def main() -> None:
             parser.error(f"Cannot read packaged source_commit from {OUTPUT}: {exc}; pass --commit")
         except json.JSONDecodeError as exc:
             parser.error(f"packaged source_commit in {OUTPUT} is not valid JSON: {exc}; pass --commit")
+        except UnicodeDecodeError as exc:
+            parser.error(f"packaged source_commit in {OUTPUT} is not valid UTF-8: {exc}; pass --commit")
         commit = packaged.get("source_commit") if isinstance(packaged, dict) else None
-        if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
-            parser.error(f"packaged source_commit in {OUTPUT} is missing or invalid; pass --commit")
     if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
+        if packaged_commit:
+            parser.error(f"packaged source_commit in {OUTPUT} is missing or invalid; pass --commit")
         parser.error("--commit must be a full lowercase git SHA")
     with urlopen(SOURCE.format(commit=commit), timeout=30) as response:
         languages = yaml.safe_load(response.read())

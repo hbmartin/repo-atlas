@@ -41,6 +41,12 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
+function sameFilters(a: ViewState, b: ViewState) {
+  return a.since === b.since
+    && a.languages.length === b.languages.length && a.languages.every((name, index) => name === b.languages[index])
+    && a.regions.length === b.regions.length && a.regions.every((name, index) => name === b.regions[index])
+}
+
 export default function App() {
   const compact = useMediaQuery(COMPACT_MEDIA_QUERY)
   const [data, setData] = useState<AtlasData | null>(null)
@@ -107,10 +113,13 @@ export default function App() {
     const group = (request.scope === 'dialog' ? dialogChips : controlsChips).current
     const chips = group ? [...group.querySelectorAll<HTMLButtonElement>('button')] : []
     const nextChip = request.index === null ? null : chips[Math.min(request.index, chips.length - 1)]
-    const fallback = request.scope === 'dialog' && mobileFilters ? doneButton.current : searchInput.current
-    const focusTarget = nextChip ?? fallback
-    focusTarget?.focus({ preventScroll: true })
-  }, [view.languages, view.regions, view.since, mobileFilters])
+    const fallback = request.scope === 'dialog' && mobileFilters ? doneButton.current
+      : compact ? filterButton.current : searchInput.current
+    if (nextChip) {
+      nextChip.focus()
+      nextChip.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
+    } else fallback?.focus()
+  })
 
   useEffect(() => {
     if (!data) return
@@ -139,7 +148,7 @@ export default function App() {
     document.body.style.overflow = 'hidden'
     const focusables = () => [...dialog.querySelectorAll<HTMLElement>(FOCUSABLE)]
       .filter((element) => element.tagName === 'SUMMARY' || !element.closest('details:not([open])'))
-    focusables()[0]?.focus()
+    doneButton.current?.focus()
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         event.preventDefault()
@@ -253,10 +262,13 @@ export default function App() {
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
   const clearFilters = (scope: FilterFocusRequest['scope']) => {
+    const current = viewRef.current
+    if (!current.languages.length && !current.regions.length && !current.since) return
     pendingFilterFocus.current = { scope, index: null }
-    setView({ ...EMPTY_VIEW, repo: view.repo, layoutAlt: view.layoutAlt })
+    setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })
   }
   const removeActiveFilter = (next: ViewState, index: number, scope: FilterFocusRequest['scope']) => {
+    if (sameFilters(viewRef.current, next)) return
     pendingFilterFocus.current = { scope, index }
     setView(next)
   }

@@ -263,24 +263,50 @@ function nameTokens(name: string): string[] {
   return [...new Set([...separated, ...divided].map(token => token.toLocaleLowerCase()))]
 }
 
+type SearchEntry = {
+  repo: AtlasRepo
+  name: string
+  fullName: string
+  tokens: string[]
+  primaryLanguage: string
+  compositionLanguages: string[]
+  exactMetadata: Set<string>
+  fields: string[]
+  weights: number[]
+}
+
+const searchIndices = new WeakMap<AtlasRepo[], SearchEntry[]>()
+
+function searchIndex(repos: AtlasRepo[]): SearchEntry[] {
+  const cached = searchIndices.get(repos)
+  if (cached) return cached
+  const index = repos.map(repo => ({
+    repo,
+    name: repo.name.toLocaleLowerCase(),
+    fullName: repo.full_name.toLocaleLowerCase(),
+    tokens: nameTokens(repo.name),
+    primaryLanguage: repo.primary_language?.toLocaleLowerCase() ?? '',
+    compositionLanguages: repo.languages?.map(language => language.name.toLocaleLowerCase()) ?? [],
+    exactMetadata: new Set([...repo.techniques, ...repo.topics, repo.domain, repo.platform]
+      .map(value => value.toLocaleLowerCase())),
+    fields: searchableText(repo),
+    weights: [7, ...repo.techniques.map(() => 5), 3, 4, 4, ...repo.topics.map(() => 4)],
+  }))
+  searchIndices.set(repos, index)
+  return index
+}
+
 export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
   const needle = query.trim().toLocaleLowerCase()
   if (!needle) return []
-  return repos
-    .map((repo) => {
-      const fields = searchableText(repo)
-      const weights = [7, ...repo.techniques.map(() => 5), 3, 4, 4, ...repo.topics.map(() => 4)]
-      const name = repo.name.toLocaleLowerCase()
-      const fullName = repo.full_name.toLocaleLowerCase()
-      const primaryMatch = repo.primary_language?.toLocaleLowerCase() === needle
-      const compositionMatch = repo.languages?.some(language => language.name.toLocaleLowerCase() === needle)
-      const metadataMatch = [...repo.techniques, ...repo.topics, repo.domain, repo.platform]
-        .some(value => value.toLocaleLowerCase() === needle)
-      const prefixMatch = nameTokens(repo.name).some(token => token.startsWith(needle))
-      const textScore = fields.reduce((sum, value, index) => sum + (value.includes(needle) ? weights[index] ?? 1 : 0), 0)
-      const tier = fullName === needle ? 7 : name === needle ? 6 : primaryMatch ? 5
-        : compositionMatch ? 4 : metadataMatch ? 3 : prefixMatch ? 2 : textScore ? 1 : 0
-      return { repo, tier, textScore }
+  return searchIndex(repos)
+    .map((entry) => {
+      const textScore = entry.fields.reduce((sum, value, index) => sum + (value.includes(needle) ? entry.weights[index] ?? 1 : 0), 0)
+      const tier = entry.fullName === needle ? 8 : entry.name === needle ? 7 : entry.name.startsWith(needle) ? 6
+        : entry.primaryLanguage === needle ? 5 : entry.compositionLanguages.includes(needle) ? 4
+        : entry.exactMetadata.has(needle) ? 3 : entry.tokens.some(token => token.startsWith(needle)) ? 2
+        : textScore ? 1 : 0
+      return { repo: entry.repo, tier, textScore }
     })
     .filter((entry) => entry.tier > 0)
     .sort((a, b) => b.tier - a.tier || b.textScore - a.textScore
