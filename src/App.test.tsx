@@ -5,14 +5,14 @@ import type { ComponentProps } from 'react'
 import type { MapView } from './components/MapView'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas, makeRepo } from './test-fixtures'
+import { stubMedia } from './test-dom'
 import App from './App'
 
 const { mapSpy } = vi.hoisted(() => ({ mapSpy: vi.fn() }))
 vi.mock('./components/MapView', () => ({ MapView: (props: ComponentProps<typeof MapView>) => { mapSpy(props); return <div>Map fixture</div> } }))
 const currentMap = () => mapSpy.mock.lastCall![0] as ComponentProps<typeof MapView>
 
-let mobileMatches = true
-let mobileListener: (() => void) | undefined
+let media: ReturnType<typeof stubMedia>
 
 beforeEach(() => {
   mapSpy.mockClear()
@@ -26,13 +26,7 @@ beforeEach(() => {
   })
   Object.defineProperty(HTMLDialogElement.prototype, 'showModal', { configurable: true, value: function (this: HTMLDialogElement) { this.setAttribute('open', ''); this.querySelector<HTMLButtonElement>('button')?.focus() } })
   Object.defineProperty(HTMLDialogElement.prototype, 'close', { configurable: true, value: function (this: HTMLDialogElement) { this.removeAttribute('open') } })
-  mobileMatches = true
-  mobileListener = undefined
-  vi.stubGlobal('matchMedia', (query: string) => ({
-    get matches() { return query === '(max-width: 1023px)' && mobileMatches },
-    addEventListener(_type: string, listener: () => void) { mobileListener = listener },
-    removeEventListener() {},
-  }))
+  media = stubMedia({ compact: true, reduced: false })
 })
 afterEach(() => {
   cleanup()
@@ -72,8 +66,7 @@ describe('App mobile filters', () => {
     await user.click(screen.getByRole('button', { name: 'Filters' }))
     expect(container.querySelector('.topbar')?.hasAttribute('inert')).toBe(true)
     expect(document.body.style.overflow).toBe('hidden')
-    mobileMatches = false
-    act(() => mobileListener?.())
+    media.set({ compact: false })
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(container.querySelector('.topbar')?.hasAttribute('inert')).toBe(false)
     expect(document.body.style.overflow).toBe('')

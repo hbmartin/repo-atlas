@@ -35,11 +35,17 @@ export function stubMedia(initial: MediaSettings) {
 }
 
 export const CAMERA_FRAME_MS = 20
-// d3-timer retains its scheduler across tests, so this clock must stay monotonic.
 let cameraNow = 0
 
 export function installCameraClock() {
+  cameraNow = 0
+  vi.useFakeTimers({ toNotFake: ['performance'] })
   vi.spyOn(performance, 'now').mockImplementation(() => cameraNow)
+}
+
+export function uninstallCameraClock() {
+  vi.clearAllTimers()
+  vi.useRealTimers()
 }
 
 export function advanceCameraBy(duration: number) {
