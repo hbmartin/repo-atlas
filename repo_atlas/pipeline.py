@@ -46,11 +46,33 @@ R_MIN, R_MAX = 3.5, 14.0
 
 LANGUAGE_COLORS = {
     "C": "#555555", "C#": "#178600", "C++": "#f34b7d", "CSS": "#563d7c",
-    "Dart": "#00B4AB", "Go": "#00ADD8", "HTML": "#e34c26", "Java": "#b07219",
-    "JavaScript": "#f1e05a", "Kotlin": "#A97BFF", "Objective-C": "#438eff",
-    "PHP": "#4F5D95", "Python": "#3572A5", "Ruby": "#701516", "Rust": "#dea584",
-    "Shell": "#89e051", "Swift": "#F05138", "TypeScript": "#3178c6",
+    "Dart": "#00B4AB", "Go": "#44BB99", "HTML": "#e34c26", "Java": "#b07219",
+    "JavaScript": "#FFAABB", "Kotlin": "#EEDD88", "Objective-C": "#438eff",
+    "PHP": "#4F5D95", "Python": "#77AADD", "Ruby": "#BBCC33", "Rust": "#AAAA00",
+    "Shell": "#89e051", "Swift": "#99DDFF", "TypeScript": "#EE8866",
 }
+GROUPED_PRIMARY_LANGUAGES = frozenset({"HTML", "Java"})
+
+
+def primary_language_categories(
+    languages: list[str],
+) -> tuple[dict[str, str], dict[str, int]]:
+    primary_counts = Counter(languages)
+    rare = {
+        language
+        for language, count in primary_counts.items()
+        if count < 3 and language != "Unknown"
+    }
+    categories = {
+        language: "Other"
+        if language in rare or language in GROUPED_PRIMARY_LANGUAGES
+        else language
+        for language in primary_counts
+    }
+    category_counts: dict[str, int] = defaultdict(int)
+    for language, count in primary_counts.items():
+        category_counts[categories[language]] += count
+    return categories, dict(category_counts)
 
 
 def now() -> str:
@@ -1069,13 +1091,9 @@ class AtlasPipeline:
         rows_by_name = {row["full_name"]: row for row in repo_rows}
         if set(rows_by_name) != set(names):
             raise AtlasError("Projection repository set does not match current summaries.")
-        primary_counts: dict[str, int] = defaultdict(int)
-        for name in names:
-            primary_counts[rows_by_name[name]["primary_language"] or "Unknown"] += 1
-        rare = {language for language, count in primary_counts.items() if count < 3 and language != "Unknown"}
-        language_counts: dict[str, int] = defaultdict(int)
-        for language, count in primary_counts.items():
-            language_counts["Other" if language in rare else language] += count
+        primary_categories, language_counts = primary_language_categories([
+            rows_by_name[name]["primary_language"] or "Unknown" for name in names
+        ])
 
         def color_for(language: str) -> str:
             return LANGUAGE_COLORS.get(language, "#87909e")
@@ -1104,7 +1122,7 @@ class AtlasPipeline:
                 "what_it_does": summary.what_it_does, "domain": summary.domain,
                 "platform": summary.platform, "techniques": summary.techniques,
                 "artifact_type": summary.artifact_type, "maturity": summary.maturity,
-                "primary_language": "Other" if repo_language in rare else repo_language,
+                "primary_language": primary_categories[repo_language],
                 "languages": language_mix, "topics": json.loads(row["topics_json"]),
                 "stars": row["stars"], "file_count": row["file_count"],
                 "size_r": projected["radii"][index], "created_at": month(row["created_at"]),
