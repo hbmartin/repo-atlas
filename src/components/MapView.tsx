@@ -284,7 +284,19 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       const direction = { ArrowLeft: -1, ArrowRight: 1 }[event.key]
       if (!direction) return
       const next = nearestRepoInDirection(data.repos, visible, selected, direction, 0, view.layoutAlt)
-      if (next) { event.preventDefault(); cancelClick(); onSelect(next) }
+      if (next) {
+        event.preventDefault()
+        cancelClick()
+        const focusedDot = document.activeElement
+        const focusStartedOnDot = focusedDot instanceof SVGElement
+          && focusedDot.classList.contains('repo-dot') && svgRef.current?.contains(focusedDot)
+        onSelect(next)
+        if (focusStartedOnDot) {
+          const nextDot = [...(svgRef.current?.querySelectorAll<SVGCircleElement>('.repo-dot') ?? [])]
+            .find(dot => dot.dataset.fullName === next.full_name)
+          nextDot?.focus({ preventScroll: true })
+        }
+      }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
@@ -373,12 +385,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       onFocus={event => { const bounds = event.currentTarget.getBoundingClientRect(); setFocused(repo); setTooltip({ x: bounds.right, y: bounds.top }) }} onBlur={() => setFocused(null)}
       onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
       onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
-      <circle className="focus-ring" aria-hidden="true" pointerEvents="none" r={drawnRadius(repo) + 3} />
+      <circle className="focus-ring" aria-hidden="true" pointerEvents="none" r={drawnRadius(repo) + 3 / fit.k} />
       <circle className="repo-dot" role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
+        data-full-name={repo.full_name}
         r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : languageColors.get(repo.primary_language_category)}
         stroke={repo.low_confidence ? languageColors.get(repo.primary_language_category) : '#06131d'} />
     </g>)}
-  </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, languageColors, selectImmediately])
+  </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, fit.k, languageColors, selectImmediately])
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}

@@ -38,11 +38,9 @@ def test_recolor_snapshot_preserves_corpus_and_only_touches_changed_presentation
     }
     snapshot.write_text(json.dumps(original))
     monkeypatch.setattr(recolor_snapshot, "ATLAS", snapshot)
-    monkeypatch.setattr(recolor_snapshot, "now", lambda: "2026-09-15T00:00:00Z")
-
     recolor_snapshot.main()
     updated = json.loads(snapshot.read_text())
-    assert updated["generated_at"] == "2026-09-15T00:00:00Z"
+    assert updated["generated_at"] == original["generated_at"]
     assert len(updated["languages"]) == 10
     assert {item["name"]: item["count"] for item in updated["languages"] if item["count"]} == {"Other": 2}
     assert [repo["x"] for repo in updated["repos"]] == [14, 29]
@@ -50,8 +48,10 @@ def test_recolor_snapshot_preserves_corpus_and_only_touches_changed_presentation
     assert [language["color"] for language in updated["repos"][0]["languages"]] == ["#b07219", "#663399"]
     assert updated["repos"][1]["languages"][0]["color"] == "#427819"
 
+    unchanged_time = snapshot.stat().st_mtime_ns
     recolor_snapshot.main()
     assert json.loads(snapshot.read_text()) == updated
+    assert snapshot.stat().st_mtime_ns == unchanged_time
     updated["stats"]["repo_count"] = 3
     with pytest.raises(ValueError, match="count is inconsistent"):
         recolor_snapshot.recolor(updated)

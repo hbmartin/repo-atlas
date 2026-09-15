@@ -9,6 +9,7 @@ import {
 } from './data'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from './types'
 import { DetailPanel } from './components/DetailPanel'
+import { ActiveFilters } from './components/ActiveFilters'
 import { Filters } from './components/Filters'
 import { ListView } from './components/ListView'
 import { Loading } from './components/Loading'
@@ -232,6 +233,7 @@ export default function App() {
   const { minMonth, maxMonth, reposByName } = presentation
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
+  const clearFilters = () => setView({ ...EMPTY_VIEW, repo: view.repo, layoutAlt: view.layoutAlt })
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)
     setView({ ...viewRef.current, repo: repo?.full_name ?? null }, { ...options, navigate: options?.navigate ?? true })
@@ -284,10 +286,11 @@ export default function App() {
         </div>
         <button className="guide-trigger" onClick={() => setGuideOpen(true)}>Atlas guide</button>
         {filterCount > 0 && (
-          <button className="clear-filters" onClick={() => setView({ ...EMPTY_VIEW, repo: view.repo, layoutAlt: view.layoutAlt })}>
+          <button className="clear-filters" onClick={clearFilters}>
             Clear filters
           </button>
         )}
+        <ActiveFilters view={view} setView={setView} />
       </section>
       {guideOpen && <GuideDialog onClose={() => { setGuideOpen(false); setHighlightRegion(null) }}>{guide}</GuideDialog>}
       {mobileFilters && (
@@ -296,7 +299,9 @@ export default function App() {
             <header>
               <h2 id="mobile-filter-title">Filter the atlas</h2>
               <button onClick={closeMobileFilters}>Done</button>
+              {filterCount > 0 && <button onClick={clearFilters}>Clear all</button>}
             </header>
+            <ActiveFilters view={view} setView={setView} />
             <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
           </div>
         </div>

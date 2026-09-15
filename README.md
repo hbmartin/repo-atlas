@@ -98,14 +98,18 @@ for the pinned Linguist source. The frontend requires schema v2 and uses categor
 colors for map dots and filter controls, but shows raw language in repository details.
 `?lang=` and WebMCP language filters accept a category or an exact, case-sensitive
 raw primary-language name present in the snapshot; multiple choices combine with OR.
-The filter controls list categories. A direct raw-language filter can be cleared
-with the existing Clear filters action on desktop or by changing the URL.
+The filter controls and legend list only categories with repositories. All active
+language, region, and date filters—including raw-language and zero-count category
+filters set by a saved link or WebMCP—appear as removable chips on desktop and
+mobile. The mobile filter dialog also has Clear all.
 
 For a presentation-only color refresh, run `uv run --extra dev python
 scripts/update_linguist_colors.py --commit <full Linguist SHA>`, then `uv run
 python scripts/recolor_snapshot.py`. The recoloring command updates the committed
-snapshot without rerunning the GitHub or analysis stages. Review its diff and
-the third-party notice before committing.
+snapshot without rerunning the GitHub or analysis stages; it preserves
+`generated_at`, which records the last full atlas-data rebuild. Without `--commit`,
+the Linguist updater uses the packaged table's current `source_commit`. Review
+the diff and third-party notice before committing.
 Region buttons focus one region; the filter checkboxes toggle membership. Mouse
 selection waits 300 ms to distinguish a click from double-click zoom. Navigation
 requests are consumed once after map measurement; resizing preserves a navigated
@@ -113,7 +117,7 @@ camera, and switching between list and map starts a fresh overview.
 
 ```bash
 uv run pytest --cov=repo_atlas --cov-report=term-missing --cov-fail-under=35
-uv run ruff check repo_atlas tests
+uv run ruff check repo_atlas tests scripts
 pnpm test
 pnpm run lint
 pnpm exec tsc -b

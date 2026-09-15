@@ -26,6 +26,17 @@ describe('atlas data utilities', () => {
     const formula = makeRepo({ full_name: 'owner/homebrew-graphviz2drawio', name: 'homebrew-graphviz2drawio' })
     expect(searchRepos([formula, exact], 'graphviz2drawio')[0]).toBe(exact)
   })
+  it('keeps a name substring match ahead of more than eight primary-language matches', () => {
+    const primary = Array.from({ length: 9 }, (_, index) => makeRepo({
+      full_name: `owner/primary-${index}`, name: `primary-${index}`, primary_language: 'Python',
+    }))
+    const named = makeRepo({
+      full_name: 'owner/comparison-for-python', name: 'comparison-for-python', primary_language: 'Unknown',
+    })
+    const results = searchRepos([...primary, named], 'python')
+    expect(results).toHaveLength(8)
+    expect(results[0]).toBe(named)
+  })
   it('ranks exact raw language names without treating Java as JavaScript', () => {
     const java = makeRepo({ full_name: 'owner/java-repo', primary_language: 'Java' })
     const javascript = makeRepo({ full_name: 'owner/javascript-repo', primary_language: 'JavaScript' })
@@ -49,6 +60,24 @@ describe('atlas data utilities', () => {
     expect(validateAtlas(makeAtlas([makeRepo({ homepage: 'coming soon' })])).repos[0].homepage).toBeNull()
     expect(validateAtlas(makeAtlas([makeRepo({ homepage: 'javascript:alert(1)' })])).repos[0].homepage).toBeNull()
     expect(() => validateAtlas(makeAtlas([makeRepo({ pushed_at: 'invalid' })]))).toThrow('invalid date')
+  })
+  it('accepts a 191-repository reprojection but rejects malformed coordinates and counts', () => {
+    const repos = Array.from({ length: 191 }, (_, index) => makeRepo({
+      full_name: `owner/repo-${index}`, x: 100 + index, y_alt: 900 - index,
+    }))
+    const atlas = makeAtlas(repos)
+    expect(validateAtlas(atlas).stats.repo_count).toBe(191)
+    const wrongCount = makeAtlas(repos)
+    wrongCount.stats.repo_count = 190
+    expect(() => validateAtlas(wrongCount)).toThrow('Atlas stats do not match')
+    const wrongCoordinates = makeAtlas(repos.map((repo, index) => index === 0 ? { ...repo, x_alt: 1001 } : repo))
+    expect(() => validateAtlas(wrongCoordinates)).toThrow('outside atlas bounds')
+    const wrongCategory = makeAtlas(repos)
+    wrongCategory.languages[0].count = -1
+    expect(() => validateAtlas(wrongCategory)).toThrow('Language category count is incorrect')
+    const missingColor = makeAtlas(repos)
+    missingColor.languages[0].color = ''
+    expect(() => validateAtlas(missingColor)).toThrow('languages[0].color')
   })
   it('requires a category in the legend and matching category counts', () => {
     const data = makeAtlas([makeRepo({ primary_language: 'Java', primary_language_category: 'Other' })])

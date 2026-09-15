@@ -151,5 +151,6 @@ both hostnames again; browsers may retain cached permanent redirects.
 Run `uv run atlas run` locally, inspect `uv run atlas report` and the generated
 labels, then review and commit both `public/atlas.json` and
 `public/atlas-list.html`. Run the frontend checks and `pnpm run deploy:check`.
+The build validates snapshot consistency without requiring a fixed repository count.
 Push the snapshot to `main` to trigger Cloudflare, or use `pnpm run deploy` for
 a manual release. Do not commit the local cache, credentials, or reports.

@@ -1,5 +1,5 @@
-import hashlib
 import json
+import math
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as concurrent_wait
 from pathlib import Path
@@ -24,6 +24,7 @@ from repo_atlas.pipeline import (
     AtlasPipeline,
     detail_language_color,
     embedding_text,
+    language_legend,
     primary_language_category,
     primary_language_counts,
 )
@@ -94,18 +95,21 @@ def test_primary_language_palette_uses_paul_tol_light_colors():
     assert detail_language_color("Unknown") == UNKNOWN_LANGUAGE_COLOR
 
 
-def test_committed_atlas_has_consistent_language_categories_and_colors():
-    atlas = json.loads(
-        (Path(__file__).parents[1] / "public" / "atlas.json").read_text()
-    )
+def assert_atlas_snapshot_invariants(atlas: dict) -> None:
     assert atlas["schema_version"] == 2
-    assert len(atlas["repos"]) == atlas["stats"]["repo_count"] == 190
+    assert len(atlas["repos"]) == atlas["stats"]["repo_count"] > 0
+    assert len(atlas["clusters"]) == atlas["stats"]["cluster_count"]
+    assert atlas["stats"]["noise_count"] == sum(repo["cluster_id"] is None for repo in atlas["repos"])
+    assert atlas["stats"]["low_confidence_count"] == sum(repo["low_confidence"] for repo in atlas["repos"])
+    assert len({repo["full_name"] for repo in atlas["repos"]}) == len(atlas["repos"])
+    assert all(cluster["member_count"] == sum(repo["cluster_id"] == cluster["id"] for repo in atlas["repos"])
+               for cluster in atlas["clusters"])
     counts = primary_language_counts(
         [repo["primary_language"] for repo in atlas["repos"]]
     )
     assert {item["name"]: item["count"] for item in atlas["languages"]} == counts
     assert len(atlas["languages"]) == 10
-    assert counts["Other"] == 22
+    assert sum(counts.values()) == len(atlas["repos"])
     assert all(
         item["color"] == CATEGORY_LANGUAGE_COLORS[item["name"]]
         for item in atlas["languages"]
@@ -119,36 +123,67 @@ def test_committed_atlas_has_consistent_language_categories_and_colors():
         for repo in atlas["repos"]
         for language in repo["languages"]
     )
-    raw_java_html = {
-        repo["full_name"]: repo["primary_language"]
-        for repo in atlas["repos"] if repo["primary_language"] in {"Java", "HTML"}
-    }
-    assert raw_java_html == {
-        "hbmartin/datasette.io": "HTML",
-        "hbmartin/firebase-chat-android-architecture-components": "Java",
-        "hbmartin/flipper-plugin-stetho": "Java",
-        "hbmartin/how-much-ai": "HTML",
-        "hbmartin/onyx-android-sdk": "Java",
-        "hbmartin/overcast-to-pages": "HTML",
-        "hbmartin/overcast_parser": "HTML",
-        "hbmartin/sub9-client": "Java",
-    }
     assert all(
         repo["primary_language_category"] == "Other"
-        for repo in atlas["repos"] if repo["full_name"] in raw_java_html
+        for repo in atlas["repos"] if repo["primary_language"] in {"Java", "HTML"}
     )
-    names = "\n".join(sorted(repo["full_name"] for repo in atlas["repos"]))
-    assert hashlib.sha256(names.encode()).hexdigest() == (
-        "1cf06dabf1e464085fa3f8ad7b8a4f4c9f85a7401d9ef4bd7ecfcf6a5f81352e"
+    names = {repo["full_name"] for repo in atlas["repos"]}
+    for repo in atlas["repos"]:
+        assert all(math.isfinite(repo[field]) and 0 <= repo[field] <= 1000
+                   for field in ("x", "y", "x_alt", "y_alt"))
+        assert math.isfinite(repo["size_r"]) and repo["size_r"] > 0
+        assert all(neighbor["full_name"] in names and math.isfinite(neighbor["similarity"])
+                   for neighbor in repo["neighbors"])
+
+
+def test_committed_atlas_has_consistent_language_categories_and_colors():
+    atlas = json.loads((Path(__file__).parents[1] / "public" / "atlas.json").read_text())
+    assert_atlas_snapshot_invariants(atlas)
+
+
+def test_snapshot_invariants_accept_191_repos_and_new_layout_without_hashes():
+    atlas = {
+        "schema_version": 2,
+        "owner": "owner",
+        "stats": {"repo_count": 191, "cluster_count": 1, "noise_count": 0,
+                  "low_confidence_count": 0},
+        "languages": language_legend(["Python"] * 191),
+        "clusters": [{"id": 0, "member_count": 191}],
+        "repos": [],
+    }
+    for index in range(191):
+        atlas["repos"].append({
+            "full_name": f"owner/synthetic-{index}", "primary_language": "Python",
+            "primary_language_category": "Python",
+            "languages": [{"name": "Python", "color": detail_language_color("Python")}],
+            "cluster_id": 0, "low_confidence": False,
+            "x": 50 + index * 4, "y": 500,
+            "x_alt": 900 - index * 4, "y_alt": 300,
+            "size_r": 6, "neighbors": [],
+        })
+    assert_atlas_snapshot_invariants(atlas)
+    atlas["repos"][0]["x"] = 999
+    assert_atlas_snapshot_invariants(atlas)
+    atlas["stats"]["repo_count"] = 190
+    with pytest.raises(AssertionError):
+        assert_atlas_snapshot_invariants(atlas)
+    atlas["stats"]["repo_count"] = 191
+    atlas["repos"][0]["x"] = 1001
+    with pytest.raises(AssertionError):
+        assert_atlas_snapshot_invariants(atlas)
+    atlas["repos"][0]["x"] = 999
+    atlas["languages"][0]["color"] = "#000000"
+    with pytest.raises(AssertionError):
+        assert_atlas_snapshot_invariants(atlas)
+
+
+def test_language_legend_keeps_fixed_categories_for_changing_corpus():
+    legend = language_legend(["Python", "Java", "Rust", "Python"])
+    assert len(legend) == len(CATEGORY_LANGUAGE_COLORS) == 10
+    assert {item["name"]: item["count"] for item in legend} == primary_language_counts(
+        ["Python", "Java", "Rust", "Python"]
     )
-    layout_fields = ("x", "y", "x_alt", "y_alt", "cluster_id", "size_r", "neighbors")
-    layout = json.dumps([
-        (repo["full_name"], *(repo[key] for key in layout_fields))
-        for repo in sorted(atlas["repos"], key=lambda item: item["full_name"])
-    ], separators=(",", ":"))
-    assert hashlib.sha256(layout.encode()).hexdigest() == (
-        "37fe73cb7c2929c97b1413003bf828e011be54d463cc1709d473bd3de458511d"
-    )
+    assert all(item["color"] == CATEGORY_LANGUAGE_COLORS[item["name"]] for item in legend)
 
 
 def insert_repo(

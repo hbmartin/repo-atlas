@@ -10,7 +10,6 @@ from urllib.request import urlopen
 
 import yaml
 
-DEFAULT_COMMIT = "ee4fb24d13cb21a0eb43b30b52f5cde17fbba8ae"
 SOURCE = "https://raw.githubusercontent.com/github-linguist/linguist/{commit}/lib/linguist/languages.yml"
 COLOR = re.compile(r"#[0-9a-fA-F]{6}\Z")
 OUTPUT = Path(__file__).resolve().parents[1] / "repo_atlas" / "linguist_colors.json"
@@ -19,11 +18,14 @@ NOTICE = Path(__file__).resolve().parents[1] / "THIRD_PARTY_NOTICES.md"
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--commit", default=DEFAULT_COMMIT, help="Full Linguist git commit SHA")
+    parser.add_argument("--commit", help="Full Linguist git commit SHA (defaults to packaged source_commit)")
     args = parser.parse_args()
-    if not re.fullmatch(r"[0-9a-f]{40}", args.commit):
+    commit = args.commit
+    if commit is None:
+        commit = json.loads(OUTPUT.read_text(encoding="utf-8"))["source_commit"]
+    if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-f]{40}", commit):
         parser.error("--commit must be a full lowercase git SHA")
-    with urlopen(SOURCE.format(commit=args.commit), timeout=30) as response:
+    with urlopen(SOURCE.format(commit=commit), timeout=30) as response:
         languages = yaml.safe_load(response.read())
     if not isinstance(languages, dict):
         raise TypeError("Linguist languages.yml did not contain a language mapping")
@@ -38,9 +40,9 @@ def main() -> None:
             colors[name] = color
     if not colors:
         raise ValueError("Linguist supplied no colors")
-    payload = {"source_commit": args.commit, "colors": colors}
+    payload = {"source_commit": commit, "colors": colors}
     notice = NOTICE.read_text(encoding="utf-8")
-    revised, replacements = re.subn(r"linguist/blob/[0-9a-f]{40}/", f"linguist/blob/{args.commit}/", notice)
+    revised, replacements = re.subn(r"linguist/blob/[0-9a-f]{40}/", f"linguist/blob/{commit}/", notice)
     if replacements != 1:
         raise ValueError("Could not update Linguist source revision in third-party notice")
     OUTPUT.write_text(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2) + "\n", encoding="utf-8")

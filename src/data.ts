@@ -61,8 +61,10 @@ export function validateAtlas(value: unknown): AtlasData {
   if (!isRecord(data.bounds) || !Array.isArray(data.bounds.x) || !Array.isArray(data.bounds.y)) {
     throw new Error('bounds are malformed')
   }
+  if (data.bounds.x.length !== 2 || data.bounds.y.length !== 2) throw new Error('bounds must have two endpoints per axis')
   data.bounds.x.forEach((item, index) => requireFinite(item, `bounds.x[${index}]`))
   data.bounds.y.forEach((item, index) => requireFinite(item, `bounds.y[${index}]`))
+  if (data.bounds.x[0] > data.bounds.x[1] || data.bounds.y[0] > data.bounds.y[1]) throw new Error('bounds are reversed')
   if (!isRecord(data.stats)) throw new Error('stats are missing')
   for (const key of ['repo_count', 'cluster_count', 'noise_count', 'low_confidence_count'] as const) {
     requireFinite(data.stats[key], `stats.${key}`)
@@ -131,6 +133,10 @@ export function validateAtlas(value: unknown): AtlasData {
     repo.homepage = normalizeHttpUrl(repo.homepage, `${path}.homepage`, true)
     for (const key of ['x', 'y', 'x_alt', 'y_alt', 'stars', 'size_r'] as const) {
       requireFinite(repo[key], `${path}.${key}`)
+    }
+    if ([repo.x, repo.x_alt].some(value => value < data.bounds.x[0] || value > data.bounds.x[1])
+      || [repo.y, repo.y_alt].some(value => value < data.bounds.y[0] || value > data.bounds.y[1])) {
+      throw new Error(`${path} coordinates are outside atlas bounds`)
     }
     if (repo.file_count !== null) requireFinite(repo.file_count, `${path}.file_count`)
     if (repo.cluster_id !== null && !clusterIds.has(repo.cluster_id)) throw new Error(`${path}.cluster_id is unknown`)
@@ -236,7 +242,7 @@ export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
       const weights = [10, 7, ...repo.techniques.map(() => 5), 3, 4, 4, ...repo.topics.map(() => 4)]
       const name = repo.name.toLocaleLowerCase()
       const fullName = repo.full_name.toLocaleLowerCase()
-      const nameScore = fullName === needle ? 2000 : name === needle ? 1500 : name.startsWith(needle) ? 750 : 0
+      const nameScore = fullName === needle ? 2000 : name === needle ? 1500 : name.startsWith(needle) ? 750 : name.includes(needle) ? 500 : 0
       const primaryScore = repo.primary_language?.toLocaleLowerCase() === needle ? 1 : 0
       const compositionScore = repo.languages?.some(language => language.name.toLocaleLowerCase() === needle) ? 1 : 0
       const textScore = fields.reduce((sum, value, index) => sum + (value.includes(needle) ? weights[index] ?? 1 : 0), 0)

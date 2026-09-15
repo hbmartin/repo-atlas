@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors } from './presentation'
+import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors } from './presentation'
 import { parseViewState, unknownViewParameters, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
@@ -34,6 +34,16 @@ describe('atlas presentation', () => {
     const previous = ['Java', 'HTML']
     expect(preserveValues(previous, normalizeLanguages(['Java', 'HTML', 'Java']))).toBe(previous)
     expect(preserveValues(previous, ['HTML', 'Java'])).not.toBe(previous)
+  })
+  it('reuses language indices for the same immutable atlas and rebuilds for a new atlas', () => {
+    const first = makeAtlas([makeRepo({ primary_language: 'Java' })])
+    const index = languageIndex(first)
+    expect(atlasPresentation(first).filterIndex).toBe(index)
+    expect(languageFilterNames(first)).toBe(index.names)
+    expect(languageIndex(first)).toBe(index)
+    const second = makeAtlas([makeRepo({ primary_language: 'HTML' })])
+    expect(languageIndex(second)).not.toBe(index)
+    expect(languageFilterNames(second)).toContain('HTML')
   })
   it('caps logarithmic radii and uses the same function for legend examples', () => {
     const scale = fileSizeScale([0, 10, 100, 1000, 10000].map(file_count => makeRepo({ file_count })))
