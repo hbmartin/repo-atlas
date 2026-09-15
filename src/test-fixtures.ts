@@ -58,15 +58,15 @@ export function makeAtlas(repos: AtlasRepo[] = [makeRepo()]): AtlasData {
     stats: {
       repo_count: repos.length,
       cluster_count: 1,
-      noise_count: 0,
-      low_confidence_count: 0,
+      noise_count: repos.filter(repo => repo.cluster_id === null).length,
+      low_confidence_count: repos.filter(repo => repo.low_confidence).length,
     },
     languages: Object.entries(CATEGORY_COLORS).map(([name, color]) => ({ name, count: repos.filter(repo => repo.primary_language_category === name).length, color })),
     clusters: [{
       id: 0,
       label: 'Developer Tools',
       gloss: 'Tools for developers.',
-      member_count: repos.length,
+      member_count: repos.filter(repo => repo.cluster_id === 0).length,
       label_anchor: { x: 500, y: 500 },
       contours: { outer: [], inner: [] },
       label_anchor_alt: { x: 510, y: 510 },

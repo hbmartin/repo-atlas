@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import {
   AtlasRequestError,
   loadAtlas,
@@ -28,6 +28,8 @@ const EMPTY_VIEW: ViewState = {
   since: null,
   layoutAlt: false,
 }
+
+type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
 
 const FOCUSABLE = [
   'a[href]',
@@ -59,8 +61,13 @@ export default function App() {
     setNavigationRequest(current => current?.nonce === nonce ? null : current)
   }, [])
   const viewRef = useRef(view)
+  const searchInput = useRef<HTMLInputElement>(null)
   const filterButton = useRef<HTMLButtonElement>(null)
   const filterDialog = useRef<HTMLDivElement>(null)
+  const doneButton = useRef<HTMLButtonElement>(null)
+  const controlsChips = useRef<HTMLDivElement>(null)
+  const dialogChips = useRef<HTMLDivElement>(null)
+  const pendingFilterFocus = useRef<FilterFocusRequest | null>(null)
 
   useEffect(() => { viewRef.current = view }, [view])
   useEffect(() => {
@@ -92,6 +99,18 @@ export default function App() {
     setUrlWarning([])
     window.history.replaceState(null, '', writeViewState(normalized))
   }, [requestNavigation])
+
+  useLayoutEffect(() => {
+    const request = pendingFilterFocus.current
+    if (!request) return
+    pendingFilterFocus.current = null
+    const group = (request.scope === 'dialog' ? dialogChips : controlsChips).current
+    const chips = group ? [...group.querySelectorAll<HTMLButtonElement>('button')] : []
+    const nextChip = request.index === null ? null : chips[Math.min(request.index, chips.length - 1)]
+    const fallback = request.scope === 'dialog' && mobileFilters ? doneButton.current : searchInput.current
+    const focusTarget = nextChip ?? fallback
+    focusTarget?.focus({ preventScroll: true })
+  }, [view.languages, view.regions, view.since, mobileFilters])
 
   useEffect(() => {
     if (!data) return
@@ -233,7 +252,14 @@ export default function App() {
   const { minMonth, maxMonth, reposByName } = presentation
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
-  const clearFilters = () => setView({ ...EMPTY_VIEW, repo: view.repo, layoutAlt: view.layoutAlt })
+  const clearFilters = (scope: FilterFocusRequest['scope']) => {
+    pendingFilterFocus.current = { scope, index: null }
+    setView({ ...EMPTY_VIEW, repo: view.repo, layoutAlt: view.layoutAlt })
+  }
+  const removeActiveFilter = (next: ViewState, index: number, scope: FilterFocusRequest['scope']) => {
+    pendingFilterFocus.current = { scope, index }
+    setView(next)
+  }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)
     setView({ ...viewRef.current, repo: repo?.full_name ?? null }, { ...options, navigate: options?.navigate ?? true })
@@ -273,7 +299,7 @@ export default function App() {
         <a href={profileUrl} target="_blank" rel="noreferrer">{data.owner.toLocaleUpperCase()} / GITHUB ↗</a>
       </header>
       <section className="controls" inert={backgroundInert}>
-        <SearchBox repos={data.repos} onSelect={selectRepo} />
+        <SearchBox repos={data.repos} onSelect={selectRepo} inputRef={searchInput} />
         <div className="desktop-filters">
           <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
         </div>
@@ -286,11 +312,12 @@ export default function App() {
         </div>
         <button className="guide-trigger" onClick={() => setGuideOpen(true)}>Atlas guide</button>
         {filterCount > 0 && (
-          <button className="clear-filters" onClick={clearFilters}>
+          <button className="clear-filters" onClick={() => clearFilters('controls')}>
             Clear filters
           </button>
         )}
-        <ActiveFilters view={view} setView={setView} />
+        <ActiveFilters view={view} groupRef={controlsChips}
+          onRemove={(next, index) => removeActiveFilter(next, index, 'controls')} />
       </section>
       {guideOpen && <GuideDialog onClose={() => { setGuideOpen(false); setHighlightRegion(null) }}>{guide}</GuideDialog>}
       {mobileFilters && (
@@ -298,10 +325,13 @@ export default function App() {
           <div>
             <header>
               <h2 id="mobile-filter-title">Filter the atlas</h2>
-              <button onClick={closeMobileFilters}>Done</button>
-              {filterCount > 0 && <button onClick={clearFilters}>Clear all</button>}
+              <div className="header-actions">
+                {filterCount > 0 && <button onClick={() => clearFilters('dialog')}>Clear all</button>}
+                <button ref={doneButton} onClick={closeMobileFilters}>Done</button>
+              </div>
             </header>
-            <ActiveFilters view={view} setView={setView} />
+            <ActiveFilters view={view} groupRef={dialogChips}
+              onRemove={(next, index) => removeActiveFilter(next, index, 'dialog')} />
             <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
           </div>
         </div>
@@ -313,7 +343,7 @@ export default function App() {
           <MapView data={data} presentation={presentation} view={view} visible={visible} selected={selected} onSelect={selectRepo} navigationRequest={navigationRequest} onNavigationHandled={acknowledgeNavigation} highlightRegion={highlightRegion} onRegion={chooseRegion} />
         )}
         {visible.size === 0 && (
-          <div className="no-results" role="status">No repositories match.{' '}<button onClick={() => setView({ ...EMPTY_VIEW, repo: null, layoutAlt: view.layoutAlt })}>Clear filters</button></div>
+          <div className="no-results" role="status">No repositories match.{' '}<button onClick={() => clearFilters('controls')}>Clear filters</button></div>
         )}
         {selected ? <DetailPanel
           repo={selected}

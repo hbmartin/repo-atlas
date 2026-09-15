@@ -4,6 +4,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 SCRIPT = Path(__file__).parents[1] / "scripts" / "update_linguist_colors.py"
 SPEC = importlib.util.spec_from_file_location("update_linguist_colors", SCRIPT)
 assert SPEC and SPEC.loader
@@ -37,3 +39,23 @@ def test_default_commit_follows_last_explicit_refresh(tmp_path, monkeypatch):
     assert all(f"/{new_commit}/" in url for url in urls)
     assert json.loads(output.read_text())["source_commit"] == new_commit
     assert f"/{new_commit}/" in notice.read_text()
+
+
+@pytest.mark.parametrize("content", [None, "{", "{}", "[]", '{"source_commit": "bad"}'])
+def test_default_commit_reports_packaged_source_errors_without_fetching(
+    content, tmp_path, monkeypatch, capsys
+):
+    output = tmp_path / "linguist_colors.json"
+    if content is not None:
+        output.write_text(content)
+    monkeypatch.setattr(update_linguist_colors, "OUTPUT", output)
+    monkeypatch.setattr(sys, "argv", ["update_linguist_colors.py"])
+    monkeypatch.setattr(update_linguist_colors, "urlopen", lambda *_args, **_kwargs: pytest.fail("unexpected fetch"))
+
+    with pytest.raises(SystemExit) as failure:
+        update_linguist_colors.main()
+    assert failure.value.code == 2
+    message = capsys.readouterr().err
+    assert "packaged source_commit" in message
+    assert str(output) in message
+    assert "pass --commit" in message

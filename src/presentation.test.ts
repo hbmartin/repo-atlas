@@ -38,7 +38,6 @@ describe('atlas presentation', () => {
   it('reuses language indices for the same immutable atlas and rebuilds for a new atlas', () => {
     const first = makeAtlas([makeRepo({ primary_language: 'Java' })])
     const index = languageIndex(first)
-    expect(atlasPresentation(first).filterIndex).toBe(index)
     expect(languageFilterNames(first)).toBe(index.names)
     expect(languageIndex(first)).toBe(index)
     const second = makeAtlas([makeRepo({ primary_language: 'HTML' })])

@@ -38,6 +38,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
   const [focusedRegion, setFocusedRegion] = useState<number | null>(null)
   const [tooltip, setTooltip] = useState({ x: 0, y: 0 })
+  const [svgOrigin, setSvgOrigin] = useState({ left: 0, top: 0 })
   const consumedRequest = useRef<number | null>(null)
   const previousView = useRef(view)
   const pointerStart = useRef<{ x: number; y: number; type: string; dragged: boolean } | null>(null)
@@ -50,6 +51,14 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const reduced = useReducedMotion()
   const fontSize = compact ? 12 : 13
   const { sizes, colors, languageColors, reposByName, clustersById } = presentation
+  const dotLookup = useMemo(() => {
+    const nodes = new Map<string, SVGCircleElement>()
+    const refs = new Map(data.repos.map(repo => [repo.full_name, (node: SVGCircleElement | null) => {
+      if (node) nodes.set(repo.full_name, node)
+      else nodes.delete(repo.full_name)
+    }] as const))
+    return { nodes, refs }
+  }, [data.repos])
   const cancelClick = useCallback(() => {
     if (clickGesture.current?.timer) clearTimeout(clickGesture.current.timer)
     clickGesture.current = null
@@ -193,6 +202,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const node = svgRef.current!
     const resize = () => {
       const rect = node.getBoundingClientRect()
+      setSvgOrigin(current => current.left === rect.left && current.top === rect.top
+        ? current : { left: rect.left, top: rect.top })
       if (rect.width <= 0 || rect.height <= 0) return
       const current = viewportRef.current
       const behavior = zoomRef.current!
@@ -292,15 +303,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
           && focusedDot.classList.contains('repo-dot') && svgRef.current?.contains(focusedDot)
         onSelect(next)
         if (focusStartedOnDot) {
-          const nextDot = [...(svgRef.current?.querySelectorAll<SVGCircleElement>('.repo-dot') ?? [])]
-            .find(dot => dot.dataset.fullName === next.full_name)
-          nextDot?.focus({ preventScroll: true })
+          dotLookup.nodes.get(next.full_name)?.focus({ preventScroll: true })
         }
       }
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [data.repos, visible, selected, onSelect, view.layoutAlt, cancelClick])
+  }, [data.repos, visible, selected, onSelect, view.layoutAlt, cancelClick, dotLookup])
 
   const relativeZoom = transform.k / fit.k
   const activeRepo = hover && visible.has(hover.full_name) ? hover : focused && visible.has(focused.full_name) ? focused : null
@@ -382,16 +391,26 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       opacity={visible.has(repo.full_name) ? 1 : .1} pointerEvents={visible.has(repo.full_name) ? 'auto' : 'none'}
       onPointerEnter={event => { setHover(repo); setTooltip({ x: event.clientX, y: event.clientY }) }}
       onPointerMove={event => setTooltip({ x: event.clientX, y: event.clientY })} onPointerLeave={() => setHover(null)}
-      onFocus={event => { const bounds = event.currentTarget.getBoundingClientRect(); setFocused(repo); setTooltip({ x: bounds.right, y: bounds.top }) }} onBlur={() => setFocused(null)}
+      onFocus={() => {
+        const rect = svgRef.current?.getBoundingClientRect()
+        if (rect) setSvgOrigin(current => current.left === rect.left && current.top === rect.top
+          ? current : { left: rect.left, top: rect.top })
+        setFocused(repo)
+      }} onBlur={() => setFocused(null)}
       onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
       onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
       <circle className="focus-ring" aria-hidden="true" pointerEvents="none" r={drawnRadius(repo) + 3 / fit.k} />
-      <circle className="repo-dot" role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
+      <circle ref={dotLookup.refs.get(repo.full_name)} className="repo-dot" role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
         data-full-name={repo.full_name}
         r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : languageColors.get(repo.primary_language_category)}
         stroke={repo.low_confidence ? languageColors.get(repo.primary_language_category) : '#06131d'} />
     </g>)}
-  </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, fit.k, languageColors, selectImmediately])
+  </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, fit.k, languageColors, selectImmediately, dotLookup])
+  const tooltipAnchor = activeRepo && activeRepo !== hover ? (() => {
+    const [x, y] = transform.apply([pointX(activeRepo), pointY(activeRepo)])
+    const radius = drawnRadius(activeRepo) * transform.k
+    return { x: svgOrigin.left + x + radius, y: svgOrigin.top + y - radius }
+  })() : tooltip
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
@@ -467,7 +486,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    {activeRepo && <div className="tooltip" role="tooltip" style={{ left: Math.max(8, Math.min(tooltip.x + 14, window.innerWidth - 284)), top: Math.max(8, Math.min(tooltip.y + 14, window.innerHeight - 160)) }}>
+    {activeRepo && <div className="tooltip" role="tooltip" style={{ left: Math.max(8, Math.min(tooltipAnchor.x + 14, window.innerWidth - 284)), top: Math.max(8, Math.min(tooltipAnchor.y + 14, window.innerHeight - 160)) }}>
       <strong>{activeRepo.name}</strong><span>{activeRepo.one_liner}</span><small>{activeRepo.primary_language} · updated {formatDate(activeRepo.pushed_at)}</small>
       {activeRepo.low_confidence && <small>Sparse README / low-confidence summary</small>}
     </div>}

@@ -26,16 +26,29 @@ describe('atlas data utilities', () => {
     const formula = makeRepo({ full_name: 'owner/homebrew-graphviz2drawio', name: 'homebrew-graphviz2drawio' })
     expect(searchRepos([formula, exact], 'graphviz2drawio')[0]).toBe(exact)
   })
-  it('keeps a name substring match ahead of more than eight primary-language matches', () => {
+  it('keeps exact language matches ahead of name prefixes under the eight-result cap', () => {
     const primary = Array.from({ length: 9 }, (_, index) => makeRepo({
       full_name: `owner/primary-${index}`, name: `primary-${index}`, primary_language: 'Python',
     }))
     const named = makeRepo({
-      full_name: 'owner/comparison-for-python', name: 'comparison-for-python', primary_language: 'Unknown',
+      full_name: 'owner/python-comparison', name: 'python-comparison', primary_language: 'Unknown',
     })
     const results = searchRepos([...primary, named], 'python')
     expect(results).toHaveLength(8)
-    expect(results[0]).toBe(named)
+    expect(results.every(repo => repo.primary_language === 'Python')).toBe(true)
+    expect(results).not.toContain(named)
+  })
+  it('ranks exact technology metadata ahead of unrelated name prefixes', () => {
+    const platform = makeRepo({ full_name: 'owner/terminal', name: 'terminal', platform: 'CLI' })
+    const prefix = makeRepo({ full_name: 'owner/clicker', name: 'clicker', platform: 'Web' })
+    expect(searchRepos([prefix, platform], 'cli')).toEqual([platform, prefix])
+  })
+  it('matches name token prefixes without matching interior substrings', () => {
+    const token = makeRepo({ full_name: 'owner/tool-GraphViz2Drawio', name: 'tool-GraphViz2Drawio' })
+    const interior = makeRepo({ full_name: 'owner/mygraphviztool', name: 'mygraphviztool' })
+    const results = searchRepos([interior, token], 'graphviz')
+    expect(results).toEqual([token])
+    expect(searchRepos([token], 'drawio')).toEqual([token])
   })
   it('ranks exact raw language names without treating Java as JavaScript', () => {
     const java = makeRepo({ full_name: 'owner/java-repo', primary_language: 'Java' })
@@ -78,6 +91,26 @@ describe('atlas data utilities', () => {
     const missingColor = makeAtlas(repos)
     missingColor.languages[0].color = ''
     expect(() => validateAtlas(missingColor)).toThrow('languages[0].color')
+  })
+  it('rejects zero-span bounds and stale counts derived from repositories', () => {
+    const zeroX = makeAtlas()
+    zeroX.bounds.x = [500, 500]
+    expect(() => validateAtlas(zeroX)).toThrow('positive span')
+    const zeroY = makeAtlas()
+    zeroY.bounds.y = [500, 500]
+    expect(() => validateAtlas(zeroY)).toThrow('positive span')
+
+    const repos = [makeRepo({ cluster_id: null, low_confidence: true })]
+    const staleNoise = makeAtlas(repos)
+    staleNoise.stats.noise_count = 0
+    expect(() => validateAtlas(staleNoise)).toThrow('stats.noise_count')
+    const staleConfidence = makeAtlas(repos)
+    staleConfidence.stats.low_confidence_count = 0
+    expect(() => validateAtlas(staleConfidence)).toThrow('stats.low_confidence_count')
+    const staleMembers = makeAtlas(repos)
+    staleMembers.clusters[0].member_count = 1
+    expect(() => validateAtlas(staleMembers)).toThrow('clusters[0].member_count')
+    expect(validateAtlas(makeAtlas(repos)).stats.noise_count).toBe(1)
   })
   it('requires a category in the legend and matching category counts', () => {
     const data = makeAtlas([makeRepo({ primary_language: 'Java', primary_language_category: 'Other' })])
