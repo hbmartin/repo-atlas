@@ -1,6 +1,7 @@
 import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as concurrent_wait
+from pathlib import Path
 from threading import Event
 from types import SimpleNamespace
 
@@ -13,10 +14,13 @@ from repo_atlas.layouts import projection_neighbor_counts
 from repo_atlas.models import RepoSummary
 from repo_atlas.pipeline import (
     ACQUIRE_VERSION,
+    GROUPED_PRIMARY_LANGUAGES,
+    LANGUAGE_COLORS,
     PROMPT_VERSION,
     TEMPLATE_VERSION,
     AtlasPipeline,
     embedding_text,
+    primary_language_categories,
 )
 from repo_atlas.summarizers import (
     SummarizerCancelledError,
@@ -34,6 +38,104 @@ SUMMARY = RepoSummary(
     maturity="working",
     confidence="high",
 )
+
+
+def test_primary_language_categories_group_explicit_and_rare_languages():
+    languages = (
+        ["Python"] * 5
+        + ["Java"] * 4
+        + ["HTML"] * 4
+        + ["Rust"] * 3
+        + ["Gleam"] * 2
+        + ["Unknown"]
+    )
+
+    categories, counts = primary_language_categories(languages)
+
+    assert GROUPED_PRIMARY_LANGUAGES == {"HTML", "Java"}
+    assert categories == {
+        "Python": "Python",
+        "Java": "Other",
+        "HTML": "Other",
+        "Rust": "Rust",
+        "Gleam": "Other",
+        "Unknown": "Unknown",
+    }
+    assert counts == {"Python": 5, "Other": 10, "Rust": 3, "Unknown": 1}
+    assert sum(counts.values()) == len(languages)
+
+
+def test_primary_language_palette_uses_paul_tol_light_colors():
+    expected = {
+        "Python": "#77AADD",
+        "TypeScript": "#EE8866",
+        "Kotlin": "#EEDD88",
+        "JavaScript": "#FFAABB",
+        "Swift": "#99DDFF",
+        "Go": "#44BB99",
+        "Ruby": "#BBCC33",
+        "Rust": "#AAAA00",
+    }
+    assert {language: LANGUAGE_COLORS[language] for language in expected} == expected
+    assert LANGUAGE_COLORS["HTML"] == "#e34c26"
+    assert LANGUAGE_COLORS["Java"] == "#b07219"
+
+
+def test_committed_atlas_groups_java_and_html_without_losing_detail():
+    atlas = json.loads(
+        (Path(__file__).parents[1] / "public" / "atlas.json").read_text()
+    )
+    language_counts = {
+        language["name"]: language["count"] for language in atlas["languages"]
+    }
+    language_colors = {
+        language["name"]: language["color"] for language in atlas["languages"]
+    }
+
+    assert len(atlas["repos"]) == atlas["stats"]["repo_count"] == 190
+    assert sum(language_counts.values()) == len(atlas["repos"])
+    assert language_counts["Other"] == 22
+    assert {"Java", "HTML"}.isdisjoint(language_counts)
+    assert all(
+        repo["primary_language"] not in {"Java", "HTML"}
+        for repo in atlas["repos"]
+    )
+    grouped_repositories = {
+        "hbmartin/datasette.io",
+        "hbmartin/firebase-chat-android-architecture-components",
+        "hbmartin/flipper-plugin-stetho",
+        "hbmartin/how-much-ai",
+        "hbmartin/onyx-android-sdk",
+        "hbmartin/overcast-to-pages",
+        "hbmartin/overcast_parser",
+        "hbmartin/sub9-client",
+    }
+    assert {
+        repo["full_name"]
+        for repo in atlas["repos"]
+        if repo["full_name"] in grouped_repositories
+        and repo["primary_language"] == "Other"
+    } == grouped_repositories
+    assert language_colors == {
+        "Python": "#77AADD",
+        "TypeScript": "#EE8866",
+        "Kotlin": "#EEDD88",
+        "JavaScript": "#FFAABB",
+        "Swift": "#99DDFF",
+        "Go": "#44BB99",
+        "Ruby": "#BBCC33",
+        "Rust": "#AAAA00",
+        "Other": "#87909e",
+        "Unknown": "#87909e",
+    }
+
+    detail_colors = {
+        language["name"]: language["color"]
+        for repo in atlas["repos"]
+        for language in repo["languages"]
+        if language["name"] in {"Java", "HTML"}
+    }
+    assert detail_colors == {"Java": "#b07219", "HTML": "#e34c26"}
 
 
 def insert_repo(

@@ -19,7 +19,7 @@ export function makeRepo(overrides: Partial<AtlasRepo> = {}): AtlasRepo {
     artifact_type: 'application',
     maturity: 'working',
     primary_language: 'TypeScript',
-    languages: [{ name: 'TypeScript', pct: 100, color: '#3178c6' }],
+    languages: [{ name: 'TypeScript', pct: 100, color: '#EE8866' }],
     topics: ['testing'],
     stars: 1,
     file_count: 10,
@@ -51,7 +51,7 @@ export function makeAtlas(repos: AtlasRepo[] = [makeRepo()]): AtlasData {
       noise_count: 0,
       low_confidence_count: 0,
     },
-    languages: [...new Set(repos.map(repo => repo.primary_language))].map(name => ({ name, count: repos.filter(repo => repo.primary_language === name).length, color: '#3178c6' })),
+    languages: [...new Set(repos.map(repo => repo.primary_language))].map(name => ({ name, count: repos.filter(repo => repo.primary_language === name).length, color: '#EE8866' })),
     clusters: [{
       id: 0,
       label: 'Developer Tools',
