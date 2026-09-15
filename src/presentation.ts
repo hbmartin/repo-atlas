@@ -5,13 +5,23 @@ const uniqueValues = (names: string[]) => [...new Set(names)]
 export const normalizeLanguages = uniqueValues
 export const normalizeRegions = uniqueValues
 export const languageCategories = (data: AtlasData) => data.languages
-export const languageFilterNames = (data: AtlasData) => uniqueValues([
-  ...data.languages.map(item => item.name),
-  ...data.repos.map(repo => repo.primary_language).sort((a, b) => a.localeCompare(b)),
-])
-export const knownLanguage = (data: AtlasData, name: string) => languageFilterNames(data).includes(name)
+const languageIndices = new WeakMap<AtlasData, { names: string[]; nameSet: Set<string>; categorySet: Set<string> }>()
+export function languageIndex(data: AtlasData) {
+  const cached = languageIndices.get(data)
+  if (cached) return cached
+  const categorySet = new Set(data.languages.map(item => item.name))
+  const names = uniqueValues([
+    ...categorySet,
+    ...data.repos.map(repo => repo.primary_language).sort((a, b) => a.localeCompare(b)),
+  ])
+  const index = { names, nameSet: new Set(names), categorySet }
+  languageIndices.set(data, index)
+  return index
+}
+export const languageFilterNames = (data: AtlasData) => languageIndex(data).names
+export const knownLanguage = (data: AtlasData, name: string) => languageIndex(data).nameSet.has(name)
 export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: string) =>
-  data.languages.some(item => item.name === name)
+  languageIndex(data).categorySet.has(name)
     ? repo.primary_language_category === name
     : repo.primary_language === name
 
@@ -21,6 +31,7 @@ export function preserveValues(previous: string[], next: string[]) {
 
 export function atlasPresentation(data: AtlasData) {
   const languages = data.languages
+  const filterIndex = languageIndex(data)
   const languageColors = new Map(languages.map(item => [item.name, item.color]))
   const reposByName = new Map(data.repos.map(repo => [repo.full_name, repo]))
   const clustersById = new Map(data.clusters.map(cluster => [cluster.id, cluster]))
@@ -30,7 +41,7 @@ export function atlasPresentation(data: AtlasData) {
     minMonth = Math.min(minMonth, value)
     maxMonth = Math.max(maxMonth, value)
   }
-  return { languages, languageColors, reposByName, clustersById, minMonth, maxMonth,
+  return { languages, filterIndex, languageColors, reposByName, clustersById, minMonth, maxMonth,
     sizes: fileSizeScale(data.repos), colors: regionColors(data) }
 }
 export type AtlasPresentation = ReturnType<typeof atlasPresentation>

@@ -78,12 +78,29 @@ def primary_language_counts(languages: list[str]) -> dict[str, int]:
     return {category: counts[category] for category in CATEGORY_LANGUAGE_COLORS}
 
 
+def language_legend(languages: list[str]) -> list[dict]:
+    counts = primary_language_counts(languages)
+    return [
+        {"name": name, "count": count, "color": CATEGORY_LANGUAGE_COLORS[name]}
+        for name, count in sorted(
+            counts.items(),
+            key=lambda item: (item[0] in ("Other", "Unknown"), -item[1], item[0]),
+        )
+    ]
+
+
 def now() -> str:
     return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 
 def canonical(value: object) -> str:
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")) + "\n"
+
+
+def write_atlas(output: Path, payload: dict) -> None:
+    temporary = output.with_suffix(".json.tmp")
+    temporary.write_text(canonical(payload), encoding="utf-8")
+    temporary.replace(output)
 
 
 def embedding_text(summary: RepoSummary) -> str:
@@ -1094,14 +1111,9 @@ class AtlasPipeline:
         rows_by_name = {row["full_name"]: row for row in repo_rows}
         if set(rows_by_name) != set(names):
             raise AtlasError("Projection repository set does not match current summaries.")
-        language_counts = primary_language_counts([
+        language_items = language_legend([
             rows_by_name[name]["primary_language"] or "Unknown" for name in names
         ])
-
-        language_items = [
-            {"name": language, "count": count, "color": CATEGORY_LANGUAGE_COLORS[language]}
-            for language, count in sorted(language_counts.items(), key=lambda item: (item[0] in ("Other", "Unknown"), -item[1], item[0]))
-        ]
         repos = []
         for index, name in enumerate(names):
             row = rows_by_name[name]
@@ -1155,9 +1167,7 @@ class AtlasPipeline:
             new_compare.pop("generated_at", None)
             if old_compare == new_compare:
                 payload["generated_at"] = previous["generated_at"]
-        tmp = output.with_suffix(".json.tmp")
-        tmp.write_text(canonical(payload), encoding="utf-8")
-        tmp.replace(output)
+        write_atlas(output, payload)
         self._emit_list(payload)
         self._record_run(payload, projected)
         print(f"[emit] wrote {output} with {len(repos)} repositories")

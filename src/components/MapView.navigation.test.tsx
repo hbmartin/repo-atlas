@@ -403,10 +403,34 @@ it('renders category colors without changing raw repository languages', () => {
   expect(circles[1].getAttribute('fill')).toBe('#87909E')
   const rings = container.querySelectorAll('.repo-point .focus-ring')
   expect(rings).toHaveLength(2)
-  expect(Number(rings[0].getAttribute('r'))).toBe(Number(circles[0].getAttribute('r')) + 3)
+  const fit = zoomTransform(container.querySelector('svg')!).k
+  expect((Number(rings[0].getAttribute('r')) - Number(circles[0].getAttribute('r'))) * fit).toBeCloseTo(3)
   expect(rings[0].getAttribute('pointer-events')).toBe('none')
   fireEvent.pointerEnter(circles[0])
   expect(screen.getByText(/Java · updated/)).toBeDefined()
+})
+
+it.each([390, 1000])('keeps the dot ring gap at three overview pixels for %s px maps', mapWidth => {
+  width = mapWidth
+  const { container } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  const dot = container.querySelector('.repo-dot')!
+  const ring = container.querySelector('.focus-ring')!
+  const gap = (Number(ring.getAttribute('r')) - Number(dot.getAttribute('r'))) * zoomTransform(svg).k
+  expect(gap).toBeCloseTo(3)
+})
+
+it('moves keyboard focus with arrow-key selection after a dot has focus', () => {
+  const { container } = render(<Harness initial={first} />)
+  const firstDot = container.querySelector<SVGCircleElement>('.repo-dot[data-full-name="owner/example"]')!
+  const secondDot = container.querySelector<SVGCircleElement>('.repo-dot[data-full-name="owner/second"]')!
+  firstDot.focus()
+  expect(document.activeElement).toBe(firstDot)
+  fireEvent.keyDown(firstDot, { key: 'ArrowRight' })
+  expect(screen.getByTestId('selected').textContent).toBe(second.full_name)
+  expect(document.activeElement).toBe(secondDot)
+  expect(firstDot.closest('.repo-point')?.classList.contains('selected')).toBe(false)
+  expect(secondDot.closest('.repo-point')?.classList.contains('selected')).toBe(true)
 })
 
 it('does not zoom when region placement moves the second click onto the SVG ancestor', () => {

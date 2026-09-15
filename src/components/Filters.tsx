@@ -21,7 +21,7 @@ export function Filters({
       <details className="filter-popover">
         <summary>Language{view.languages.length ? ` · ${view.languages.length}` : ''}</summary>
         <div className="filter-menu">
-          {data.languages.map((language) => (
+          {data.languages.filter(language => language.count > 0).map((language) => (
             <label key={language.name}>
               <input
                 type="checkbox"
@@ -43,7 +43,7 @@ export function Filters({
         <div className="filter-menu regions">
           {[
             ...data.clusters.map((cluster) => ({ label: cluster.label, count: cluster.member_count })),
-            { label: 'Unclustered', count: data.stats.noise_count },
+            ...(data.stats.noise_count > 0 ? [{ label: 'Unclustered', count: data.stats.noise_count }] : []),
           ].map((region) => (
             <label key={region.label}>
               <input

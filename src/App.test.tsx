@@ -173,10 +173,12 @@ describe('App mobile filters', () => {
     await waitFor(() => expect(execute).toBeDefined())
     expect(currentMap().visible.has('owner/example')).toBe(true)
     expect(currentMap().visible.has('owner/html')).toBe(false)
+    expect(screen.getByRole('button', { name: 'Remove language filter Java' })).toBeDefined()
     expect(schema?.properties.languages.items.enum).toContain('Java')
     expect(schema?.properties.languages.items.enum).toContain('Other')
     expect(schema?.properties.languages.items.enum).toContain('Rust')
     act(() => { expect(execute!({ languages: ['Java', 'Python'] }).languages).toEqual(['Java', 'Python']) })
+    expect(screen.getByRole('button', { name: 'Remove language filter Python' })).toBeDefined()
     expect(currentMap().visible.has('owner/example')).toBe(true)
     expect(currentMap().visible.has('owner/html')).toBe(false)
     expect(currentMap().visible.has('owner/python')).toBe(true)
@@ -185,6 +187,22 @@ describe('App mobile filters', () => {
     expect(currentMap().visible.has('owner/cpp')).toBe(true)
     expect(currentMap().visible.has('owner/python')).toBe(false)
     expect(() => execute!({ languages: ['Gleam'] })).toThrow('Unknown language category or raw primary-language filter')
+  })
+
+  it('shows a removable chip for a zero-count WebMCP language category', async () => {
+    const user = userEvent.setup()
+    let execute: ((input: unknown) => unknown) | undefined
+    Object.defineProperty(document, 'modelContext', { configurable: true, value: {
+      registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute },
+    } })
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await waitFor(() => expect(execute).toBeDefined())
+    act(() => { execute!({ languages: ['Rust'] }) })
+    expect(currentMap().visible.size).toBe(0)
+    expect(screen.getByRole('button', { name: 'Remove language filter Rust' })).toBeDefined()
+    await user.click(screen.getByRole('button', { name: 'Remove language filter Rust' }))
+    expect(currentMap().visible.size).toBe(1)
   })
 
   it('preserves unknown URL state and the hash until an explicit atlas change', async () => {
@@ -250,6 +268,57 @@ it('does not mark labels in legacy data as fallbacks', async () => {
   render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
   expect(screen.queryByText('Fallback label')).toBeNull()
+})
+
+it('shows and individually removes raw-language, region, and date chips without changing selection or layout', async () => {
+  const user = userEvent.setup()
+  const data = makeAtlas([makeRepo({ primary_language: 'Java' }), makeRepo({ full_name: 'owner/python', primary_language: 'Python' })])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=Java&region=Developer+Tools&since=2025-06&layout=alt')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  expect(screen.getByRole('button', { name: 'Remove language filter Java' })).toBeDefined()
+  expect(screen.getByRole('button', { name: 'Remove region filter Developer Tools' })).toBeDefined()
+  expect(screen.getByRole('button', { name: 'Remove updated since filter Jun 2025' })).toBeDefined()
+  await user.click(screen.getByRole('button', { name: 'Remove region filter Developer Tools' }))
+  expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: ['Java'], regions: [], since: '2025-06', layoutAlt: true })
+  await user.click(screen.getByRole('button', { name: 'Remove updated since filter Jun 2025' }))
+  expect(currentMap().view.since).toBeNull()
+  await user.click(screen.getByRole('button', { name: 'Remove language filter Java' }))
+  expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: [], layoutAlt: true })
+  expect(window.location.search).toContain('layout=alt')
+  expect(window.location.search).toContain('repo=owner%2Fexample')
+})
+
+it('keeps zero-count saved-link filters visible as chips while hiding empty filter choices', async () => {
+  const user = userEvent.setup()
+  window.history.replaceState(null, '', '/?lang=Rust')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  expect(currentMap().visible.size).toBe(0)
+  expect(screen.queryByRole('button', { name: 'Filter by Rust: 0 repositories' })).toBeNull()
+  const dialogTrigger = screen.getByRole('button', { name: 'Filters · 1' })
+  await user.click(dialogTrigger)
+  const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
+  expect(within(dialog).getByRole('button', { name: 'Remove language filter Rust' })).toBeDefined()
+  await user.click(within(dialog).getByText('Language · 1'))
+  expect(within(dialog).queryByRole('checkbox', { name: /Rust/ })).toBeNull()
+  expect(within(dialog).queryByRole('checkbox', { name: /Unclustered/ })).toBeNull()
+  await user.click(within(dialog).getByRole('button', { name: 'Remove language filter Rust' }))
+  expect(currentMap().visible.size).toBe(1)
+  expect(window.location.search).toBe('')
+})
+
+it('clears every filter inside the mobile dialog while keeping selection and layout', async () => {
+  const user = userEvent.setup()
+  window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=TypeScript&region=Developer+Tools&since=2025-06&layout=alt')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await user.click(screen.getByRole('button', { name: 'Filters · 3' }))
+  const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
+  await user.click(within(dialog).getByRole('button', { name: 'Clear all' }))
+  expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: [], regions: [], since: null, layoutAlt: true })
+  expect(within(dialog).queryByRole('group', { name: 'Active filters' })).toBeNull()
 })
 
 
