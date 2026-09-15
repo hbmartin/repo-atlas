@@ -10,6 +10,7 @@ import sys
 from collections import Counter, defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import UTC, datetime
+from importlib import resources
 from pathlib import Path
 from urllib.parse import quote
 
@@ -44,20 +45,18 @@ ALGORITHM_VERSION = "analysis-v2"
 ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
 
-DETAIL_LANGUAGE_COLORS = {
-    "C": "#555555", "C#": "#178600", "C++": "#f34b7d", "CSS": "#563d7c",
-    "Dart": "#00B4AB", "Go": "#00ADD8", "HTML": "#e34c26", "Java": "#b07219",
-    "JavaScript": "#f1e05a", "Kotlin": "#A97BFF", "Objective-C": "#438eff",
-    "PHP": "#4F5D95", "Python": "#3572A5", "Ruby": "#701516", "Rust": "#dea584",
-    "Shell": "#89e051", "Swift": "#F05138", "TypeScript": "#3178c6",
-}
+OTHER_LANGUAGE_COLOR = "#DDDDDD"
+UNKNOWN_LANGUAGE_COLOR = "#87909E"
 CATEGORY_LANGUAGE_COLORS = {
     "Python": "#77AADD", "TypeScript": "#EE8866", "Kotlin": "#EEDD88",
     "JavaScript": "#FFAABB", "Swift": "#99DDFF", "Go": "#44BB99",
-    "Ruby": "#BBCC33", "Rust": "#AAAA00", "Other": "#DDDDDD",
-    "Unknown": "#87909E",
+    "Ruby": "#BBCC33", "Rust": "#AAAA00", "Other": OTHER_LANGUAGE_COLOR,
+    "Unknown": UNKNOWN_LANGUAGE_COLOR,
 }
 PRIMARY_LANGUAGE_CATEGORIES = frozenset(CATEGORY_LANGUAGE_COLORS) - {"Other", "Unknown"}
+LINGUIST_LANGUAGE_COLORS: dict[str, str] = json.loads(
+    resources.files("repo_atlas").joinpath("linguist_colors.json").read_text(encoding="utf-8")
+)["colors"]
 
 
 def primary_language_category(language: str) -> str:
@@ -67,15 +66,16 @@ def primary_language_category(language: str) -> str:
 
 
 def detail_language_color(language: str) -> str:
-    return DETAIL_LANGUAGE_COLORS.get(language, "#87909E")
+    if language == "Unknown":
+        return UNKNOWN_LANGUAGE_COLOR
+    if language in PRIMARY_LANGUAGE_CATEGORIES:
+        return CATEGORY_LANGUAGE_COLORS[language]
+    return LINGUIST_LANGUAGE_COLORS.get(language, OTHER_LANGUAGE_COLOR)
 
 
-def primary_language_categories(
-    languages: list[str],
-) -> tuple[dict[str, str], dict[str, int]]:
-    categories = {language: primary_language_category(language) for language in languages}
-    counts = Counter(categories[language] for language in languages)
-    return categories, dict(counts)
+def primary_language_counts(languages: list[str]) -> dict[str, int]:
+    counts = Counter(primary_language_category(language) for language in languages)
+    return {category: counts[category] for category in CATEGORY_LANGUAGE_COLORS}
 
 
 def now() -> str:
@@ -1094,7 +1094,7 @@ class AtlasPipeline:
         rows_by_name = {row["full_name"]: row for row in repo_rows}
         if set(rows_by_name) != set(names):
             raise AtlasError("Projection repository set does not match current summaries.")
-        primary_categories, language_counts = primary_language_categories([
+        language_counts = primary_language_counts([
             rows_by_name[name]["primary_language"] or "Unknown" for name in names
         ])
 
@@ -1123,7 +1123,7 @@ class AtlasPipeline:
                 "platform": summary.platform, "techniques": summary.techniques,
                 "artifact_type": summary.artifact_type, "maturity": summary.maturity,
                 "primary_language": repo_language,
-                "primary_language_category": primary_categories[repo_language],
+                "primary_language_category": primary_language_category(repo_language),
                 "languages": language_mix, "topics": json.loads(row["topics_json"]),
                 "stars": row["stars"], "file_count": row["file_count"],
                 "size_r": projected["radii"][index], "created_at": month(row["created_at"]),

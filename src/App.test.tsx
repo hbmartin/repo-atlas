@@ -154,6 +154,39 @@ describe('App mobile filters', () => {
     expect(currentMap().view.regions).toEqual(['Developer Tools'])
   })
 
+  it('accepts exact raw primary languages alongside map categories in links and WebMCP', async () => {
+    const data = makeAtlas([
+      makeRepo({ primary_language: 'Java' }),
+      makeRepo({ full_name: 'owner/html', primary_language: 'HTML' }),
+      makeRepo({ full_name: 'owner/cpp', primary_language: 'C++' }),
+      makeRepo({ full_name: 'owner/python', primary_language: 'Python' }),
+    ])
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+    window.history.replaceState(null, '', '?lang=Java')
+    let execute: ((input: unknown) => { languages: string[] }) | undefined
+    let schema: { properties: { languages: { items: { enum: string[] } } } } | undefined
+    Object.defineProperty(document, 'modelContext', { configurable: true, value: {
+      registerTool(tool: { execute: typeof execute; inputSchema: typeof schema }) { execute = tool.execute; schema = tool.inputSchema },
+    } })
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await waitFor(() => expect(execute).toBeDefined())
+    expect(currentMap().visible.has('owner/example')).toBe(true)
+    expect(currentMap().visible.has('owner/html')).toBe(false)
+    expect(schema?.properties.languages.items.enum).toContain('Java')
+    expect(schema?.properties.languages.items.enum).toContain('Other')
+    expect(schema?.properties.languages.items.enum).toContain('Rust')
+    act(() => { expect(execute!({ languages: ['Java', 'Python'] }).languages).toEqual(['Java', 'Python']) })
+    expect(currentMap().visible.has('owner/example')).toBe(true)
+    expect(currentMap().visible.has('owner/html')).toBe(false)
+    expect(currentMap().visible.has('owner/python')).toBe(true)
+    act(() => { expect(execute!({ languages: ['Other'] }).languages).toEqual(['Other']) })
+    expect(currentMap().visible.has('owner/html')).toBe(true)
+    expect(currentMap().visible.has('owner/cpp')).toBe(true)
+    expect(currentMap().visible.has('owner/python')).toBe(false)
+    expect(() => execute!({ languages: ['Gleam'] })).toThrow('Unknown language category or raw primary-language filter')
+  })
+
   it('preserves unknown URL state and the hash until an explicit atlas change', async () => {
     const user = userEvent.setup()
     window.history.replaceState(null, '', '/?lang=TypeScript&wat=1#saved-place')

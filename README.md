@@ -89,10 +89,23 @@ The schema-v2 `atlas.json` keeps each repository's raw GitHub language in
 `primary_language` and its map/filter group in `primary_language_category`.
 The eight named language groups stay fixed as the corpus changes; every other
 known language is grouped under Other, while missing GitHub language is Unknown.
-Top-level `languages` contains category counts and Tol Light map colors.
-Each repository's `languages` composition retains raw language names and
-GitHub-style detail colors. The frontend requires schema v2 and uses category
-colors for map dots and filters, but shows raw language in repository details.
+Top-level `languages` always contains all ten categories, including zero counts,
+with Tol Light colors for the eight named groups, light grey for Other, and darker
+grey for Unknown. Detail-bar segments use the matching Tol color for those eight
+languages and a pinned GitHub Linguist color for other raw names; a Linguist
+language without a color uses Other grey. See [third-party notices](THIRD_PARTY_NOTICES.md)
+for the pinned Linguist source. The frontend requires schema v2 and uses category
+colors for map dots and filter controls, but shows raw language in repository details.
+`?lang=` and WebMCP language filters accept a category or an exact, case-sensitive
+raw primary-language name present in the snapshot; multiple choices combine with OR.
+The filter controls list categories. A direct raw-language filter can be cleared
+with the existing Clear filters action on desktop or by changing the URL.
+
+For a presentation-only color refresh, run `uv run --extra dev python
+scripts/update_linguist_colors.py --commit <full Linguist SHA>`, then `uv run
+python scripts/recolor_snapshot.py`. The recoloring command updates the committed
+snapshot without rerunning the GitHub or analysis stages. Review its diff and
+the third-party notice before committing.
 Region buttons focus one region; the filter checkboxes toggle membership. Mouse
 selection waits 300 ms to distinguish a click from double-click zoom. Navigation
 requests are consumed once after map measurement; resizing preserves a navigated

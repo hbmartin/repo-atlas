@@ -3,7 +3,7 @@ import { select } from 'd3-selection'
 import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
 import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
-import { UNKNOWN_LANGUAGE_COLOR, type AtlasPresentation } from '../presentation'
+import type { AtlasPresentation } from '../presentation'
 import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, type Box, type Size } from '../map-geometry'
 
 const PLACEHOLDER_SIZE = { width: 1000, height: 700 }
@@ -373,9 +373,10 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       onFocus={event => { const bounds = event.currentTarget.getBoundingClientRect(); setFocused(repo); setTooltip({ x: bounds.right, y: bounds.top }) }} onBlur={() => setFocused(null)}
       onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
       onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
-      <circle role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
-        r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : (languageColors.get(repo.primary_language_category) ?? UNKNOWN_LANGUAGE_COLOR)}
-        stroke={repo.low_confidence ? (languageColors.get(repo.primary_language_category) ?? UNKNOWN_LANGUAGE_COLOR) : '#06131d'} />
+      <circle className="focus-ring" aria-hidden="true" pointerEvents="none" r={drawnRadius(repo) + 3} />
+      <circle className="repo-dot" role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
+        r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : languageColors.get(repo.primary_language_category)}
+        stroke={repo.low_confidence ? languageColors.get(repo.primary_language_category) : '#06131d'} />
     </g>)}
   </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, languageColors, selectImmediately])
   return <div className="map-shell">
