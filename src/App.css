@@ -89,9 +89,7 @@ kbd { border: 1px solid var(--line-bright); border-bottom-color: #537086; border
 .meta-grid dt { color: var(--dim); font: .6rem ui-monospace, monospace; text-transform: uppercase; }
 .meta-grid dd { margin: 5px 0 0; color: var(--ink); font-size: .73rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .language-bar { height: 4px; display: flex; gap: 2px; }
-.language-bar i { background: var(--cyan); min-width: 3px; }
-.language-bar i:nth-child(2) { background: #a97bff; }
-.language-bar i:nth-child(3) { background: #f1e05a; }
+.language-bar i { min-width: 3px; }
 .region-card { width: 100%; margin: 20px 0 15px; text-align: left; border: 1px solid var(--line-bright); background: linear-gradient(135deg, #102838, #0a1b27); padding: 12px; display: flex; flex-direction: column; gap: 4px; }
 .region-card small { color: var(--cyan); text-transform: uppercase; font: .6rem ui-monospace, monospace; letter-spacing: .1em; }
 .region-card strong { color: white; }

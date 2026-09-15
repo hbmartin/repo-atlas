@@ -40,7 +40,8 @@ export interface AtlasRepo {
   artifact_type: string
   maturity: string
   primary_language: string
-  languages: { name: string; pct: number; color?: string }[]
+  primary_language_category: string
+  languages: { name: string; pct: number; color: string }[]
   topics: string[]
   stars: number
   file_count: number | null
@@ -56,7 +57,7 @@ export interface AtlasRepo {
 }
 
 export interface AtlasData {
-  schema_version: 1
+  schema_version: 2
   generated_at: string
   owner: string
   embedding_model?: string

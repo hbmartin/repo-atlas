@@ -45,4 +45,12 @@ describe('DetailPanel', () => {
     expect(screen.getByText(/truncated the repository tree/)).toBeDefined()
     expect(screen.queryByText(/little or no README/)).toBeNull()
   })
+  it('shows raw primary language while the map category is Other', () => {
+    const repo = makeRepo({ primary_language: 'Java', primary_language_category: 'Other', languages: [{ name: 'Java', pct: 100, color: '#b07219' }] })
+    render(<DetailPanel repo={repo} cluster={undefined} reposByName={new Map([[repo.full_name, repo]])}
+      onSelect={vi.fn()} onRegion={vi.fn()} onClose={vi.fn()} />)
+    expect(screen.getByText('Java')).toBeDefined()
+    expect(screen.getByLabelText('Language composition: Java 100%')).toBeDefined()
+    expect(screen.queryByText('Other')).toBeNull()
+  })
 })

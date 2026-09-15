@@ -62,6 +62,10 @@ Low-confidence points have missing or sparse READMEs and are shown as dashed hol
 
 The cache, local exclusion list, generated reports, environment files, and credentials are ignored. `public/atlas.json` and `public/atlas-list.html` are deployable outputs and may be committed after review. Always inspect `uv run atlas report` and the generated labels before publishing a new snapshot.
 
+The September 2026 schema-v2 snapshot migration retained the existing 190-repository
+corpus and layout. Historical Other languages were recovered from each repository's
+stored top composition language; it did not refresh GitHub metadata or rerun analysis.
+
 ## Deploy to Cloudflare
 
 The static site is configured for Cloudflare Worker `repo-atlas`, with production
@@ -81,7 +85,14 @@ credentials are only needed when regenerating that snapshot locally.
 
 ## Verification
 
-The frontend uses the language categories and colors emitted in `atlas.json`.
+The schema-v2 `atlas.json` keeps each repository's raw GitHub language in
+`primary_language` and its map/filter group in `primary_language_category`.
+The eight named language groups stay fixed as the corpus changes; every other
+known language is grouped under Other, while missing GitHub language is Unknown.
+Top-level `languages` contains category counts and Tol Light map colors.
+Each repository's `languages` composition retains raw language names and
+GitHub-style detail colors. The frontend requires schema v2 and uses category
+colors for map dots and filters, but shows raw language in repository details.
 Region buttons focus one region; the filter checkboxes toggle membership. Mouse
 selection waits 300 ms to distinguish a click from double-click zoom. Navigation
 requests are consumed once after map measurement; resizing preserves a navigated

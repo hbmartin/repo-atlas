@@ -394,13 +394,15 @@ it('restores selection after a late double-click on the background', () => {
   expect(screen.getByTestId('selected').textContent).toBe(first.full_name)
 })
 
-it('renders supplied colors and a neutral fallback without renaming repositories', () => {
-  const custom = makeAtlas([makeRepo({ primary_language: 'Gleam' }), makeRepo({ full_name: 'owner/unknown', primary_language: 'Unlisted' })])
-  custom.languages = [{ name: 'Gleam', count: 1, color: '#abcdef' }]
+it('renders category colors without changing raw repository languages', () => {
+  const custom = makeAtlas([makeRepo({ primary_language: 'Java', primary_language_category: 'Other' }), makeRepo({ full_name: 'owner/unknown', primary_language: 'Unknown', primary_language_category: 'Unknown' })])
+  custom.languages = [{ name: 'Other', count: 1, color: '#DDDDDD' }, { name: 'Unknown', count: 1, color: '#87909E' }]
   const { container } = render(<MapView {...props} data={custom} presentation={atlasPresentation(custom)} />)
   const circles = container.querySelectorAll('.repo-point circle')
-  expect(circles[0].getAttribute('fill')).toBe('#abcdef')
-  expect(circles[1].getAttribute('fill')).toBe('#87909e')
+  expect(circles[0].getAttribute('fill')).toBe('#DDDDDD')
+  expect(circles[1].getAttribute('fill')).toBe('#87909E')
+  fireEvent.pointerEnter(circles[0])
+  expect(screen.getByText(/Java · updated/)).toBeDefined()
 })
 
 it('does not zoom when region placement moves the second click onto the SVG ancestor', () => {

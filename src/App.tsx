@@ -207,7 +207,7 @@ export default function App() {
     if (!data || !presentation) return null
     const { clustersById } = presentation
     const visible = new Set(data.repos.filter((repo) => {
-      const languageMatch = !view.languages.length || view.languages.includes(repo.primary_language)
+      const languageMatch = !view.languages.length || view.languages.includes(repo.primary_language_category)
       const region = clustersById.get(repo.cluster_id ?? -1)?.label ?? 'Unclustered'
       const regionMatch = !view.regions.length || view.regions.includes(region)
       const dateMatch = !view.since || repo.pushed_at.slice(0, 7) >= view.since

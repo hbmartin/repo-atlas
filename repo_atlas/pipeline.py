@@ -44,35 +44,38 @@ ALGORITHM_VERSION = "analysis-v2"
 ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
 
-LANGUAGE_COLORS = {
+DETAIL_LANGUAGE_COLORS = {
     "C": "#555555", "C#": "#178600", "C++": "#f34b7d", "CSS": "#563d7c",
-    "Dart": "#00B4AB", "Go": "#44BB99", "HTML": "#e34c26", "Java": "#b07219",
-    "JavaScript": "#FFAABB", "Kotlin": "#EEDD88", "Objective-C": "#438eff",
-    "PHP": "#4F5D95", "Python": "#77AADD", "Ruby": "#BBCC33", "Rust": "#AAAA00",
-    "Shell": "#89e051", "Swift": "#99DDFF", "TypeScript": "#EE8866",
+    "Dart": "#00B4AB", "Go": "#00ADD8", "HTML": "#e34c26", "Java": "#b07219",
+    "JavaScript": "#f1e05a", "Kotlin": "#A97BFF", "Objective-C": "#438eff",
+    "PHP": "#4F5D95", "Python": "#3572A5", "Ruby": "#701516", "Rust": "#dea584",
+    "Shell": "#89e051", "Swift": "#F05138", "TypeScript": "#3178c6",
 }
-GROUPED_PRIMARY_LANGUAGES = frozenset({"HTML", "Java"})
+CATEGORY_LANGUAGE_COLORS = {
+    "Python": "#77AADD", "TypeScript": "#EE8866", "Kotlin": "#EEDD88",
+    "JavaScript": "#FFAABB", "Swift": "#99DDFF", "Go": "#44BB99",
+    "Ruby": "#BBCC33", "Rust": "#AAAA00", "Other": "#DDDDDD",
+    "Unknown": "#87909E",
+}
+PRIMARY_LANGUAGE_CATEGORIES = frozenset(CATEGORY_LANGUAGE_COLORS) - {"Other", "Unknown"}
+
+
+def primary_language_category(language: str) -> str:
+    if language == "Unknown":
+        return "Unknown"
+    return language if language in PRIMARY_LANGUAGE_CATEGORIES else "Other"
+
+
+def detail_language_color(language: str) -> str:
+    return DETAIL_LANGUAGE_COLORS.get(language, "#87909E")
 
 
 def primary_language_categories(
     languages: list[str],
 ) -> tuple[dict[str, str], dict[str, int]]:
-    primary_counts = Counter(languages)
-    rare = {
-        language
-        for language, count in primary_counts.items()
-        if count < 3 and language != "Unknown"
-    }
-    categories = {
-        language: "Other"
-        if language in rare or language in GROUPED_PRIMARY_LANGUAGES
-        else language
-        for language in primary_counts
-    }
-    category_counts: dict[str, int] = defaultdict(int)
-    for language, count in primary_counts.items():
-        category_counts[categories[language]] += count
-    return categories, dict(category_counts)
+    categories = {language: primary_language_category(language) for language in languages}
+    counts = Counter(categories[language] for language in languages)
+    return categories, dict(counts)
 
 
 def now() -> str:
@@ -1095,11 +1098,8 @@ class AtlasPipeline:
             rows_by_name[name]["primary_language"] or "Unknown" for name in names
         ])
 
-        def color_for(language: str) -> str:
-            return LANGUAGE_COLORS.get(language, "#87909e")
-
         language_items = [
-            {"name": language, "count": count, "color": color_for(language)}
+            {"name": language, "count": count, "color": CATEGORY_LANGUAGE_COLORS[language]}
             for language, count in sorted(language_counts.items(), key=lambda item: (item[0] in ("Other", "Unknown"), -item[1], item[0]))
         ]
         repos = []
@@ -1109,7 +1109,7 @@ class AtlasPipeline:
             language_bytes = json.loads(row["languages_json"])
             total = sum(language_bytes.values()) or 1
             language_mix = [
-                {"name": language, "pct": round(value * 100 / total, 1), "color": color_for(language)}
+                {"name": language, "pct": round(value * 100 / total, 1), "color": detail_language_color(language)}
                 for language, value in sorted(language_bytes.items(), key=lambda item: (-item[1], item[0]))[:3]
             ]
             repo_language = row["primary_language"] or "Unknown"
@@ -1122,7 +1122,8 @@ class AtlasPipeline:
                 "what_it_does": summary.what_it_does, "domain": summary.domain,
                 "platform": summary.platform, "techniques": summary.techniques,
                 "artifact_type": summary.artifact_type, "maturity": summary.maturity,
-                "primary_language": primary_categories[repo_language],
+                "primary_language": repo_language,
+                "primary_language_category": primary_categories[repo_language],
                 "languages": language_mix, "topics": json.loads(row["topics_json"]),
                 "stars": row["stars"], "file_count": row["file_count"],
                 "size_r": projected["radii"][index], "created_at": month(row["created_at"]),
@@ -1133,7 +1134,7 @@ class AtlasPipeline:
                 "neighbors": projected["neighbors"][index],
             })
         payload = {
-            "schema_version": 1, "generated_at": now(),
+            "schema_version": 2, "generated_at": now(),
             "owner": names[0].split("/", 1)[0],
             "embedding_model": projected.get("embedding_model", self.effective_embedder_id),
             "fallback_label_ids": projected.get("fallback_label_ids", []),

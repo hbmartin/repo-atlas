@@ -1,3 +1,5 @@
+/// <reference types="node" />
+import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { monthIndex, monthValue, searchRepos, unknownViewParameters, validMonth, validateAtlas } from './data'
 import type { AtlasData, AtlasRepo } from './types'
@@ -10,7 +12,11 @@ const repo = {
 } as AtlasRepo
 
 describe('atlas data utilities', () => {
-  it('rejects unknown schemas', () => expect(() => validateAtlas({ schema_version: 2 })).toThrow())
+  it('requires schema v2', () => {
+    expect(validateAtlas(makeAtlas()).schema_version).toBe(2)
+    expect(() => validateAtlas({ ...makeAtlas(), schema_version: 1 })).toThrow('Unsupported atlas schema')
+    expect(() => validateAtlas({ schema_version: 3 })).toThrow('Unsupported atlas schema')
+  })
   it('weights and finds repository names', () => expect(searchRepos([repo], 'graphviz')[0]).toBe(repo))
   it('round trips month slider values', () => expect(monthValue(monthIndex('2024-06'))).toBe('2024-06'))
   it('reports unknown URL state without applying it', () => {
@@ -37,6 +43,24 @@ describe('atlas data utilities', () => {
     expect(validateAtlas(makeAtlas([makeRepo({ homepage: 'javascript:alert(1)' })])).repos[0].homepage).toBeNull()
     expect(() => validateAtlas(makeAtlas([makeRepo({ pushed_at: 'invalid' })]))).toThrow('invalid date')
   })
+  it('requires a category in the legend and matching category counts', () => {
+    const data = makeAtlas([makeRepo({ primary_language: 'Java', primary_language_category: 'Other' })])
+    data.languages = [{ name: 'Python', count: 1, color: '#77AADD' }]
+    expect(() => validateAtlas(data)).toThrow('absent from the language legend')
+    data.languages = [{ name: 'Other', count: 2, color: '#DDDDDD' }]
+    expect(() => validateAtlas(data)).toThrow('Language category count is incorrect')
+    data.languages[0].count = 1
+    expect(validateAtlas(data).repos[0].primary_language).toBe('Java')
+    expect(validateAtlas(data).repos[0].primary_language_category).toBe('Other')
+  })
+  it('requires category and detail colors in schema v2', () => {
+    const missingCategory = makeAtlas() as unknown as { repos: Record<string, unknown>[] }
+    delete missingCategory.repos[0].primary_language_category
+    expect(() => validateAtlas(missingCategory)).toThrow('primary_language_category')
+    const missingDetailColor = makeAtlas() as unknown as { repos: { languages: Record<string, unknown>[] }[] }
+    delete missingDetailColor.repos[0].languages[0].color
+    expect(() => validateAtlas(missingDetailColor)).toThrow('languages[0].color')
+  })
   it('rejects duplicate region labels that would make filters ambiguous', () => {
     const data = makeAtlas()
     data.clusters.push({ ...data.clusters[0], id: 1 })
@@ -50,7 +74,12 @@ describe('atlas data utilities', () => {
   })
 })
 
-it('accepts legacy payloads and valid fallback provenance', () => {
+it('validates the committed deployable atlas snapshot', () => {
+  const snapshot = JSON.parse(readFileSync(new URL('../public/atlas.json', import.meta.url), 'utf8'))
+  expect(validateAtlas(snapshot).stats.repo_count).toBe(snapshot.repos.length)
+})
+
+it('accepts optional fallback provenance in schema v2', () => {
   const data = makeAtlas()
   expect(validateAtlas(data).fallback_label_ids).toBeUndefined()
   data.fallback_label_ids = [0]

@@ -52,7 +52,7 @@ export function validMonth(value: string): boolean {
 export function validateAtlas(value: unknown): AtlasData {
   if (!isRecord(value)) throw new Error('Atlas data is not an object')
   const data = value as unknown as AtlasData
-  if (data.schema_version !== 1) throw new Error('Unsupported atlas schema')
+  if (data.schema_version !== 2) throw new Error('Unsupported atlas schema')
   requireString(data.generated_at, 'generated_at')
   requireString(data.owner, 'owner')
   if (data.embedding_model !== undefined) requireString(data.embedding_model, 'embedding_model')
@@ -117,11 +117,16 @@ export function validateAtlas(value: unknown): AtlasData {
     }
   }
   const repoNames = new Set<string>()
+  const categoryCounts = new Map<string, number>()
   data.repos.forEach((repo, index) => {
     const path = `repos[${index}]`
-    for (const key of ['full_name', 'name', 'url', 'one_liner', 'what_it_does', 'domain', 'platform', 'artifact_type', 'maturity', 'primary_language'] as const) {
+    for (const key of ['full_name', 'name', 'url', 'one_liner', 'what_it_does', 'domain', 'platform', 'artifact_type', 'maturity', 'primary_language', 'primary_language_category'] as const) {
       requireString(repo[key], `${path}.${key}`)
     }
+    if (!languageNames.has(repo.primary_language_category)) {
+      throw new Error(`${path}.primary_language_category is absent from the language legend`)
+    }
+    categoryCounts.set(repo.primary_language_category, (categoryCounts.get(repo.primary_language_category) ?? 0) + 1)
     repo.url = normalizeHttpUrl(repo.url, `${path}.url`)!
     repo.homepage = normalizeHttpUrl(repo.homepage, `${path}.homepage`, true)
     for (const key of ['x', 'y', 'x_alt', 'y_alt', 'stars', 'size_r'] as const) {
@@ -136,7 +141,7 @@ export function validateAtlas(value: unknown): AtlasData {
     repo.languages.forEach((language, languageIndex) => {
       requireString(language.name, `${path}.languages[${languageIndex}].name`)
       requireFinite(language.pct, `${path}.languages[${languageIndex}].pct`)
-      if (language.color !== undefined) requireString(language.color, `${path}.languages[${languageIndex}].color`)
+      requireString(language.color, `${path}.languages[${languageIndex}].color`)
     })
     if (typeof repo.archived !== 'boolean' || typeof repo.is_fork !== 'boolean' || typeof repo.low_confidence !== 'boolean' || (repo.tree_truncated !== undefined && typeof repo.tree_truncated !== 'boolean')) {
       throw new Error(`${path} flags are malformed`)
@@ -152,6 +157,11 @@ export function validateAtlas(value: unknown): AtlasData {
   }))
   if (data.stats.repo_count !== data.repos.length || data.stats.cluster_count !== data.clusters.length) {
     throw new Error('Atlas stats do not match its collections')
+  }
+  for (const language of data.languages) {
+    if (language.count !== (categoryCounts.get(language.name) ?? 0)) {
+      throw new Error(`Language category count is incorrect for ${language.name}`)
+    }
   }
   return data
 }
