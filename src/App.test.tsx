@@ -46,10 +46,23 @@ describe('App mobile filters', () => {
     const trigger = screen.getByRole('button', { name: 'Filters' })
     await user.click(trigger)
     const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
-    expect(dialog.contains(document.activeElement)).toBe(true)
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Done' }))
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(document.activeElement).toBe(trigger)
+  })
+
+  it('focuses Done before Clear all when opening with active filters', async () => {
+    const user = userEvent.setup()
+    window.history.replaceState(null, '', '/?lang=TypeScript')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await user.click(screen.getByRole('button', { name: 'Filters · 1' }))
+    const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
+    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Done' }))
+    await user.keyboard('{Enter}')
+    expect(screen.queryByRole('dialog', { name: 'Filter the atlas' })).toBeNull()
+    expect(currentMap().view.languages).toEqual(['TypeScript'])
   })
 
   it('reports rejected fetches as network failures', async () => {
@@ -345,6 +358,47 @@ it('moves focus to the next chip and then Done as mobile chips are removed', asy
   await user.keyboard('{Escape}')
   expect(screen.queryByRole('dialog', { name: 'Filter the atlas' })).toBeNull()
   expect(document.activeElement).toBe(trigger)
+})
+
+it('focuses the Filters button after removing the last controls chip on compact screens', async () => {
+  const user = userEvent.setup()
+  window.history.replaceState(null, '', '/?lang=TypeScript')
+  const { container } = render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  const chip = container.querySelector<HTMLButtonElement>('.controls .active-filters button')!
+  await user.click(chip)
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Filters' }))
+})
+
+it('focuses the Filters button after clearing empty results on compact screens', async () => {
+  const user = userEvent.setup()
+  window.history.replaceState(null, '', '/?lang=Rust')
+  const { container } = render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await user.click(container.querySelector<HTMLButtonElement>('.no-results button')!)
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Filters' }))
+})
+
+it('scrolls the next chip into view when removing one from a long controls strip', async () => {
+  const user = userEvent.setup()
+  const scrollIntoView = vi.fn()
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+  try {
+    media.set({ compact: false })
+    window.history.replaceState(null, '', '/?lang=TypeScript,Python,Swift,Go,Ruby,Rust,Kotlin,JavaScript')
+    const { container } = render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    const strip = container.querySelector('.controls .active-filters')!
+    await user.click(within(strip as HTMLElement).getByRole('button', { name: 'Remove language filter Python' }))
+    const next = within(strip as HTMLElement).getByRole('button', { name: 'Remove language filter Swift' })
+    expect(document.activeElement).toBe(next)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
+    expect(scrollIntoView.mock.instances.at(-1)).toBe(next)
+  } finally {
+    if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
+    else Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
+  }
 })
 
 it('uses one clear behavior and restores focus for controls and no-results actions', async () => {

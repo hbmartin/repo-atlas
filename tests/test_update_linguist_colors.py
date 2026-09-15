@@ -59,3 +59,19 @@ def test_default_commit_reports_packaged_source_errors_without_fetching(
     assert "packaged source_commit" in message
     assert str(output) in message
     assert "pass --commit" in message
+
+
+def test_default_commit_reports_invalid_utf8_without_fetching(tmp_path, monkeypatch, capsys):
+    output = tmp_path / "linguist_colors.json"
+    output.write_bytes(b"\xff")
+    monkeypatch.setattr(update_linguist_colors, "OUTPUT", output)
+    monkeypatch.setattr(sys, "argv", ["update_linguist_colors.py"])
+    monkeypatch.setattr(update_linguist_colors, "urlopen", lambda *_args, **_kwargs: pytest.fail("unexpected fetch"))
+
+    with pytest.raises(SystemExit) as failure:
+        update_linguist_colors.main()
+    assert failure.value.code == 2
+    message = capsys.readouterr().err
+    assert "not valid UTF-8" in message
+    assert str(output) in message
+    assert "pass --commit" in message
