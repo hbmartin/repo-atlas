@@ -237,11 +237,15 @@ export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
       const name = repo.name.toLocaleLowerCase()
       const fullName = repo.full_name.toLocaleLowerCase()
       const nameScore = fullName === needle ? 2000 : name === needle ? 1500 : name.startsWith(needle) ? 750 : 0
-      const score = nameScore + fields.reduce((sum, value, index) => sum + (value.includes(needle) ? weights[index] ?? 1 : 0), 0)
-      return { repo, score }
+      const primaryScore = repo.primary_language?.toLocaleLowerCase() === needle ? 1 : 0
+      const compositionScore = repo.languages?.some(language => language.name.toLocaleLowerCase() === needle) ? 1 : 0
+      const textScore = fields.reduce((sum, value, index) => sum + (value.includes(needle) ? weights[index] ?? 1 : 0), 0)
+      return { repo, nameScore, primaryScore, compositionScore, textScore }
     })
-    .filter((entry) => entry.score > 0)
-    .sort((a, b) => b.score - a.score || a.repo.name.localeCompare(b.repo.name))
+    .filter((entry) => entry.nameScore + entry.primaryScore + entry.compositionScore + entry.textScore > 0)
+    .sort((a, b) => b.nameScore - a.nameScore || b.primaryScore - a.primaryScore
+      || b.compositionScore - a.compositionScore || b.textScore - a.textScore
+      || a.repo.name.localeCompare(b.repo.name))
     .slice(0, 8)
     .map((entry) => entry.repo)
 }

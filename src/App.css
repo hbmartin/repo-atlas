@@ -61,9 +61,10 @@ kbd { border: 1px solid var(--line-bright); border-bottom-color: #537086; border
 .cluster-label { text-anchor: middle; transition: opacity .15s; pointer-events: auto; cursor: pointer; }
 .cluster-label text { letter-spacing: .01em; paint-order: stroke; stroke: #07131d; font: 700 13px ui-sans-serif, sans-serif; stroke-width: 3px; stroke-linejoin: round; fill: #d9e7f1; }
 .repo-point { transition: opacity .18s; cursor: pointer; }
-.repo-point circle { vector-effect: non-scaling-stroke; transition: r .08s; stroke-width: 1px; }
-.repo-point.low-confidence circle { fill: #07131d; stroke-width: 1.5px; stroke-dasharray: 3 2; }
-.repo-point.selected circle { stroke: white; stroke-width: 2px; }
+.repo-point .repo-dot { vector-effect: non-scaling-stroke; transition: r .08s; stroke-width: 1px; }
+.repo-point.low-confidence .repo-dot { fill: #07131d; stroke-width: 1.5px; stroke-dasharray: 3 2; }
+.repo-point .focus-ring { fill: none; stroke: white; stroke-width: 2px; vector-effect: non-scaling-stroke; opacity: 0; }
+.repo-point.selected .focus-ring, .repo-point:focus-within .focus-ring { opacity: 1; }
 .repo-label { fill: white; paint-order: stroke; stroke: #06131d; font: 600 11px ui-monospace, monospace; pointer-events: none; font-size: 11px; stroke-width: 3px; }
 .neighbor-line { stroke: var(--cyan); stroke-width: 1.5px; stroke-opacity: .6; stroke-dasharray: 5 5; vector-effect: non-scaling-stroke; }
 .map-hud { align-items: center; border: 1px solid var(--line); font: .7rem ui-monospace, monospace; color: var(--muted); position: static; display: inline-flex; pointer-events: auto; border-radius: 5px; overflow: hidden; background: #07131df2; }
@@ -143,7 +144,7 @@ kbd { border: 1px solid var(--line-bright); border-bottom-color: #537086; border
 .map-options .layout-toggle { width: 100%; }
 .guide-trigger { border: 1px solid var(--line-bright); background: transparent; border-radius: 4px; padding: 9px; font-size: 11px; white-space: nowrap; }
 .contour.outer.active { fill-opacity: .10; stroke-opacity: .60; }
-.repo-point circle:focus-visible { stroke: white; stroke-width: 2px; filter: none; outline: none; }
+.repo-point .repo-dot:focus-visible { filter: none; outline: none; }
 .map-labels { pointer-events: none; }
 .cluster-label.active text { fill: white; }
 .cluster-label:focus-visible text { fill: white; }

@@ -1,12 +1,19 @@
 import type { AtlasData, AtlasRepo } from './types'
 import { monthIndex } from './month'
 
-export const UNKNOWN_LANGUAGE_COLOR = '#87909E'
 const uniqueValues = (names: string[]) => [...new Set(names)]
 export const normalizeLanguages = uniqueValues
 export const normalizeRegions = uniqueValues
 export const languageCategories = (data: AtlasData) => data.languages
-export const knownLanguage = (data: AtlasData, name: string) => data.languages.some(item => item.name === name)
+export const languageFilterNames = (data: AtlasData) => uniqueValues([
+  ...data.languages.map(item => item.name),
+  ...data.repos.map(repo => repo.primary_language).sort((a, b) => a.localeCompare(b)),
+])
+export const knownLanguage = (data: AtlasData, name: string) => languageFilterNames(data).includes(name)
+export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: string) =>
+  data.languages.some(item => item.name === name)
+    ? repo.primary_language_category === name
+    : repo.primary_language === name
 
 export function preserveValues(previous: string[], next: string[]) {
   return previous.length === next.length && previous.every((value, i) => value === next[i]) ? previous : next

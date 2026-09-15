@@ -17,7 +17,7 @@ import { SearchBox } from './components/SearchBox'
 import { COMPACT_MEDIA_QUERY, formatDate, toggleValue, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { atlasPresentation, knownLanguage, normalizeLanguages, normalizeRegions, preserveValues } from './presentation'
+import { atlasPresentation, knownLanguage, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -152,13 +152,13 @@ export default function App() {
     const registration = document.modelContext.registerTool({
       name: 'configure_atlas_view',
       title: 'Configure Repo Atlas view',
-      description: 'Select a public repository and/or apply language, semantic-region, date, or alternate-layout filters to the visible Repo Atlas.',
+      description: 'Select a public repository and/or filter Repo Atlas by map language category or exact raw primary language, semantic region, date, or alternate layout. Language filters are combined with OR.',
       inputSchema: {
         type: 'object',
         additionalProperties: false,
         properties: {
           repo: { type: ['string', 'null'], description: 'Exact owner/name, or null to clear selection.' },
-          languages: { type: 'array', items: { type: 'string' } },
+          languages: { type: 'array', description: 'Case-sensitive map categories or raw primary-language names currently in the atlas.', items: { type: 'string', enum: languageFilterNames(data) } },
           regions: { type: 'array', items: { type: 'string' } },
           since: { type: ['string', 'null'], pattern: '^\\d{4}-(0[1-9]|1[0-2])$' },
           layoutAlt: { type: 'boolean' },
@@ -175,7 +175,7 @@ export default function App() {
         const regions = value.regions ?? current.regions
         const repo = value.repo === undefined ? current.repo : value.repo
         const since = value.since === undefined ? current.since : value.since
-        if (!languages.every((name) => knownLanguage(data, name))) throw new Error('Unknown language filter.')
+        if (!languages.every((name) => knownLanguage(data, name))) throw new Error('Unknown language category or raw primary-language filter.')
         if (!regions.every((name) => name === 'Unclustered' || data.clusters.some((item) => item.label === name))) {
           throw new Error('Unknown region filter.')
         }
@@ -207,7 +207,7 @@ export default function App() {
     if (!data || !presentation) return null
     const { clustersById } = presentation
     const visible = new Set(data.repos.filter((repo) => {
-      const languageMatch = !view.languages.length || view.languages.includes(repo.primary_language_category)
+      const languageMatch = !view.languages.length || view.languages.some(name => matchesLanguageFilter(data, repo, name))
       const region = clustersById.get(repo.cluster_id ?? -1)?.label ?? 'Unclustered'
       const regionMatch = !view.regions.length || view.regions.includes(region)
       const dateMatch = !view.since || repo.pushed_at.slice(0, 7) >= view.since

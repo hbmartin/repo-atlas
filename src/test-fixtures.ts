@@ -1,5 +1,13 @@
 import type { AtlasData, AtlasRepo } from './types'
 
+const CATEGORY_COLORS = {
+  Python: '#77AADD', TypeScript: '#EE8866', Kotlin: '#EEDD88', JavaScript: '#FFAABB',
+  Swift: '#99DDFF', Go: '#44BB99', Ruby: '#BBCC33', Rust: '#AAAA00',
+  Other: '#DDDDDD', Unknown: '#87909E',
+} as const
+const NAMED_CATEGORIES = new Set<string>(Object.keys(CATEGORY_COLORS).filter(name => name !== 'Other' && name !== 'Unknown'))
+const categoryForRaw = (name: string) => name === 'Unknown' ? 'Unknown' : NAMED_CATEGORIES.has(name) ? name : 'Other'
+
 export function makeRepo(overrides: Partial<AtlasRepo> = {}): AtlasRepo {
   const primaryLanguage = overrides.primary_language ?? 'TypeScript'
   return {
@@ -20,8 +28,8 @@ export function makeRepo(overrides: Partial<AtlasRepo> = {}): AtlasRepo {
     artifact_type: 'application',
     maturity: 'working',
     primary_language: primaryLanguage,
-    primary_language_category: overrides.primary_language_category ?? primaryLanguage,
-    languages: [{ name: 'TypeScript', pct: 100, color: '#3178c6' }],
+    primary_language_category: overrides.primary_language_category ?? categoryForRaw(primaryLanguage),
+    languages: primaryLanguage === 'Unknown' ? [] : [{ name: primaryLanguage, pct: 100, color: NAMED_CATEGORIES.has(primaryLanguage) ? CATEGORY_COLORS[primaryLanguage as keyof typeof CATEGORY_COLORS] : '#DDDDDD' }],
     topics: ['testing'],
     stars: 1,
     file_count: 10,
@@ -53,7 +61,7 @@ export function makeAtlas(repos: AtlasRepo[] = [makeRepo()]): AtlasData {
       noise_count: 0,
       low_confidence_count: 0,
     },
-    languages: [...new Set(repos.map(repo => repo.primary_language_category))].map(name => ({ name, count: repos.filter(repo => repo.primary_language_category === name).length, color: '#EE8866' })),
+    languages: Object.entries(CATEGORY_COLORS).map(([name, color]) => ({ name, count: repos.filter(repo => repo.primary_language_category === name).length, color })),
     clusters: [{
       id: 0,
       label: 'Developer Tools',

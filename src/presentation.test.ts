@@ -1,25 +1,34 @@
 import { describe, expect, it } from 'vitest'
-import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, normalizeLanguages, normalizeRegions, regionColors } from './presentation'
+import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors } from './presentation'
 import { parseViewState, unknownViewParameters, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
 describe('atlas presentation', () => {
-  it('preserves emitted categories, counts, order and colors including unfamiliar languages', () => {
-    const data = makeAtlas(['HTML', 'Java', 'Other', 'Gleam'].map((primary_language, i) => makeRepo({ full_name: `owner/${i}`, primary_language })))
-    data.languages[3].color = '#abcdef'
+  it('keeps fixed categories and groups unfamiliar raw languages under Other', () => {
+    const data = makeAtlas(['HTML', 'Java', 'Gleam'].map((primary_language, i) => makeRepo({ full_name: `owner/${i}`, primary_language })))
     expect(languageCategories(data)).toBe(data.languages)
-    expect(atlasPresentation(data).languageColors.get('Gleam')).toBe('#abcdef')
+    expect(data.languages).toHaveLength(10)
+    expect(data.repos.every(repo => repo.primary_language_category === 'Other')).toBe(true)
+    expect(atlasPresentation(data).languageColors.get('Other')).toBe('#DDDDDD')
     expect(normalizeLanguages(['HTML', 'Java', 'Other', 'Java'])).toEqual(['HTML', 'Java', 'Other'])
     expect(normalizeRegions(['Tools', 'Research', 'Tools'])).toEqual(['Tools', 'Research'])
   })
-  it('preserves exact URL categories and reports missing ones', () => {
-    const data = makeAtlas([makeRepo({ primary_language: 'Java' })])
+  it('accepts raw and category URL filters while reporting unavailable raw names', () => {
+    const java = makeRepo({ primary_language: 'Java' })
+    const cpp = makeRepo({ full_name: 'owner/cpp', primary_language: 'C++' })
+    const data = makeAtlas([java, cpp])
     const parsed = parseViewState('?lang=Java,Other,Java&layout=alt', data)
-    expect(parsed.languages).toEqual(['Java'])
-    expect(unknownViewParameters('?lang=Java,Other', data)).toEqual(['lang=Other'])
-    expect(writeViewState(parsed)).toBe('?lang=Java&layout=alt')
+    expect(parsed.languages).toEqual(['Java', 'Other'])
+    expect(unknownViewParameters('?lang=Java,Other,Gleam', data)).toEqual(['lang=Gleam'])
+    expect(writeViewState(parsed)).toBe('?lang=Java%2COther&layout=alt')
     expect(writeViewState({ ...parsed, regions: ['Developer Tools', 'Developer Tools'] }))
-      .toBe('?lang=Java&region=Developer+Tools&layout=alt')
+      .toBe('?lang=Java%2COther&region=Developer+Tools&layout=alt')
+    expect(parseViewState('?lang=C%2B%2B', data).languages).toEqual(['C++'])
+    expect(writeViewState({ ...parsed, languages: ['C++'] })).toBe('?lang=C%2B%2B&layout=alt')
+    expect(matchesLanguageFilter(data, java, 'Java')).toBe(true)
+    expect(matchesLanguageFilter(data, cpp, 'Java')).toBe(false)
+    expect(matchesLanguageFilter(data, cpp, 'Other')).toBe(true)
+    expect(matchesLanguageFilter(data, cpp, 'Python')).toBe(false)
   })
   it('retains equivalent filter arrays', () => {
     const previous = ['Java', 'HTML']

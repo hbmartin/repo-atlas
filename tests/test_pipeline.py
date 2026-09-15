@@ -1,3 +1,4 @@
+import hashlib
 import json
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import wait as concurrent_wait
@@ -15,14 +16,16 @@ from repo_atlas.models import RepoSummary
 from repo_atlas.pipeline import (
     ACQUIRE_VERSION,
     CATEGORY_LANGUAGE_COLORS,
-    DETAIL_LANGUAGE_COLORS,
+    LINGUIST_LANGUAGE_COLORS,
+    OTHER_LANGUAGE_COLOR,
     PROMPT_VERSION,
     TEMPLATE_VERSION,
+    UNKNOWN_LANGUAGE_COLOR,
     AtlasPipeline,
     detail_language_color,
     embedding_text,
-    primary_language_categories,
     primary_language_category,
+    primary_language_counts,
 )
 from repo_atlas.summarizers import (
     SummarizerCancelledError,
@@ -51,17 +54,16 @@ def test_primary_language_categories_are_stable_across_counts():
         + ["Unknown"]
     )
 
-    categories, counts = primary_language_categories(languages)
+    counts = primary_language_counts(languages)
 
-    assert categories == {
-        "Python": "Python",
-        "Java": "Other",
-        "HTML": "Other",
-        "Gleam": "Other",
-        "Unknown": "Unknown",
+    assert {name: count for name, count in counts.items() if count} == {
+        "Python": 1, "Other": 13, "Unknown": 1,
     }
-    assert counts == {"Python": 1, "Other": 13, "Unknown": 1}
+    assert set(counts) == set(CATEGORY_LANGUAGE_COLORS)
     assert sum(counts.values()) == len(languages)
+    assert primary_language_category("Java") == "Other"
+    assert primary_language_category("HTML") == "Other"
+    assert primary_language_category("Gleam") == "Other"
     assert primary_language_category("Rust") == "Rust"
     assert primary_language_category("C++") == "Other"
 
@@ -78,12 +80,18 @@ def test_primary_language_palette_uses_paul_tol_light_colors():
         "Rust": "#AAAA00",
     }
     assert {language: CATEGORY_LANGUAGE_COLORS[language] for language in expected} == expected
+    assert all(detail_language_color(language) == color for language, color in expected.items())
     assert CATEGORY_LANGUAGE_COLORS["Other"] == "#DDDDDD"
     assert CATEGORY_LANGUAGE_COLORS["Unknown"] == "#87909E"
     assert CATEGORY_LANGUAGE_COLORS["Other"] != CATEGORY_LANGUAGE_COLORS["Unknown"]
-    assert DETAIL_LANGUAGE_COLORS["HTML"] == detail_language_color("HTML") == "#e34c26"
-    assert DETAIL_LANGUAGE_COLORS["Java"] == detail_language_color("Java") == "#b07219"
-    assert detail_language_color("Python") == "#3572A5"
+    assert LINGUIST_LANGUAGE_COLORS["HTML"] == detail_language_color("HTML") == "#e34c26"
+    assert LINGUIST_LANGUAGE_COLORS["Java"] == detail_language_color("Java") == "#b07219"
+    assert detail_language_color("CSS") == "#663399"
+    assert detail_language_color("Makefile") == "#427819"
+    assert detail_language_color("Dockerfile") == "#384d54"
+    assert detail_language_color("Makefile") != detail_language_color("Dockerfile")
+    assert detail_language_color("M4") == OTHER_LANGUAGE_COLOR
+    assert detail_language_color("Unknown") == UNKNOWN_LANGUAGE_COLOR
 
 
 def test_committed_atlas_has_consistent_language_categories_and_colors():
@@ -91,11 +99,13 @@ def test_committed_atlas_has_consistent_language_categories_and_colors():
         (Path(__file__).parents[1] / "public" / "atlas.json").read_text()
     )
     assert atlas["schema_version"] == 2
-    assert len(atlas["repos"]) == atlas["stats"]["repo_count"]
-    _categories, counts = primary_language_categories(
+    assert len(atlas["repos"]) == atlas["stats"]["repo_count"] == 190
+    counts = primary_language_counts(
         [repo["primary_language"] for repo in atlas["repos"]]
     )
     assert {item["name"]: item["count"] for item in atlas["languages"]} == counts
+    assert len(atlas["languages"]) == 10
+    assert counts["Other"] == 22
     assert all(
         item["color"] == CATEGORY_LANGUAGE_COLORS[item["name"]]
         for item in atlas["languages"]
@@ -109,10 +119,35 @@ def test_committed_atlas_has_consistent_language_categories_and_colors():
         for repo in atlas["repos"]
         for language in repo["languages"]
     )
-    assert any(
-        repo["primary_language"] in {"Java", "HTML"}
-        and repo["primary_language_category"] == "Other"
-        for repo in atlas["repos"]
+    raw_java_html = {
+        repo["full_name"]: repo["primary_language"]
+        for repo in atlas["repos"] if repo["primary_language"] in {"Java", "HTML"}
+    }
+    assert raw_java_html == {
+        "hbmartin/datasette.io": "HTML",
+        "hbmartin/firebase-chat-android-architecture-components": "Java",
+        "hbmartin/flipper-plugin-stetho": "Java",
+        "hbmartin/how-much-ai": "HTML",
+        "hbmartin/onyx-android-sdk": "Java",
+        "hbmartin/overcast-to-pages": "HTML",
+        "hbmartin/overcast_parser": "HTML",
+        "hbmartin/sub9-client": "Java",
+    }
+    assert all(
+        repo["primary_language_category"] == "Other"
+        for repo in atlas["repos"] if repo["full_name"] in raw_java_html
+    )
+    names = "\n".join(sorted(repo["full_name"] for repo in atlas["repos"]))
+    assert hashlib.sha256(names.encode()).hexdigest() == (
+        "1cf06dabf1e464085fa3f8ad7b8a4f4c9f85a7401d9ef4bd7ecfcf6a5f81352e"
+    )
+    layout_fields = ("x", "y", "x_alt", "y_alt", "cluster_id", "size_r", "neighbors")
+    layout = json.dumps([
+        (repo["full_name"], *(repo[key] for key in layout_fields))
+        for repo in sorted(atlas["repos"], key=lambda item: item["full_name"])
+    ], separators=(",", ":"))
+    assert hashlib.sha256(layout.encode()).hexdigest() == (
+        "37fe73cb7c2929c97b1413003bf828e011be54d463cc1709d473bd3de458511d"
     )
 
 
@@ -188,9 +223,10 @@ def test_emit_preserves_raw_languages_and_refreshes_timestamp_only_for_changes(t
     assert by_name["html"]["primary_language"] == "HTML"
     assert by_name["java"]["primary_language"] == "Java"
     assert by_name["java"]["languages"][0]["color"] == detail_language_color("Java")
-    assert {item["name"]: item["count"] for item in first["languages"]} == {
+    assert {item["name"]: item["count"] for item in first["languages"] if item["count"]} == {
         "Python": 1, "Other": 2,
     }
+    assert len(first["languages"]) == 10
 
     pipeline.emit()
     assert json.loads(output.read_text()) == first

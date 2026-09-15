@@ -10,7 +10,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "vitest run tests/frontend/atlas-snapshot.test.ts && tsc -b && vite build",
     "lint": "oxlint",
     "test": "vitest run",
     "typecheck": "tsc -b --pretty false",

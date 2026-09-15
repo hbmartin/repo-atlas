@@ -1213,6 +1213,7 @@ dependencies = [
 dev = [
     { name = "pytest" },
     { name = "pytest-cov" },
+    { name = "pyyaml" },
     { name = "ruff" },
 ]
 local = [
@@ -1229,6 +1230,7 @@ requires-dist = [
     { name = "pydantic", specifier = ">=2.10" },
     { name = "pytest", marker = "extra == 'dev'", specifier = ">=8.3" },
     { name = "pytest-cov", marker = "extra == 'dev'", specifier = ">=6" },
+    { name = "pyyaml", marker = "extra == 'dev'", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.13", index = "https://pypi.org/simple" },
     { name = "scikit-image", specifier = ">=0.25" },
     { name = "scikit-learn", specifier = ">=1.6" },

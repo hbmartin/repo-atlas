@@ -1,5 +1,3 @@
-/// <reference types="node" />
-import { readFileSync } from 'node:fs'
 import { describe, expect, it } from 'vitest'
 import { monthIndex, monthValue, searchRepos, unknownViewParameters, validMonth, validateAtlas } from './data'
 import type { AtlasData, AtlasRepo } from './types'
@@ -27,6 +25,15 @@ describe('atlas data utilities', () => {
     const exact = makeRepo({ full_name: 'owner/graphviz2drawio', name: 'graphviz2drawio' })
     const formula = makeRepo({ full_name: 'owner/homebrew-graphviz2drawio', name: 'homebrew-graphviz2drawio' })
     expect(searchRepos([formula, exact], 'graphviz2drawio')[0]).toBe(exact)
+  })
+  it('ranks exact raw language names without treating Java as JavaScript', () => {
+    const java = makeRepo({ full_name: 'owner/java-repo', primary_language: 'Java' })
+    const javascript = makeRepo({ full_name: 'owner/javascript-repo', primary_language: 'JavaScript' })
+    const cpp = makeRepo({ full_name: 'owner/cpp-repo', primary_language: 'C++' })
+    const mixed = makeRepo({ full_name: 'owner/mixed', primary_language: 'TypeScript', languages: [{ name: 'C++', pct: 20, color: '#f34b7d' }] })
+    const text = makeRepo({ full_name: 'owner/text', primary_language: 'Python', one_liner: 'Uses some Java examples.' })
+    expect(searchRepos([text, javascript, java], 'Java').map(repo => repo.full_name)).toEqual(['owner/java-repo', 'owner/text'])
+    expect(searchRepos([mixed, cpp], 'C++').map(repo => repo.full_name)).toEqual(['owner/cpp-repo', 'owner/mixed'])
   })
   it('rejects impossible month values', () => {
     expect(validMonth('2026-09')).toBe(true)
@@ -72,11 +79,6 @@ describe('atlas data utilities', () => {
     data.clusters[0].label = 'Unclustered'
     expect(() => validateAtlas(data)).toThrow('reserved')
   })
-})
-
-it('validates the committed deployable atlas snapshot', () => {
-  const snapshot = JSON.parse(readFileSync(new URL('../public/atlas.json', import.meta.url), 'utf8'))
-  expect(validateAtlas(snapshot).stats.repo_count).toBe(snapshot.repos.length)
 })
 
 it('accepts optional fallback provenance in schema v2', () => {
