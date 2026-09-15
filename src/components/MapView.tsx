@@ -374,8 +374,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
       onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
       <circle role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
-        r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : (languageColors.get(repo.primary_language) ?? UNKNOWN_LANGUAGE_COLOR)}
-        stroke={repo.low_confidence ? (languageColors.get(repo.primary_language) ?? UNKNOWN_LANGUAGE_COLOR) : '#06131d'} />
+        r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : (languageColors.get(repo.primary_language_category) ?? UNKNOWN_LANGUAGE_COLOR)}
+        stroke={repo.low_confidence ? (languageColors.get(repo.primary_language_category) ?? UNKNOWN_LANGUAGE_COLOR) : '#06131d'} />
     </g>)}
   </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, languageColors, selectImmediately])
   return <div className="map-shell">

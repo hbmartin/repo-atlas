@@ -1,6 +1,7 @@
 import type { AtlasData, AtlasRepo } from './types'
 
 export function makeRepo(overrides: Partial<AtlasRepo> = {}): AtlasRepo {
+  const primaryLanguage = overrides.primary_language ?? 'TypeScript'
   return {
     full_name: 'owner/example',
     name: 'example',
@@ -18,8 +19,9 @@ export function makeRepo(overrides: Partial<AtlasRepo> = {}): AtlasRepo {
     techniques: ['testing'],
     artifact_type: 'application',
     maturity: 'working',
-    primary_language: 'TypeScript',
-    languages: [{ name: 'TypeScript', pct: 100, color: '#EE8866' }],
+    primary_language: primaryLanguage,
+    primary_language_category: overrides.primary_language_category ?? primaryLanguage,
+    languages: [{ name: 'TypeScript', pct: 100, color: '#3178c6' }],
     topics: ['testing'],
     stars: 1,
     file_count: 10,
@@ -38,7 +40,7 @@ export function makeRepo(overrides: Partial<AtlasRepo> = {}): AtlasRepo {
 
 export function makeAtlas(repos: AtlasRepo[] = [makeRepo()]): AtlasData {
   return {
-    schema_version: 1,
+    schema_version: 2,
     generated_at: '2026-09-12T00:00:00Z',
     owner: 'owner',
     embedding_model: 'test-model',
@@ -51,7 +53,7 @@ export function makeAtlas(repos: AtlasRepo[] = [makeRepo()]): AtlasData {
       noise_count: 0,
       low_confidence_count: 0,
     },
-    languages: [...new Set(repos.map(repo => repo.primary_language))].map(name => ({ name, count: repos.filter(repo => repo.primary_language === name).length, color: '#EE8866' })),
+    languages: [...new Set(repos.map(repo => repo.primary_language_category))].map(name => ({ name, count: repos.filter(repo => repo.primary_language_category === name).length, color: '#EE8866' })),
     clusters: [{
       id: 0,
       label: 'Developer Tools',

@@ -14,13 +14,15 @@ from repo_atlas.layouts import projection_neighbor_counts
 from repo_atlas.models import RepoSummary
 from repo_atlas.pipeline import (
     ACQUIRE_VERSION,
-    GROUPED_PRIMARY_LANGUAGES,
-    LANGUAGE_COLORS,
+    CATEGORY_LANGUAGE_COLORS,
+    DETAIL_LANGUAGE_COLORS,
     PROMPT_VERSION,
     TEMPLATE_VERSION,
     AtlasPipeline,
+    detail_language_color,
     embedding_text,
     primary_language_categories,
+    primary_language_category,
 )
 from repo_atlas.summarizers import (
     SummarizerCancelledError,
@@ -40,29 +42,28 @@ SUMMARY = RepoSummary(
 )
 
 
-def test_primary_language_categories_group_explicit_and_rare_languages():
+def test_primary_language_categories_are_stable_across_counts():
     languages = (
-        ["Python"] * 5
+        ["Python"]
         + ["Java"] * 4
         + ["HTML"] * 4
-        + ["Rust"] * 3
-        + ["Gleam"] * 2
+        + ["Gleam"] * 5
         + ["Unknown"]
     )
 
     categories, counts = primary_language_categories(languages)
 
-    assert GROUPED_PRIMARY_LANGUAGES == {"HTML", "Java"}
     assert categories == {
         "Python": "Python",
         "Java": "Other",
         "HTML": "Other",
-        "Rust": "Rust",
         "Gleam": "Other",
         "Unknown": "Unknown",
     }
-    assert counts == {"Python": 5, "Other": 10, "Rust": 3, "Unknown": 1}
+    assert counts == {"Python": 1, "Other": 13, "Unknown": 1}
     assert sum(counts.values()) == len(languages)
+    assert primary_language_category("Rust") == "Rust"
+    assert primary_language_category("C++") == "Other"
 
 
 def test_primary_language_palette_uses_paul_tol_light_colors():
@@ -76,66 +77,43 @@ def test_primary_language_palette_uses_paul_tol_light_colors():
         "Ruby": "#BBCC33",
         "Rust": "#AAAA00",
     }
-    assert {language: LANGUAGE_COLORS[language] for language in expected} == expected
-    assert LANGUAGE_COLORS["HTML"] == "#e34c26"
-    assert LANGUAGE_COLORS["Java"] == "#b07219"
+    assert {language: CATEGORY_LANGUAGE_COLORS[language] for language in expected} == expected
+    assert CATEGORY_LANGUAGE_COLORS["Other"] == "#DDDDDD"
+    assert CATEGORY_LANGUAGE_COLORS["Unknown"] == "#87909E"
+    assert CATEGORY_LANGUAGE_COLORS["Other"] != CATEGORY_LANGUAGE_COLORS["Unknown"]
+    assert DETAIL_LANGUAGE_COLORS["HTML"] == detail_language_color("HTML") == "#e34c26"
+    assert DETAIL_LANGUAGE_COLORS["Java"] == detail_language_color("Java") == "#b07219"
+    assert detail_language_color("Python") == "#3572A5"
 
 
-def test_committed_atlas_groups_java_and_html_without_losing_detail():
+def test_committed_atlas_has_consistent_language_categories_and_colors():
     atlas = json.loads(
         (Path(__file__).parents[1] / "public" / "atlas.json").read_text()
     )
-    language_counts = {
-        language["name"]: language["count"] for language in atlas["languages"]
-    }
-    language_colors = {
-        language["name"]: language["color"] for language in atlas["languages"]
-    }
-
-    assert len(atlas["repos"]) == atlas["stats"]["repo_count"] == 190
-    assert sum(language_counts.values()) == len(atlas["repos"])
-    assert language_counts["Other"] == 22
-    assert {"Java", "HTML"}.isdisjoint(language_counts)
+    assert atlas["schema_version"] == 2
+    assert len(atlas["repos"]) == atlas["stats"]["repo_count"]
+    _categories, counts = primary_language_categories(
+        [repo["primary_language"] for repo in atlas["repos"]]
+    )
+    assert {item["name"]: item["count"] for item in atlas["languages"]} == counts
     assert all(
-        repo["primary_language"] not in {"Java", "HTML"}
+        item["color"] == CATEGORY_LANGUAGE_COLORS[item["name"]]
+        for item in atlas["languages"]
+    )
+    assert all(
+        repo["primary_language_category"] == primary_language_category(repo["primary_language"])
         for repo in atlas["repos"]
     )
-    grouped_repositories = {
-        "hbmartin/datasette.io",
-        "hbmartin/firebase-chat-android-architecture-components",
-        "hbmartin/flipper-plugin-stetho",
-        "hbmartin/how-much-ai",
-        "hbmartin/onyx-android-sdk",
-        "hbmartin/overcast-to-pages",
-        "hbmartin/overcast_parser",
-        "hbmartin/sub9-client",
-    }
-    assert {
-        repo["full_name"]
-        for repo in atlas["repos"]
-        if repo["full_name"] in grouped_repositories
-        and repo["primary_language"] == "Other"
-    } == grouped_repositories
-    assert language_colors == {
-        "Python": "#77AADD",
-        "TypeScript": "#EE8866",
-        "Kotlin": "#EEDD88",
-        "JavaScript": "#FFAABB",
-        "Swift": "#99DDFF",
-        "Go": "#44BB99",
-        "Ruby": "#BBCC33",
-        "Rust": "#AAAA00",
-        "Other": "#87909e",
-        "Unknown": "#87909e",
-    }
-
-    detail_colors = {
-        language["name"]: language["color"]
+    assert all(
+        language["color"] == detail_language_color(language["name"])
         for repo in atlas["repos"]
         for language in repo["languages"]
-        if language["name"] in {"Java", "HTML"}
-    }
-    assert detail_colors == {"Java": "#b07219", "HTML": "#e34c26"}
+    )
+    assert any(
+        repo["primary_language"] in {"Java", "HTML"}
+        and repo["primary_language_category"] == "Other"
+        for repo in atlas["repos"]
+    )
 
 
 def insert_repo(
@@ -174,6 +152,55 @@ def insert_summary_and_fallback(pipeline: AtlasPipeline, name: str) -> None:
         "INSERT INTO embeddings VALUES (?,?,?,?,?,?)",
         (name, text_hash, OfflineFallbackEmbedder.model_id, 2, vector.tobytes(), "now"),
     )
+
+
+def test_emit_preserves_raw_languages_and_refreshes_timestamp_only_for_changes(tmp_path, monkeypatch):
+    (tmp_path / "public").mkdir()
+    pipeline = AtlasPipeline(tmp_path, None)
+    names = ["owner/html", "owner/java", "owner/python"]
+    for name, language in zip(names, ["HTML", "Java", "Python"], strict=True):
+        insert_repo(pipeline, name, {language: 100})
+        pipeline.cache.execute(
+            "UPDATE repos SET primary_language=? WHERE full_name=?", (language, name)
+        )
+        insert_summary_and_fallback(pipeline, name)
+    pipeline.final_payload = {
+        "names": names, "coordinates": [[0, 0]] * 3,
+        "coordinates_alt": [[1, 1]] * 3, "cluster_ids": [None] * 3,
+        "radii": [3.5] * 3, "neighbors": [[]] * 3, "clusters": [],
+        "layout": "umap", "layout_alt": "force",
+    }
+    monkeypatch.setattr(pipeline, "_current_summary_rows", lambda: None)
+    monkeypatch.setattr(pipeline, "_emit_list", lambda _payload: None)
+    monkeypatch.setattr(pipeline, "_record_run", lambda _payload, _projected: None)
+    times = iter(["2026-09-15T01:00:00Z", "2026-09-15T02:00:00Z", "2026-09-15T03:00:00Z"])
+    monkeypatch.setattr(pipeline_module, "now", lambda: next(times))
+
+    output = tmp_path / "public" / "atlas.json"
+    pipeline.emit()
+    first = json.loads(output.read_text())
+    by_name = {repo["name"]: repo for repo in first["repos"]}
+    assert first["schema_version"] == 2
+    assert first["generated_at"] == "2026-09-15T01:00:00Z"
+    assert {name: by_name[name]["primary_language_category"] for name in by_name} == {
+        "html": "Other", "java": "Other", "python": "Python",
+    }
+    assert by_name["html"]["primary_language"] == "HTML"
+    assert by_name["java"]["primary_language"] == "Java"
+    assert by_name["java"]["languages"][0]["color"] == detail_language_color("Java")
+    assert {item["name"]: item["count"] for item in first["languages"]} == {
+        "Python": 1, "Other": 2,
+    }
+
+    pipeline.emit()
+    assert json.loads(output.read_text()) == first
+    pipeline.cache.execute(
+        "UPDATE repos SET primary_language='Rust' WHERE full_name='owner/java'"
+    )
+    pipeline.emit()
+    changed = json.loads(output.read_text())
+    assert changed["generated_at"] == "2026-09-15T03:00:00Z"
+    assert changed["repos"][1]["primary_language_category"] == "Rust"
 
 
 def test_projection_neighbor_counts_are_valid_for_small_datasets():

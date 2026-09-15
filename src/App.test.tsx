@@ -112,22 +112,29 @@ describe('App mobile filters', () => {
     expect(container.querySelector('.workspace')?.hasAttribute('inert')).toBe(false)
   })
 
-  it('preserves exact language links and reports matching repositories and regions', async () => {
-    const data = makeAtlas([makeRepo({ primary_language: 'Java' }), makeRepo({ full_name: 'owner/other', primary_language: 'Python' })])
-    data.languages = [{ name: 'Java', color: '#000', count: 1 }, { name: 'Python', color: '#fff', count: 1 }]
+  it('filters Java- and HTML-primary repositories through Other while preserving raw languages', async () => {
+    const data = makeAtlas([
+      makeRepo({ primary_language: 'Java', primary_language_category: 'Other' }),
+      makeRepo({ full_name: 'owner/html', name: 'html', primary_language: 'HTML', primary_language_category: 'Other' }),
+      makeRepo({ full_name: 'owner/python', name: 'python', primary_language: 'Python' }),
+    ])
+    data.languages = [{ name: 'Other', color: '#DDDDDD', count: 2 }, { name: 'Python', color: '#77AADD', count: 1 }]
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
-    window.history.replaceState(null, '', '?lang=Java')
+    window.history.replaceState(null, '', '?lang=Other')
     render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
-    expect(screen.getByText('1 matching / 2 repositories · 1 matching / 1 regions')).toBeDefined()
-    expect(window.location.search).toBe('?lang=Java')
+    expect(screen.getByText('2 matching / 3 repositories · 1 matching / 1 regions')).toBeDefined()
+    expect(window.location.search).toBe('?lang=Other')
     expect(screen.queryByRole('status')).toBeNull()
-    expect(screen.getByRole('button', { name: 'Filter by Java: 1 repositories' }).getAttribute('aria-pressed')).toBe('true')
+    expect(screen.getByRole('button', { name: 'Filter by Other: 2 repositories' }).getAttribute('aria-pressed')).toBe('true')
+    expect(currentMap().visible.has('owner/example')).toBe(true)
+    expect(currentMap().visible.has('owner/html')).toBe(true)
+    expect(currentMap().visible.has('owner/python')).toBe(false)
   })
 
   it('preserves WebMCP language filters and composes with the latest state', async () => {
-    const data = makeAtlas([makeRepo({ primary_language: 'Java' })])
-    data.languages = [{ name: 'Java', color: '#000', count: 1 }]
+    const data = makeAtlas([makeRepo({ primary_language: 'Java', primary_language_category: 'Other' })])
+    data.languages = [{ name: 'Other', color: '#DDDDDD', count: 1 }]
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
     let execute: ((input: unknown) => { languages: string[]; regions: string[] }) | undefined
     Object.defineProperty(document, 'modelContext', { configurable: true, value: { registerTool(tool: { execute: typeof execute }) { execute = tool.execute } } })
@@ -135,14 +142,14 @@ describe('App mobile filters', () => {
     await waitFor(() => expect(execute).toBeDefined())
     act(() => {
       const result = execute!({
-        languages: ['Java', 'Java'],
+        languages: ['Other', 'Other'],
         regions: ['Developer Tools', 'Developer Tools'],
       })
-      expect(result.languages).toEqual(['Java'])
+      expect(result.languages).toEqual(['Other'])
       expect(result.regions).toEqual(['Developer Tools'])
-      expect(execute!({ repo: 'owner/example' }).languages).toEqual(['Java'])
+      expect(execute!({ repo: 'owner/example' }).languages).toEqual(['Other'])
     })
-    expect(window.location.search).toContain('lang=Java')
+    expect(window.location.search).toContain('lang=Other')
     expect(new URLSearchParams(window.location.search).get('region')).toBe('Developer Tools')
     expect(currentMap().view.regions).toEqual(['Developer Tools'])
   })

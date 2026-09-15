@@ -1,7 +1,7 @@
 import type { AtlasData, AtlasRepo } from './types'
 import { monthIndex } from './month'
 
-export const UNKNOWN_LANGUAGE_COLOR = '#87909e'
+export const UNKNOWN_LANGUAGE_COLOR = '#87909E'
 const uniqueValues = (names: string[]) => [...new Set(names)]
 export const normalizeLanguages = uniqueValues
 export const normalizeRegions = uniqueValues
