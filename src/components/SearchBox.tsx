@@ -31,7 +31,7 @@ export function SearchBox({
       )) return
       if (!input.current || input.current.closest('[inert]')) return
       event.preventDefault()
-      input.current.focus()
+      input.current.focus({ preventScroll: true })
     }
     window.addEventListener('keydown', listener)
     return () => window.removeEventListener('keydown', listener)

@@ -41,7 +41,31 @@ describe('SearchBox', () => {
   it('focuses search for the slash shortcut outside editable fields', async () => {
     const user = userEvent.setup()
     render(<SearchBox repos={[makeRepo()]} onSelect={vi.fn()} />)
+    const search = screen.getByRole('combobox', { name: 'Search repositories' })
+    const focus = vi.spyOn(search, 'focus')
     await user.keyboard('/')
-    expect(document.activeElement).toBe(screen.getByRole('combobox', { name: 'Search repositories' }))
+    expect(document.activeElement).toBe(search)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+  })
+
+  it('selects a repository-name prefix before exact language matches', async () => {
+    const names = [
+      makeRepo({ full_name: 'owner/rust-web', name: 'rust-web', primary_language: 'Unknown' }),
+      makeRepo({ full_name: 'owner/rust-notes', name: 'rust-notes', primary_language: 'Unknown' }),
+    ]
+    const languages = Array.from({ length: 9 }, (_, index) => makeRepo({
+      full_name: `owner/language-${index}`, name: `language-${index}`, primary_language: 'Rust',
+    }))
+    const onSelect = vi.fn()
+    const user = userEvent.setup()
+    render(<SearchBox repos={[...languages, ...names]} onSelect={onSelect} />)
+
+    await user.type(screen.getByRole('combobox', { name: 'Search repositories' }), 'rust')
+    const options = await screen.findAllByRole('option')
+    expect(options.slice(0, 2).map(option => option.textContent)).toEqual(expect.arrayContaining([
+      expect.stringContaining('rust-notes'), expect.stringContaining('rust-web'),
+    ]))
+    await user.keyboard('{Enter}')
+    expect(onSelect).toHaveBeenCalledWith(names[1])
   })
 })

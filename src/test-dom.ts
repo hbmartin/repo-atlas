@@ -4,6 +4,43 @@ import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, REDUCED_MOTION_MEDIA_QUER
 
 type MediaSettings = { compact: boolean; reduced: boolean }
 
+type ResizeRegistration = { callback: ResizeObserverCallback; observer: ResizeObserver; targets: Set<Element> }
+
+export function stubResizeObserver() {
+  const registrations: ResizeRegistration[] = []
+  vi.stubGlobal('ResizeObserver', class {
+    private registration: ResizeRegistration
+    constructor(callback: ResizeObserverCallback) {
+      this.registration = { callback, observer: this as unknown as ResizeObserver, targets: new Set() }
+      registrations.push(this.registration)
+    }
+    observe(target: Element) { this.registration.targets.add(target) }
+    unobserve(target: Element) { this.registration.targets.delete(target) }
+    disconnect() { this.registration.targets.clear() }
+  })
+  const registrationFor = (target: Element) => {
+    const registration = registrations.find(item => item.targets.has(target))
+    if (!registration) throw new Error('Element is not observed')
+    return registration
+  }
+  const notify = (target: Element, entry?: ResizeObserverEntry) => {
+    const registration = registrationFor(target)
+    act(() => registration.callback(entry ? [entry] : [], registration.observer))
+  }
+  return {
+    notify,
+    report(target: Element, width: number, height: number, box: 'array' | 'single' | 'missing' = 'array') {
+      const raw = { target } as unknown as ResizeObserverEntry
+      if (box !== 'missing') {
+        const size = { inlineSize: width, blockSize: height } as ResizeObserverSize
+        Object.defineProperty(raw, 'borderBoxSize', { value: box === 'array' ? [size] : size })
+      }
+      notify(target, raw)
+    },
+    observerCount() { return registrations.length },
+  }
+}
+
 export function stubMedia(initial: MediaSettings) {
   const settings = { ...initial }
   const listeners = new Map<string, Set<() => void>>()

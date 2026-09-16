@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { zoomTransform } from 'd3-zoom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas } from '../test-fixtures'
-import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia, uninstallCameraClock } from '../test-dom'
+import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia, stubResizeObserver, uninstallCameraClock } from '../test-dom'
 import type { ViewState } from '../types'
 import {
   mobileMapTargetY,
@@ -16,14 +16,12 @@ import { atlasPresentation } from '../presentation'
 import { MapView } from './MapView'
 
 const view: ViewState = { repo: null, languages: [], regions: [], since: null, layoutAlt: false }
+let resizeObserver: ReturnType<typeof stubResizeObserver>
 
 beforeEach(() => {
   installCameraClock()
   vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockReturnValue({ left: 0, top: 0, width: 1000, height: 700, right: 1000, bottom: 700, x: 0, y: 0, toJSON() {} })
-  vi.stubGlobal('ResizeObserver', class {
-    observe() {}
-    disconnect() {}
-  })
+  resizeObserver = stubResizeObserver()
   stubMedia({ compact: true, reduced: true })
 })
 afterEach(() => {
@@ -293,22 +291,21 @@ describe('MapView', () => {
 
   it('preserves an explicit region fit through the resize caused by wrapping filter counts', () => {
     let width = 390, height = 670
-    let resize: (() => void) | undefined
-    vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { resize = callback } observe() {} disconnect() {} })
     vi.stubGlobal('matchMedia', (query: string) => ({ matches: query.includes('max-width'), addEventListener() {}, removeEventListener() {} }))
     const bounds = vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 170, width, height, right: width, bottom: height + 170, x: 0, y: 170, toJSON() {} }))
     const first = makeAtlas().repos[0]
     const data = makeAtlas([{ ...first, x: 100, y: 100 }, { ...first, full_name: 'owner/far', x: 900, y: 900, cluster_id: 1 }])
     data.clusters.push({ ...data.clusters[0], id: 1, label: 'Far Away' })
     const props = { data, presentation: atlasPresentation(data), view, visible: new Set(data.repos.map(repo => repo.full_name)), selected: null, onSelect: vi.fn() }
-    const { rerender } = render(<MapView {...props} />)
+    const { container, rerender } = render(<MapView {...props} />)
+    const svg = container.querySelector('svg')!
     rerender(<MapView {...props} navigationRequest={{ kind: 'region', target: 'Developer Tools', nonce: 1 }} />)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('400%')
     height = 655
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('400%')
     width = 768
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('400%')
     bounds.mockRestore()
   })
