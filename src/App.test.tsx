@@ -12,6 +12,19 @@ const { mapSpy } = vi.hoisted(() => ({ mapSpy: vi.fn() }))
 vi.mock('./components/MapView', () => ({ MapView: (props: ComponentProps<typeof MapView>) => { mapSpy(props); return <div>Map fixture</div> } }))
 const currentMap = () => mapSpy.mock.lastCall![0] as ComponentProps<typeof MapView>
 
+function stubScrollIntoView() {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
+  const mock = vi.fn()
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: mock })
+  return {
+    mock,
+    restore() {
+      if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
+      else Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
+    },
+  }
+}
+
 let media: ReturnType<typeof stubMedia>
 
 beforeEach(() => {
@@ -44,12 +57,14 @@ describe('App mobile filters', () => {
     render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
     const trigger = screen.getByRole('button', { name: 'Filters' })
+    const triggerFocus = vi.spyOn(trigger, 'focus')
     await user.click(trigger)
     const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
     expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Done' }))
     await user.keyboard('{Escape}')
     await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
     expect(document.activeElement).toBe(trigger)
+    expect(triggerFocus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
   it('focuses Done before Clear all when opening with active filters', async () => {
@@ -324,24 +339,31 @@ it('keeps zero-count saved-link filters visible as chips while hiding empty filt
 
 it('clears every filter inside the mobile dialog while keeping selection and layout', async () => {
   const user = userEvent.setup()
-  window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=TypeScript&region=Developer+Tools&since=2025-06&layout=alt')
-  render(<App />)
-  await screen.findByRole('heading', { name: 'Repo Atlas' })
-  await user.click(screen.getByRole('button', { name: 'Filters · 3' }))
-  const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
-  const done = within(dialog).getByRole('button', { name: 'Done' })
-  const doneFocus = vi.spyOn(done, 'focus')
-  expect(done.parentElement?.lastElementChild).toBe(done)
-  expect(done.previousElementSibling?.textContent).toBe('Clear all')
-  await user.click(within(dialog).getByRole('button', { name: 'Clear all' }))
-  expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: [], regions: [], since: null, layoutAlt: true })
-  expect(within(dialog).queryByRole('group', { name: 'Active filters' })).toBeNull()
-  expect(document.activeElement).toBe(done)
-  expect(doneFocus).toHaveBeenCalledWith({ preventScroll: true })
-  await user.keyboard('{Shift>}{Tab}{/Shift}')
-  expect(dialog.contains(document.activeElement)).toBe(true)
-  await user.keyboard('{Escape}')
-  expect(screen.queryByRole('dialog', { name: 'Filter the atlas' })).toBeNull()
+  const scroll = stubScrollIntoView()
+  try {
+    window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=TypeScript&region=Developer+Tools&since=2025-06&layout=alt')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await user.click(screen.getByRole('button', { name: 'Filters · 3' }))
+    const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
+    const done = within(dialog).getByRole('button', { name: 'Done' })
+    const doneFocus = vi.spyOn(done, 'focus')
+    expect(done.parentElement?.lastElementChild).toBe(done)
+    expect(done.previousElementSibling?.textContent).toBe('Clear all')
+    await user.click(within(dialog).getByRole('button', { name: 'Clear all' }))
+    expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: [], regions: [], since: null, layoutAlt: true })
+    expect(within(dialog).queryByRole('group', { name: 'Active filters' })).toBeNull()
+    expect(document.activeElement).toBe(done)
+    expect(doneFocus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(scroll.mock.mock.instances.at(-1)).toBe(done)
+    expect(scroll.mock).toHaveBeenLastCalledWith({ block: 'nearest', inline: 'nearest' })
+    await user.keyboard('{Shift>}{Tab}{/Shift}')
+    expect(dialog.contains(document.activeElement)).toBe(true)
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog', { name: 'Filter the atlas' })).toBeNull()
+  } finally {
+    scroll.restore()
+  }
 })
 
 it('moves focus to the next chip and then Done as mobile chips are removed', async () => {
@@ -386,9 +408,7 @@ it('focuses the Filters button after clearing empty results on compact screens',
 
 it('scrolls the next chip into view when removing one from a long controls strip', async () => {
   const user = userEvent.setup()
-  const scrollIntoView = vi.fn()
-  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
-  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: scrollIntoView })
+  const scroll = stubScrollIntoView()
   try {
     media.set({ compact: false })
     window.history.replaceState(null, '', '/?lang=TypeScript,Python,Swift,Go,Ruby,Rust,Kotlin,JavaScript')
@@ -400,11 +420,10 @@ it('scrolls the next chip into view when removing one from a long controls strip
     await user.click(within(strip as HTMLElement).getByRole('button', { name: 'Remove language filter Python' }))
     expect(document.activeElement).toBe(next)
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
-    expect(scrollIntoView.mock.instances.at(-1)).toBe(next)
+    expect(scroll.mock).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
+    expect(scroll.mock.mock.instances.at(-1)).toBe(next)
   } finally {
-    if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
-    else Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
+    scroll.restore()
   }
 })
 

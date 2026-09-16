@@ -1,5 +1,5 @@
 :root { --bg: #061019; --panel: #0a1722; --panel-2: #0d1d2a; --line: #203443; --line-bright: #365064; --ink: #e7f1fa; --muted: #92a6b7; --dim: #617687; --cyan: #74c7ec; --cyan-soft: rgba(116, 199, 236, .12); --lime: #b7e46c; }
-.app { display: grid; background: radial-gradient(circle at 38% 38%, #0a1c29 0, var(--bg) 46%); height: 100dvh; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; }
+.app { display: grid; background: radial-gradient(circle at 38% 38%, #0a1c29 0, var(--bg) 46%); height: 100dvh; min-height: 0; grid-template-rows: auto auto minmax(0, 1fr); overflow: hidden; overflow: clip; }
 .url-warning { position: fixed; z-index: 120; top: 10px; left: 50%; transform: translateX(-50%); max-width: min(680px, calc(100vw - 24px)); padding: 9px 12px; border: 1px solid #886f38; border-radius: 4px; background: #251f10f2; color: #e7d59b; box-shadow: 0 12px 36px #0009; font-size: .74rem; }
 .url-warning button { margin-left: 8px; border: 0; background: transparent; color: var(--cyan); text-decoration: underline; }
 .topbar { display: flex; align-items: center; justify-content: space-between; padding: 0 24px; border-bottom: 1px solid var(--line); background: rgba(6,16,25,.92); height: 76px; }

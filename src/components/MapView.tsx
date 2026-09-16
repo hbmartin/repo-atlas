@@ -23,6 +23,7 @@ type Viewport = {
   alt: boolean
   layoutToken: object
 }
+type TooltipAnchor = { kind: 'pointer'; clientX: number; clientY: number } | { kind: 'map'; x: number; y: number }
 const sameTransform = (a: ZoomTransform, b: ZoomTransform) => a.x === b.x && a.y === b.y && a.k === b.k
 const positionTooltip = (anchor: { x: number; y: number }, tooltip: Size, viewport: Size) => ({
   left: Math.max(8, Math.min(anchor.x + 14, viewport.width - tooltip.width - 8)),
@@ -44,10 +45,11 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
   const [focusedRegion, setFocusedRegion] = useState<number | null>(null)
-  const [tooltip, setTooltip] = useState({ x: 0, y: 0 })
-  const svgOrigin = useRef({ left: 0, top: 0 })
   const tooltipSize = useRef<Size>(TOOLTIP_FALLBACK_SIZE)
-  const tooltipAnchorRef = useRef({ x: 0, y: 0 })
+  const tooltipViewport = useRef<Size>(PLACEHOLDER_SIZE)
+  const tooltipAnchorRef = useRef<TooltipAnchor | null>(null)
+  const tooltipObserver = useRef<ResizeObserver | null>(null)
+  const tooltipFrame = useRef<number | null>(null)
   const consumedRequest = useRef<number | null>(null)
   const previousView = useRef(view)
   const pointerStart = useRef<{ x: number; y: number; type: string; dragged: boolean } | null>(null)
@@ -72,13 +74,41 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (clickGesture.current?.timer) clearTimeout(clickGesture.current.timer)
     clickGesture.current = null
   }, [])
-  const updateTooltipPointer = useCallback((clientX: number, clientY: number, refreshOrigin = false) => {
-    if (refreshOrigin) {
+  const positionVisibleTooltip = useCallback((node = tooltipRef.current) => {
+    const anchor = tooltipAnchorRef.current
+    if (!node || !anchor) return
+    let point: { x: number; y: number }
+    if (anchor.kind === 'pointer') {
       const rect = svgRef.current?.getBoundingClientRect()
-      if (rect) svgOrigin.current = { left: rect.left, top: rect.top }
-    }
-    setTooltip({ x: clientX - svgOrigin.current.left, y: clientY - svgOrigin.current.top })
+      if (!rect) return
+      point = { x: anchor.clientX - rect.left, y: anchor.clientY - rect.top }
+    } else point = anchor
+    const next = positionTooltip(point, tooltipSize.current, tooltipViewport.current)
+    node.style.left = `${next.left}px`
+    node.style.top = `${next.top}px`
   }, [])
+  const updateTooltipPointer = useCallback((clientX: number, clientY: number, immediate = false) => {
+    tooltipAnchorRef.current = { kind: 'pointer', clientX, clientY }
+    if (immediate) {
+      if (tooltipFrame.current != null) cancelAnimationFrame(tooltipFrame.current)
+      tooltipFrame.current = null
+      positionVisibleTooltip()
+    } else if (tooltipFrame.current == null) {
+      tooltipFrame.current = requestAnimationFrame(() => {
+        tooltipFrame.current = null
+        positionVisibleTooltip()
+      })
+    }
+  }, [positionVisibleTooltip])
+  const setTooltipNode = useCallback((node: HTMLDivElement | null) => {
+    const previous = tooltipRef.current
+    if (previous) tooltipObserver.current?.unobserve(previous)
+    tooltipRef.current = node
+    if (!node) return
+    tooltipSize.current = TOOLTIP_FALLBACK_SIZE
+    tooltipObserver.current?.observe(node)
+    positionVisibleTooltip(node)
+  }, [positionVisibleTooltip])
   const measure = useMemo(() => {
     const context = typeof CanvasRenderingContext2D === 'undefined' ? null : document.createElement('canvas').getContext('2d')
     if (context) context.font = `700 ${fontSize}px ui-sans-serif, sans-serif`
@@ -101,6 +131,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   useLayoutEffect(() => { boundsRef.current = bounds }, [bounds])
   useLayoutEffect(() => { viewportRef.current = viewport }, [viewport])
   const { size, fit, transform } = viewport
+  useLayoutEffect(() => { tooltipViewport.current = size }, [size])
   const commitTransform = useCallback((next: ZoomTransform) => {
     if (frame.current != null) cancelAnimationFrame(frame.current)
     frame.current = null
@@ -218,7 +249,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const node = svgRef.current!
     const resize = () => {
       const rect = node.getBoundingClientRect()
-      svgOrigin.current = { left: rect.left, top: rect.top }
       if (rect.width <= 0 || rect.height <= 0) return
       const current = viewportRef.current
       const behavior = zoomRef.current!
@@ -416,40 +446,47 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         stroke={repo.low_confidence ? languageColors.get(repo.primary_language_category) : '#06131d'} />
     </g>)}
   </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, fit.k, languageColors, selectImmediately, dotLookup, updateTooltipPointer])
-  const tooltipAnchor = activeRepo && activeRepo !== hover ? (() => {
+  const mapTooltipAnchor = activeRepo && activeRepo !== hover ? (() => {
     const [x, y] = transform.apply([pointX(activeRepo), pointY(activeRepo)])
     const radius = drawnRadius(activeRepo) * transform.k
     return { x: x + radius, y: y - radius }
-  })() : tooltip
+  })() : null
   const hasTooltip = Boolean(activeRepo)
-  const viewportWidth = size.width
-  const viewportHeight = size.height
-  const positionVisibleTooltip = useCallback((node = tooltipRef.current) => {
-    if (!node) return
-    const next = positionTooltip(tooltipAnchorRef.current, tooltipSize.current, { width: viewportWidth, height: viewportHeight })
-    node.style.left = `${next.left}px`
-    node.style.top = `${next.top}px`
-  }, [viewportWidth, viewportHeight])
-  const tooltipX = tooltipAnchor.x
-  const tooltipY = tooltipAnchor.y
+  const tooltipRepoName = activeRepo?.full_name ?? null
+  const hasMapTooltipAnchor = Boolean(mapTooltipAnchor)
+  const mapAnchorX = mapTooltipAnchor?.x ?? 0
+  const mapAnchorY = mapTooltipAnchor?.y ?? 0
   useLayoutEffect(() => {
-    tooltipAnchorRef.current = { x: tooltipX, y: tooltipY }
+    if (!hasTooltip) {
+      tooltipAnchorRef.current = null
+      return
+    }
+    if (hasMapTooltipAnchor) tooltipAnchorRef.current = { kind: 'map', x: mapAnchorX, y: mapAnchorY }
     positionVisibleTooltip()
-  }, [tooltipX, tooltipY, positionVisibleTooltip])
+  }, [hasTooltip, tooltipRepoName, hasMapTooltipAnchor, mapAnchorX, mapAnchorY, positionVisibleTooltip])
   useLayoutEffect(() => {
-    const node = tooltipRef.current
-    if (!hasTooltip || !node) return
-    const observer = new ResizeObserver(([entry]) => {
-      const borderBox = entry?.borderBoxSize[0]
+    const observer = new ResizeObserver((entries) => {
+      const node = tooltipRef.current
+      if (!node) return
+      const entry = entries[0]
+      if (entry && entry.target !== node) return
+      const borderBoxSize = entry?.borderBoxSize as unknown as ResizeObserverSize | readonly ResizeObserverSize[] | undefined
+      const borderBox = borderBoxSize && 'inlineSize' in borderBoxSize ? borderBoxSize : borderBoxSize?.[0]
       const width = borderBox?.inlineSize ?? node.offsetWidth
       const height = borderBox?.blockSize ?? node.offsetHeight
       if (width <= 0 || height <= 0) return
       tooltipSize.current = { width, height }
       positionVisibleTooltip(node)
     })
-    observer.observe(node)
-    return () => observer.disconnect()
-  }, [hasTooltip, positionVisibleTooltip])
+    tooltipObserver.current = observer
+    if (tooltipRef.current) observer.observe(tooltipRef.current)
+    return () => {
+      observer.disconnect()
+      tooltipObserver.current = null
+      if (tooltipFrame.current != null) cancelAnimationFrame(tooltipFrame.current)
+      tooltipFrame.current = null
+    }
+  }, [positionVisibleTooltip])
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
@@ -525,7 +562,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    {activeRepo && <div ref={tooltipRef} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
+    {activeRepo && <div ref={setTooltipNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
       <strong>{activeRepo.name}</strong><span>{activeRepo.one_liner}</span><small>{activeRepo.primary_language} · updated {formatDate(activeRepo.pushed_at)}</small>
       {activeRepo.low_confidence && <small>Sparse README / low-confidence summary</small>}
     </div>}

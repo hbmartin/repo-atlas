@@ -5,7 +5,7 @@ import { zoomTransform } from 'd3-zoom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { AtlasRepo, MapNavigationRequest, ViewState } from '../types'
 import { atlasPresentation } from '../presentation'
-import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia, uninstallCameraClock } from '../test-dom'
+import { advanceCameraBy, finishCameraTransition, installCameraClock, stubMedia, stubResizeObserver, uninstallCameraClock } from '../test-dom'
 import { makeAtlas, makeRepo } from '../test-fixtures'
 import { MapView } from './MapView'
 
@@ -31,37 +31,13 @@ const presentation = atlasPresentation(data)
 const props = { data, presentation, view: empty, visible: new Set(data.repos.map(repo => repo.full_name)), selected: null, onSelect: vi.fn() }
 let width = 1000, height = 700
 let originLeft = 0, originTop = 0
-let resize: (() => void) | undefined
-type ResizeRegistration = { callback: ResizeObserverCallback; observer: ResizeObserver; targets: Set<Element> }
-let resizeRegistrations: ResizeRegistration[] = []
-
-function reportResize(target: Element, reportedWidth: number, reportedHeight: number) {
-  const registration = resizeRegistrations.find(item => item.targets.has(target))
-  if (!registration) throw new Error('Element is not observed')
-  const borderBoxSize = [{ inlineSize: reportedWidth, blockSize: reportedHeight }] as ResizeObserverSize[]
-  const entry = { target, borderBoxSize } as unknown as ResizeObserverEntry
-  act(() => registration.callback([entry], registration.observer))
-}
+let resizeObserver: ReturnType<typeof stubResizeObserver>
 
 beforeEach(() => {
   installCameraClock()
   placementSpy.mockClear()
   width = 1000; height = 700; originLeft = 0; originTop = 0
-  resize = undefined
-  resizeRegistrations = []
-  vi.stubGlobal('ResizeObserver', class {
-    private registration: ResizeRegistration
-    constructor(callback: ResizeObserverCallback) {
-      this.registration = { callback, observer: this as unknown as ResizeObserver, targets: new Set() }
-      resizeRegistrations.push(this.registration)
-    }
-    observe(target: Element) {
-      this.registration.targets.add(target)
-      if (target instanceof SVGSVGElement) resize = () => this.registration.callback([], this.registration.observer)
-    }
-    unobserve(target: Element) { this.registration.targets.delete(target) }
-    disconnect() { this.registration.targets.clear() }
-  })
+  resizeObserver = stubResizeObserver()
   stubMedia({ compact: true, reduced: true })
   vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
     left: originLeft, top: originTop, width, height, right: originLeft + width, bottom: originTop + height,
@@ -113,10 +89,11 @@ describe('measured camera navigation', () => {
     width = 0; height = 0
     const handled = vi.fn()
     const request = { kind: 'repo' as const, target: first.full_name, nonce: 2 }
-    const { rerender } = render(<MapView {...props} navigationRequest={request} onNavigationHandled={handled} />)
+    const { container, rerender } = render(<MapView {...props} navigationRequest={request} onNavigationHandled={handled} />)
+    const svg = container.querySelector('svg')!
     expect(handled).not.toHaveBeenCalled()
     width = 600; height = 400
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     expect(handled).toHaveBeenCalledExactlyOnceWith(2)
     rerender(<MapView {...props} navigationRequest={request} onNavigationHandled={handled} />)
     expect(handled).toHaveBeenCalledTimes(1)
@@ -131,7 +108,7 @@ describe('measured camera navigation', () => {
     expect(container.querySelector('.map-geometry')?.getAttribute('transform')).toBe(placeholder.toString())
 
     width = 600; height = 400
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     expect(container.querySelector('.map-geometry')?.getAttribute('transform')).toBe(zoomTransform(svg).toString())
   })
   it('completes animated repository navigation when reduced motion is off', () => {
@@ -158,7 +135,7 @@ describe('measured camera navigation', () => {
     expect(screen.getByLabelText('Zoom level').textContent).not.toBe('220%')
 
     width = 1010
-    act(() => resize?.())
+    resizeObserver.notify(svg)
 
     const resized = zoomTransform(svg)
     expect(screen.getByLabelText('Zoom level').textContent).toBe('220%')
@@ -188,17 +165,18 @@ describe('measured camera navigation', () => {
     const old = zoomTransform(svg).invert([width / 2, height / 2])
     const oldZoom = screen.getByLabelText('Zoom level').textContent
     width = 768; height = 550
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     const current = zoomTransform(svg).invert([width / 2, height / 2])
     expect(current[0]).toBeCloseTo(old[0])
     expect(current[1]).toBeCloseTo(old[1])
     expect(screen.getByLabelText('Zoom level').textContent).toBe(oldZoom)
   })
   it('renders label placement once with the resized fit and camera', () => {
-    render(<MapView {...props} />)
+    const { container } = render(<MapView {...props} />)
+    const svg = container.querySelector('svg')!
     placementSpy.mockClear()
     width = 768; height = 550
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     expect(placementSpy).toHaveBeenCalledTimes(1)
   })
   it('keeps labels live without rebuilding static repository geometry each frame', () => {
@@ -239,7 +217,7 @@ describe('measured camera navigation', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Zoom in' }))
     advanceCameraBy(160)
     width = 1010
-    act(() => resize?.())
+    resizeObserver.notify(svg)
     const resized = zoomTransform(svg)
     finishCameraTransition()
 
@@ -490,7 +468,7 @@ it('keeps the focused tooltip anchored to its dot throughout an arrow-key camera
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
 })
 
-it('uses a cached SVG origin for tooltip pointer moves', () => {
+it('uses the current SVG origin for every tooltip pointer position update', () => {
   stubMedia({ compact: false, reduced: true })
   originLeft = 75; originTop = 190
   const { container } = render(<MapView {...props} />)
@@ -499,15 +477,32 @@ it('uses a cached SVG origin for tooltip pointer moves', () => {
   bounds.mockClear()
 
   fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
-  expect(bounds).toHaveBeenCalledTimes(1)
   let tooltip = screen.getByRole('tooltip')
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
 
+  originLeft = 90; originTop = 200
   bounds.mockClear()
-  fireEvent.pointerMove(point, { clientX: 110, clientY: 230 })
-  expect(bounds).not.toHaveBeenCalled()
+  fireEvent.pointerMove(point, { clientX: 120, clientY: 240 })
+  advanceCameraBy(20)
+  expect(bounds).toHaveBeenCalledTimes(1)
   tooltip = screen.getByRole('tooltip')
-  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '49px', top: '54px' })
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '44px', top: '54px' })
+})
+
+it('positions a remounted tooltip immediately at unchanged pointer coordinates', () => {
+  stubMedia({ compact: false, reduced: true })
+  originLeft = 75; originTop = 190
+  const { container } = render(<MapView {...props} />)
+  const points = container.querySelectorAll<SVGGElement>('.repo-point')
+
+  fireEvent.pointerEnter(points[0], { clientX: 100, clientY: 220 })
+  expect(screen.getByRole('tooltip').style.cssText).toContain('left: 39px')
+  fireEvent.pointerLeave(points[0])
+  expect(screen.queryByRole('tooltip')).toBeNull()
+  fireEvent.pointerEnter(points[1], { clientX: 100, clientY: 220 })
+
+  const tooltip = screen.getByRole('tooltip')
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
 })
 
 it('repositions a clamped tooltip when its observed height changes', () => {
@@ -519,9 +514,40 @@ it('repositions a clamped tooltip when its observed height changes', () => {
   expect({ left: tooltip.style.left, top: tooltip.style.top, width: tooltip.style.width })
     .toEqual({ left: '722px', top: '532px', width: '270px' })
 
-  reportResize(tooltip, 270, 220)
+  resizeObserver.report(tooltip, 270, 220)
   expect({ left: tooltip.style.left, top: tooltip.style.top, width: tooltip.style.width })
     .toEqual({ left: '722px', top: '472px', width: '270px' })
+})
+
+it.each(['missing', 'single'] as const)('falls back safely for %s border-box measurements', box => {
+  stubMedia({ compact: false, reduced: true })
+  const { container } = render(<MapView {...props} />)
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  fireEvent.pointerEnter(point, { clientX: 990, clientY: 690 })
+  const tooltip = screen.getByRole('tooltip')
+  Object.defineProperties(tooltip, {
+    offsetWidth: { configurable: true, value: 270 },
+    offsetHeight: { configurable: true, value: 220 },
+  })
+
+  expect(() => resizeObserver.report(tooltip, 270, 220, box)).not.toThrow()
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '722px', top: '472px' })
+})
+
+it('reuses the tooltip observer and keeps map resize notifications target-specific', () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  const observerCount = resizeObserver.observerCount()
+
+  fireEvent.pointerEnter(point, { clientX: 100, clientY: 100 })
+  fireEvent.pointerLeave(point)
+  fireEvent.pointerEnter(point, { clientX: 110, clientY: 110 })
+  expect(resizeObserver.observerCount()).toBe(observerCount)
+  width = 900
+  expect(() => resizeObserver.notify(svg)).not.toThrow()
+  expect(screen.getByRole('tooltip')).toBeDefined()
 })
 
 it('does not zoom when region placement moves the second click onto the SVG ancestor', () => {
