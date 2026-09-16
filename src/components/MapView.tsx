@@ -7,6 +7,8 @@ import type { AtlasPresentation } from '../presentation'
 import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, type Box, type Size } from '../map-geometry'
 
 const PLACEHOLDER_SIZE = { width: 1000, height: 700 }
+const TOOLTIP_WIDTH = 270
+const TOOLTIP_FALLBACK_SIZE = { width: TOOLTIP_WIDTH, height: 160 }
 const easeCubicInOut = (value: number) => ((value *= 2) <= 1 ? value ** 3 : (value -= 2) * value ** 2 + 2) / 2
 type ClickGesture = {
   token: number; kind: 'repo' | 'region'; target: AtlasRepo | string | null
@@ -22,6 +24,10 @@ type Viewport = {
   layoutToken: object
 }
 const sameTransform = (a: ZoomTransform, b: ZoomTransform) => a.x === b.x && a.y === b.y && a.k === b.k
+const positionTooltip = (anchor: { x: number; y: number }, tooltip: Size, viewport: Size) => ({
+  left: Math.max(8, Math.min(anchor.x + 14, viewport.width - tooltip.width - 8)),
+  top: Math.max(8, Math.min(anchor.y + 14, viewport.height - tooltip.height - 8)),
+})
 
 export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
@@ -39,7 +45,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
   const [focusedRegion, setFocusedRegion] = useState<number | null>(null)
   const [tooltip, setTooltip] = useState({ x: 0, y: 0 })
-  const [tooltipSize, setTooltipSize] = useState({ width: 270, height: 160 })
+  const svgOrigin = useRef({ left: 0, top: 0 })
+  const tooltipSize = useRef<Size>(TOOLTIP_FALLBACK_SIZE)
+  const tooltipAnchorRef = useRef({ x: 0, y: 0 })
   const consumedRequest = useRef<number | null>(null)
   const previousView = useRef(view)
   const pointerStart = useRef<{ x: number; y: number; type: string; dragged: boolean } | null>(null)
@@ -64,9 +72,12 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (clickGesture.current?.timer) clearTimeout(clickGesture.current.timer)
     clickGesture.current = null
   }, [])
-  const updateTooltipPointer = useCallback((clientX: number, clientY: number) => {
-    const rect = svgRef.current?.getBoundingClientRect()
-    if (rect) setTooltip({ x: clientX - rect.left, y: clientY - rect.top })
+  const updateTooltipPointer = useCallback((clientX: number, clientY: number, refreshOrigin = false) => {
+    if (refreshOrigin) {
+      const rect = svgRef.current?.getBoundingClientRect()
+      if (rect) svgOrigin.current = { left: rect.left, top: rect.top }
+    }
+    setTooltip({ x: clientX - svgOrigin.current.left, y: clientY - svgOrigin.current.top })
   }, [])
   const measure = useMemo(() => {
     const context = typeof CanvasRenderingContext2D === 'undefined' ? null : document.createElement('canvas').getContext('2d')
@@ -207,6 +218,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const node = svgRef.current!
     const resize = () => {
       const rect = node.getBoundingClientRect()
+      svgOrigin.current = { left: rect.left, top: rect.top }
       if (rect.width <= 0 || rect.height <= 0) return
       const current = viewportRef.current
       const behavior = zoomRef.current!
@@ -316,12 +328,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
 
   const relativeZoom = transform.k / fit.k
   const activeRepo = hover && visible.has(hover.full_name) ? hover : focused && visible.has(focused.full_name) ? focused : null
-  useLayoutEffect(() => {
-    if (!activeRepo || !tooltipRef.current) return
-    const { offsetWidth: width, offsetHeight: height } = tooltipRef.current
-    if (width > 0 && height > 0) setTooltipSize(current => current.width === width && current.height === height
-      ? current : { width, height })
-  }, [activeRepo, size.width, size.height])
   const drawnRadius = useCallback((repo: AtlasRepo) => sizes.radius(repo.file_count) / fit.k * (repo === selected || repo === activeRepo ? 1.3 : 1), [sizes, fit.k, selected, activeRepo])
   const paths = useMemo(() => data.clusters.flatMap(cluster => (view.layoutAlt ? cluster.contours_alt ?? cluster.contours : cluster.contours).outer.map((ring, index) => ({
     id: cluster.id, key: `${cluster.id}-${index}`, path: `M${smoothRing(ring).map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L')}Z`,
@@ -398,7 +404,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     {data.repos.map(repo => <g key={repo.full_name} transform={`translate(${pointX(repo)} ${pointY(repo)})`}
       className={`repo-point ${repo === selected ? 'selected' : ''} ${repo.low_confidence ? 'low-confidence' : ''}`}
       opacity={visible.has(repo.full_name) ? 1 : .1} pointerEvents={visible.has(repo.full_name) ? 'auto' : 'none'}
-      onPointerEnter={event => { setHover(repo); updateTooltipPointer(event.clientX, event.clientY) }}
+      onPointerEnter={event => { setHover(repo); updateTooltipPointer(event.clientX, event.clientY, true) }}
       onPointerMove={event => updateTooltipPointer(event.clientX, event.clientY)} onPointerLeave={() => setHover(null)}
       onFocus={() => setFocused(repo)} onBlur={() => setFocused(null)}
       onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
@@ -415,10 +421,35 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const radius = drawnRadius(activeRepo) * transform.k
     return { x: x + radius, y: y - radius }
   })() : tooltip
-  const tooltipPosition = {
-    left: Math.max(8, Math.min(tooltipAnchor.x + 14, size.width - tooltipSize.width - 8)),
-    top: Math.max(8, Math.min(tooltipAnchor.y + 14, size.height - tooltipSize.height - 8)),
-  }
+  const hasTooltip = Boolean(activeRepo)
+  const viewportWidth = size.width
+  const viewportHeight = size.height
+  const positionVisibleTooltip = useCallback((node = tooltipRef.current) => {
+    if (!node) return
+    const next = positionTooltip(tooltipAnchorRef.current, tooltipSize.current, { width: viewportWidth, height: viewportHeight })
+    node.style.left = `${next.left}px`
+    node.style.top = `${next.top}px`
+  }, [viewportWidth, viewportHeight])
+  const tooltipX = tooltipAnchor.x
+  const tooltipY = tooltipAnchor.y
+  useLayoutEffect(() => {
+    tooltipAnchorRef.current = { x: tooltipX, y: tooltipY }
+    positionVisibleTooltip()
+  }, [tooltipX, tooltipY, positionVisibleTooltip])
+  useLayoutEffect(() => {
+    const node = tooltipRef.current
+    if (!hasTooltip || !node) return
+    const observer = new ResizeObserver(([entry]) => {
+      const borderBox = entry?.borderBoxSize[0]
+      const width = borderBox?.inlineSize ?? node.offsetWidth
+      const height = borderBox?.blockSize ?? node.offsetHeight
+      if (width <= 0 || height <= 0) return
+      tooltipSize.current = { width, height }
+      positionVisibleTooltip(node)
+    })
+    observer.observe(node)
+    return () => observer.disconnect()
+  }, [hasTooltip, positionVisibleTooltip])
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
@@ -494,7 +525,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    {activeRepo && <div ref={tooltipRef} className="tooltip" role="tooltip" style={tooltipPosition}>
+    {activeRepo && <div ref={tooltipRef} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
       <strong>{activeRepo.name}</strong><span>{activeRepo.one_liner}</span><small>{activeRepo.primary_language} · updated {formatDate(activeRepo.pushed_at)}</small>
       {activeRepo.low_confidence && <small>Sparse README / low-confidence summary</small>}
     </div>}
