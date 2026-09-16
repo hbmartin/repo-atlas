@@ -330,12 +330,14 @@ it('clears every filter inside the mobile dialog while keeping selection and lay
   await user.click(screen.getByRole('button', { name: 'Filters · 3' }))
   const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
   const done = within(dialog).getByRole('button', { name: 'Done' })
+  const doneFocus = vi.spyOn(done, 'focus')
   expect(done.parentElement?.lastElementChild).toBe(done)
   expect(done.previousElementSibling?.textContent).toBe('Clear all')
   await user.click(within(dialog).getByRole('button', { name: 'Clear all' }))
   expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: [], regions: [], since: null, layoutAlt: true })
   expect(within(dialog).queryByRole('group', { name: 'Active filters' })).toBeNull()
   expect(document.activeElement).toBe(done)
+  expect(doneFocus).toHaveBeenCalledWith({ preventScroll: true })
   await user.keyboard('{Shift>}{Tab}{/Shift}')
   expect(dialog.contains(document.activeElement)).toBe(true)
   await user.keyboard('{Escape}')
@@ -366,8 +368,11 @@ it('focuses the Filters button after removing the last controls chip on compact 
   const { container } = render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
   const chip = container.querySelector<HTMLButtonElement>('.controls .active-filters button')!
+  const filterButton = screen.getByRole('button', { name: 'Filters · 1' })
+  const focus = vi.spyOn(filterButton, 'focus')
   await user.click(chip)
-  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Filters' }))
+  expect(document.activeElement).toBe(filterButton)
+  expect(focus).toHaveBeenCalledWith({ preventScroll: true })
 })
 
 it('focuses the Filters button after clearing empty results on compact screens', async () => {
@@ -390,9 +395,11 @@ it('scrolls the next chip into view when removing one from a long controls strip
     const { container } = render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
     const strip = container.querySelector('.controls .active-filters')!
-    await user.click(within(strip as HTMLElement).getByRole('button', { name: 'Remove language filter Python' }))
     const next = within(strip as HTMLElement).getByRole('button', { name: 'Remove language filter Swift' })
+    const focus = vi.spyOn(next, 'focus')
+    await user.click(within(strip as HTMLElement).getByRole('button', { name: 'Remove language filter Python' }))
     expect(document.activeElement).toBe(next)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
     expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
     expect(scrollIntoView.mock.instances.at(-1)).toBe(next)
   } finally {
@@ -408,10 +415,12 @@ it('uses one clear behavior and restores focus for controls and no-results actio
   const { container } = render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
   const search = screen.getByRole('combobox', { name: 'Search repositories' })
+  const searchFocus = vi.spyOn(search, 'focus')
   const controlsClear = container.querySelector<HTMLButtonElement>('.controls > .clear-filters')!
   await user.click(controlsClear)
   expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: [], layoutAlt: true })
   expect(document.activeElement).toBe(search)
+  expect(searchFocus).toHaveBeenCalledWith({ preventScroll: true })
 
   window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=Rust&layout=alt')
   fireEvent.popState(window)

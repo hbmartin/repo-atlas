@@ -30,16 +30,43 @@ data.clusters.push({ ...data.clusters[0], id: 1, label: 'Second Region', label_a
 const presentation = atlasPresentation(data)
 const props = { data, presentation, view: empty, visible: new Set(data.repos.map(repo => repo.full_name)), selected: null, onSelect: vi.fn() }
 let width = 1000, height = 700
+let originLeft = 0, originTop = 0
 let resize: (() => void) | undefined
+type ResizeRegistration = { callback: ResizeObserverCallback; observer: ResizeObserver; targets: Set<Element> }
+let resizeRegistrations: ResizeRegistration[] = []
+
+function reportResize(target: Element, reportedWidth: number, reportedHeight: number) {
+  const registration = resizeRegistrations.find(item => item.targets.has(target))
+  if (!registration) throw new Error('Element is not observed')
+  const borderBoxSize = [{ inlineSize: reportedWidth, blockSize: reportedHeight }] as ResizeObserverSize[]
+  const entry = { target, borderBoxSize } as unknown as ResizeObserverEntry
+  act(() => registration.callback([entry], registration.observer))
+}
 
 beforeEach(() => {
   installCameraClock()
   placementSpy.mockClear()
-  width = 1000; height = 700
+  width = 1000; height = 700; originLeft = 0; originTop = 0
   resize = undefined
-  vi.stubGlobal('ResizeObserver', class { constructor(callback: () => void) { resize = callback } observe() {} disconnect() {} })
+  resizeRegistrations = []
+  vi.stubGlobal('ResizeObserver', class {
+    private registration: ResizeRegistration
+    constructor(callback: ResizeObserverCallback) {
+      this.registration = { callback, observer: this as unknown as ResizeObserver, targets: new Set() }
+      resizeRegistrations.push(this.registration)
+    }
+    observe(target: Element) {
+      this.registration.targets.add(target)
+      if (target instanceof SVGSVGElement) resize = () => this.registration.callback([], this.registration.observer)
+    }
+    unobserve(target: Element) { this.registration.targets.delete(target) }
+    disconnect() { this.registration.targets.clear() }
+  })
   stubMedia({ compact: true, reduced: true })
-  vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({ left: 0, top: 0, width, height, right: width, bottom: height, x: 0, y: 0, toJSON() {} }))
+  vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
+    left: originLeft, top: originTop, width, height, right: originLeft + width, bottom: originTop + height,
+    x: originLeft, y: originTop, toJSON() {},
+  }))
 })
 afterEach(() => { cleanup(); uninstallCameraClock(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
@@ -435,10 +462,7 @@ it('moves keyboard focus with arrow-key selection after a dot has focus', () => 
 
 it('keeps the focused tooltip anchored to its dot throughout an arrow-key camera pan', () => {
   stubMedia({ compact: false, reduced: false })
-  vi.spyOn(SVGSVGElement.prototype, 'getBoundingClientRect').mockImplementation(() => ({
-    left: 75, top: 190, width, height, right: 75 + width, bottom: 190 + height,
-    x: 75, y: 190, toJSON() {},
-  }))
+  originLeft = 75; originTop = 190
   const { container } = render(<Harness initial={first} />)
   const svg = container.querySelector('svg')!
   const firstDot = container.querySelector<SVGCircleElement>('.repo-dot[data-full-name="owner/example"]')!
@@ -464,6 +488,40 @@ it('keeps the focused tooltip anchored to its dot throughout an arrow-key camera
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
   finishCameraTransition()
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
+})
+
+it('uses a cached SVG origin for tooltip pointer moves', () => {
+  stubMedia({ compact: false, reduced: true })
+  originLeft = 75; originTop = 190
+  const { container } = render(<MapView {...props} />)
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  const bounds = vi.mocked(SVGSVGElement.prototype.getBoundingClientRect)
+  bounds.mockClear()
+
+  fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+  expect(bounds).toHaveBeenCalledTimes(1)
+  let tooltip = screen.getByRole('tooltip')
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
+
+  bounds.mockClear()
+  fireEvent.pointerMove(point, { clientX: 110, clientY: 230 })
+  expect(bounds).not.toHaveBeenCalled()
+  tooltip = screen.getByRole('tooltip')
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '49px', top: '54px' })
+})
+
+it('repositions a clamped tooltip when its observed height changes', () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container } = render(<MapView {...props} />)
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  fireEvent.pointerEnter(point, { clientX: 990, clientY: 690 })
+  const tooltip = screen.getByRole('tooltip')
+  expect({ left: tooltip.style.left, top: tooltip.style.top, width: tooltip.style.width })
+    .toEqual({ left: '722px', top: '532px', width: '270px' })
+
+  reportResize(tooltip, 270, 220)
+  expect({ left: tooltip.style.left, top: tooltip.style.top, width: tooltip.style.width })
+    .toEqual({ left: '722px', top: '472px', width: '270px' })
 })
 
 it('does not zoom when region placement moves the second click onto the SVG ancestor', () => {

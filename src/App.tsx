@@ -41,12 +41,6 @@ const FOCUSABLE = [
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
 
-function sameFilters(a: ViewState, b: ViewState) {
-  return a.since === b.since
-    && a.languages.length === b.languages.length && a.languages.every((name, index) => name === b.languages[index])
-    && a.regions.length === b.regions.length && a.regions.every((name, index) => name === b.regions[index])
-}
-
 export default function App() {
   const compact = useMediaQuery(COMPACT_MEDIA_QUERY)
   const [data, setData] = useState<AtlasData | null>(null)
@@ -116,10 +110,10 @@ export default function App() {
     const fallback = request.scope === 'dialog' && mobileFilters ? doneButton.current
       : compact ? filterButton.current : searchInput.current
     if (nextChip) {
-      nextChip.focus()
+      nextChip.focus({ preventScroll: true })
       nextChip.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
-    } else fallback?.focus()
-  })
+    } else fallback?.focus({ preventScroll: true })
+  }, [view.languages, view.regions, view.since, mobileFilters, compact])
 
   useEffect(() => {
     if (!data) return
@@ -263,12 +257,10 @@ export default function App() {
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
   const clearFilters = (scope: FilterFocusRequest['scope']) => {
     const current = viewRef.current
-    if (!current.languages.length && !current.regions.length && !current.since) return
     pendingFilterFocus.current = { scope, index: null }
     setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })
   }
   const removeActiveFilter = (next: ViewState, index: number, scope: FilterFocusRequest['scope']) => {
-    if (sameFilters(viewRef.current, next)) return
     pendingFilterFocus.current = { scope, index }
     setView(next)
   }
