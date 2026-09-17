@@ -30,6 +30,7 @@ const EMPTY_VIEW: ViewState = {
 }
 
 type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
+type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean }
 
 const FOCUSABLE = [
   'a[href]',
@@ -101,18 +102,23 @@ export default function App() {
       languages: preserveValues(current.languages, nextLanguages),
       regions: preserveValues(current.regions, nextRegions),
     }
-    const changed = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
-    if (options?.navigate !== false && next.repo && (next.repo !== current.repo || options?.navigate)) {
-      requestNavigation('repo', next.repo, options?.clickToken)
-    } else if (!next.repo || options?.navigate === false || filtersChanged) {
+    const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
+    const shouldNavigate = options?.navigate !== false && normalized.repo !== null
+      && (normalized.repo !== current.repo || options?.navigate === true)
+    if (!stateChanged) {
+      if (shouldNavigate) requestNavigation('repo', normalized.repo!, options?.clickToken)
+      return { stateChanged: false, filtersChanged: false } satisfies ViewUpdateResult
+    }
+    if (shouldNavigate) {
+      requestNavigation('repo', normalized.repo!, options?.clickToken)
+    } else if (!normalized.repo || options?.navigate === false || filtersChanged) {
       setNavigationRequest(null)
     }
-    if (!changed) return false
     viewRef.current = normalized
     setViewState(normalized)
     setUrlWarning([])
     window.history.replaceState(null, '', writeViewState(normalized))
-    return true
+    return { stateChanged: true, filtersChanged } satisfies ViewUpdateResult
   }, [requestNavigation])
 
   useLayoutEffect(() => {
@@ -272,11 +278,11 @@ export default function App() {
   const clearFilters = (scope: FilterFocusRequest['scope']) => {
     const current = viewRef.current
     pendingFilterFocus.current = { scope, index: null }
-    if (!setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })) pendingFilterFocus.current = null
+    if (!setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt }).filtersChanged) pendingFilterFocus.current = null
   }
   const removeActiveFilter = (next: ViewState, index: number, scope: FilterFocusRequest['scope']) => {
     pendingFilterFocus.current = { scope, index }
-    if (!setView(next)) pendingFilterFocus.current = null
+    if (!setView(next).filtersChanged) pendingFilterFocus.current = null
   }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)
@@ -301,7 +307,13 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={() => { setUrlWarning([]); setView(EMPTY_VIEW) }}>Reset link</button>
+          <button onClick={() => {
+            const result = setView(EMPTY_VIEW)
+            if (!result.stateChanged) {
+              setUrlWarning([])
+              window.history.replaceState(null, '', writeViewState(EMPTY_VIEW))
+            }
+          }}>Reset link</button>
         </div>
       )}
       <header className="topbar" inert={backgroundInert}>

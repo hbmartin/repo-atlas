@@ -254,6 +254,22 @@ describe('App mobile filters', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
+  it('canonicalizes an invalid-only URL when Reset link leaves view state unchanged', async () => {
+    const user = userEvent.setup()
+    window.history.replaceState(null, '', '/?repo=missing%2Frepo&wat=1#invalid-state')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    expect(currentMap().view).toEqual({ repo: null, languages: [], regions: [], since: null, layoutAlt: false })
+    expect(screen.getByRole('status').textContent).toContain('missing/repo')
+
+    await user.click(screen.getByRole('button', { name: 'Reset link' }))
+
+    expect(window.location.pathname).toBe('/')
+    expect(window.location.search).toBe('')
+    expect(window.location.hash).toBe('')
+    expect(screen.queryByRole('status')).toBeNull()
+  })
+
   it('preserves unknown URL state and the hash during popstate restoration', async () => {
     render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
@@ -434,7 +450,7 @@ it('scrolls the next chip into view when removing one from a long controls strip
   }
 })
 
-it('clears a focus request when a normalized filter update changes nothing', async () => {
+it('clears a focus request when only stale non-filter state changes', async () => {
   let execute: ((input: unknown) => unknown) | undefined
   Object.defineProperty(document, 'modelContext', {
     configurable: true,
@@ -448,8 +464,11 @@ it('clears a focus request when a normalized filter update changes nothing', asy
   mapButton.focus()
   const filters = currentActiveFilters()
 
+  act(() => { execute?.({ layoutAlt: true }) })
+  expect(currentMap().view.layoutAlt).toBe(true)
   act(() => filters.onRemove({ ...filters.view, languages: ['TypeScript', 'TypeScript'] }, 0))
   expect(currentMap().view.languages).toEqual(['TypeScript'])
+  expect(currentMap().view.layoutAlt).toBe(false)
   act(() => { execute?.({ since: '2025-06' }) })
 
   expect(currentMap().view.since).toBe('2025-06')
@@ -497,6 +516,36 @@ it('acknowledges only the current navigation request and does not replay consume
   fireEvent.click(screen.getByRole('button', { name: 'List' }))
   fireEvent.click(screen.getByRole('button', { name: 'Map' }))
   expect(currentMap().navigationRequest).toBeNull()
+})
+
+it('keeps a pending region navigation when a normalized view update is a no-op', async () => {
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  act(() => currentMap().onRegion?.('Developer Tools'))
+  const pending = currentMap().navigationRequest
+  expect(pending).toMatchObject({ kind: 'region', target: 'Developer Tools' })
+  const filters = currentActiveFilters()
+
+  act(() => filters.onRemove({
+    ...filters.view,
+    regions: [...filters.view.regions, ...filters.view.regions],
+  }, 0))
+
+  expect(currentMap().navigationRequest).toEqual(pending)
+})
+
+it('issues a fresh navigation request when the selected repository is explicitly reselected', async () => {
+  window.history.replaceState(null, '', '?repo=owner%2Fexample')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  const initial = currentMap().navigationRequest!
+  act(() => currentMap().onNavigationHandled?.(initial.nonce))
+  expect(currentMap().navigationRequest).toBeNull()
+
+  act(() => currentMap().onSelect(currentMap().data.repos[0]))
+
+  expect(currentMap().navigationRequest).toMatchObject({ kind: 'repo', target: 'owner/example' })
+  expect(currentMap().navigationRequest!.nonce).toBeGreaterThan(initial.nonce)
 })
 
 it('keeps presentation and visibility stable on selection and projection updates', async () => {

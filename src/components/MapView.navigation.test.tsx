@@ -496,6 +496,18 @@ it('caches the SVG origin for pointer moves and refreshes it on scroll', () => {
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '44px', top: '54px' })
 })
 
+it('does not read the SVG origin when scrolling without a visible tooltip', () => {
+  stubMedia({ compact: false, reduced: true })
+  render(<MapView {...props} />)
+  const bounds = vi.mocked(SVGSVGElement.prototype.getBoundingClientRect)
+  bounds.mockClear()
+
+  fireEvent.scroll(window)
+  advanceCameraBy(20)
+
+  expect(bounds).not.toHaveBeenCalled()
+})
+
 it('positions a remounted tooltip immediately at unchanged pointer coordinates', () => {
   stubMedia({ compact: false, reduced: true })
   originLeft = 75; originTop = 190
@@ -549,7 +561,7 @@ it('restores the pointer anchor after a focused tooltip temporarily takes over',
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
 })
 
-it('repositions a hover tooltip when controls move and resize the map', () => {
+it('repositions a hover tooltip once when controls move and resize the map', () => {
   stubMedia({ compact: false, reduced: true })
   originLeft = 75; originTop = 190
   const { container } = render(<MapView {...props} />)
@@ -557,6 +569,8 @@ it('repositions a hover tooltip when controls move and resize the map', () => {
   const point = container.querySelector<SVGGElement>('.repo-point')!
   fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
   expect(screen.getByRole('tooltip').style.top).toBe('44px')
+  const frame = vi.spyOn(window, 'requestAnimationFrame')
+  frame.mockClear()
 
   originTop = 240
   height = 650
@@ -564,6 +578,7 @@ it('repositions a hover tooltip when controls move and resize the map', () => {
 
   const tooltip = screen.getByRole('tooltip')
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '8px' })
+  expect(frame).not.toHaveBeenCalled()
 })
 
 it('repositions a clamped tooltip when its observed height changes', () => {
