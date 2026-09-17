@@ -270,6 +270,21 @@ describe('click sequences', () => {
     expect(current.apply(before.invert(point))[0]).toBeCloseTo(point[0])
     expect(current.apply(before.invert(point))[1]).toBeCloseTo(point[1])
   })
+  it('passes the committed click token when rolling back a late double-click', () => {
+    const onSelect = vi.fn()
+    const { container } = render(<MapView {...props} view={{ ...empty, repo: first.full_name }} selected={first} onSelect={onSelect} />)
+    const svg = container.querySelector('svg')!
+    const point = zoomTransform(svg).apply([second.x, second.y])
+    click(svg, point)
+    act(() => vi.advanceTimersByTime(350))
+    const clickToken = onSelect.mock.calls[0]?.[1]?.clickToken
+    expect(clickToken).toEqual(expect.any(Number))
+
+    click(svg, point, 2)
+    fireEvent.doubleClick(svg, { clientX: point[0], clientY: point[1], detail: 2 })
+
+    expect(onSelect).toHaveBeenLastCalledWith(first, { navigate: false, clickToken })
+  })
   it('interrupts animated selection with a late double-click from the original camera basis', () => {
     stubMedia({ compact: false, reduced: false })
     const { container } = render(<Harness initial={first} />)
@@ -622,6 +637,25 @@ it('repositions a hover tooltip once when controls move and resize the map', () 
   const tooltip = screen.getByRole('tooltip')
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '8px' })
   expect(frame).not.toHaveBeenCalled()
+})
+
+it('positions a keyboard tooltip only once with the final resized anchor', async () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  fireEvent.focus(container.querySelector<SVGCircleElement>('.repo-dot')!)
+  const tooltip = screen.getByRole('tooltip')
+  const mutations: MutationRecord[] = []
+  const observer = new MutationObserver(records => mutations.push(...records))
+  observer.observe(tooltip, { attributes: true, attributeFilter: ['style'] })
+
+  width = 760
+  height = 520
+  resizeObserver.notify(svg)
+  await Promise.resolve()
+  observer.disconnect()
+
+  expect(mutations).toHaveLength(2)
 })
 
 it('repositions a hover tooltip when a breakpoint moves the map without resizing it', () => {

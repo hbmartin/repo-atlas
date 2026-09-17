@@ -9,7 +9,7 @@ import {
 } from './data'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from './types'
 import { DetailPanel } from './components/DetailPanel'
-import { ActiveFilters } from './components/ActiveFilters'
+import { ActiveFilters, type ActiveFilterRemoval } from './components/ActiveFilters'
 import { Filters } from './components/Filters'
 import { ListView } from './components/ListView'
 import { Loading } from './components/Loading'
@@ -18,7 +18,7 @@ import { SearchBox } from './components/SearchBox'
 import { COMPACT_MEDIA_QUERY, formatDate, toggleValue, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { atlasPresentation, knownLanguage, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues } from './presentation'
+import { atlasPresentation, knownLanguage, knownRegion, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -33,6 +33,51 @@ type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
 type ViewUpdate = ViewState | ((current: ViewState) => ViewState)
 type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean }
 type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: ViewState }
+
+const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'languages', 'regions', 'since', 'layoutAlt'])
+
+function validateToolViewUpdate(input: unknown, data: AtlasData): Partial<ViewState> {
+  if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Input must be an object.')
+  const value = input as Record<string, unknown>
+  const unknownKey = Object.keys(value).find(key => !TOOL_VIEW_KEYS.has(key as keyof ViewState))
+  if (unknownKey) throw new Error(`Unknown view property: ${unknownKey}.`)
+  const update: Partial<ViewState> = {}
+
+  if ('repo' in value) {
+    if (value.repo !== null && (typeof value.repo !== 'string' || !value.repo.trim())) {
+      throw new Error('repo must be an exact owner/name or null.')
+    }
+    if (typeof value.repo === 'string' && !data.repos.some(item => item.full_name === value.repo)) {
+      throw new Error('Unknown repository.')
+    }
+    update.repo = value.repo as string | null
+  }
+  if ('languages' in value) {
+    if (!Array.isArray(value.languages)) throw new Error('languages must be an array.')
+    if (!value.languages.every(name => typeof name === 'string' && knownLanguage(data, name))) {
+      throw new Error('Unknown language category or raw primary-language filter.')
+    }
+    update.languages = normalizeLanguages(value.languages as string[])
+  }
+  if ('regions' in value) {
+    if (!Array.isArray(value.regions)) throw new Error('regions must be an array.')
+    if (!value.regions.every(name => typeof name === 'string' && knownRegion(data, name))) {
+      throw new Error('Unknown region filter.')
+    }
+    update.regions = normalizeRegions(value.regions as string[])
+  }
+  if ('since' in value) {
+    if (value.since !== null && (typeof value.since !== 'string' || !validMonth(value.since))) {
+      throw new Error('since must use a valid YYYY-MM month or null.')
+    }
+    update.since = value.since as string | null
+  }
+  if ('layoutAlt' in value) {
+    if (typeof value.layoutAlt !== 'boolean') throw new Error('layoutAlt must be a boolean.')
+    update.layoutAlt = value.layoutAlt
+  }
+  return update
+}
 
 const FOCUSABLE = [
   'a[href]',
@@ -78,7 +123,6 @@ export default function App() {
   const dialogChips = useRef<HTMLDivElement>(null)
   const pendingFilterFocus = useRef<FilterFocusRequest | null>(null)
 
-  useEffect(() => { viewRef.current = view }, [view])
   useEffect(() => {
     loadAtlas()
       .then((atlas) => {
@@ -109,7 +153,9 @@ export default function App() {
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
-    else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
+    else if (options?.navigate === false && options.clickToken !== undefined) {
+      setNavigationRequest(current => current?.clickToken === options.clickToken ? null : current)
+    } else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
       setNavigationRequest(null)
     }
     if (stateChanged) {
@@ -211,34 +257,24 @@ export default function App() {
       },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute(input) {
-        if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Input must be an object.')
-        const value = input as Partial<ViewState>
-        if (value.languages !== undefined && !Array.isArray(value.languages)) throw new Error('languages must be an array.')
-        if (value.regions !== undefined && !Array.isArray(value.regions)) throw new Error('regions must be an array.')
-        if (typeof value.repo === 'string' && !value.repo.trim()) throw new Error('repo must be an exact owner/name or null.')
+        const value = validateToolViewUpdate(input, data)
         const next = setView((current) => {
           const languages = value.languages ?? current.languages
           const regions = value.regions ?? current.regions
           const repo = value.repo === undefined ? current.repo : value.repo
           const since = value.since === undefined ? current.since : value.since
-          if (!languages.every((name) => knownLanguage(data, name))) throw new Error('Unknown language category or raw primary-language filter.')
-          if (!regions.every((name) => name === 'Unclustered' || data.clusters.some((item) => item.label === name))) {
-            throw new Error('Unknown region filter.')
-          }
-          if (repo !== null && !data.repos.some((item) => item.full_name === repo)) throw new Error('Unknown repository.')
-          if (since && !validMonth(since)) throw new Error('since must use a valid YYYY-MM month.')
           return {
             repo,
-            languages: normalizeLanguages(languages),
-            regions: normalizeRegions(regions),
+            languages,
+            regions,
             since,
             layoutAlt: value.layoutAlt ?? current.layoutAlt,
           }
         }).view
         return {
           selected_repo: next.repo,
-          languages: next.languages,
-          regions: next.regions,
+          languages: [...next.languages],
+          regions: [...next.regions],
           since: next.since,
           alternate_layout: next.layoutAlt,
         }
@@ -282,9 +318,26 @@ export default function App() {
     pendingFilterFocus.current = { scope, index: null }
     if (!setView(current => ({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })).filtersChanged) pendingFilterFocus.current = null
   }
-  const removeActiveFilter = (update: (current: ViewState) => ViewState, index: number, scope: FilterFocusRequest['scope']) => {
-    pendingFilterFocus.current = { scope, index }
-    if (!setView(update).filtersChanged) pendingFilterFocus.current = null
+  const removeActiveFilter = (filter: ActiveFilterRemoval, scope: FilterFocusRequest['scope']) => {
+    pendingFilterFocus.current = null
+    const result = setView(current => {
+      if (filter.kind === 'language') {
+        const index = current.languages.indexOf(filter.value)
+        if (index < 0) return current
+        pendingFilterFocus.current = { scope, index }
+        return { ...current, languages: current.languages.filter(value => value !== filter.value) }
+      }
+      if (filter.kind === 'region') {
+        const index = current.regions.indexOf(filter.value)
+        if (index < 0) return current
+        pendingFilterFocus.current = { scope, index: current.languages.length + index }
+        return { ...current, regions: current.regions.filter(value => value !== filter.value) }
+      }
+      if (!current.since) return current
+      pendingFilterFocus.current = { scope, index: current.languages.length + current.regions.length }
+      return { ...current, since: null }
+    })
+    if (!result.filtersChanged) pendingFilterFocus.current = null
   }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)
@@ -309,9 +362,16 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={() => {
+          <button onClick={(event) => {
+            const keyboardActivation = event.detail === 0
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            window.requestAnimationFrame(() => focusElement(searchInput.current))
+            if (mobileFilters || compact || keyboardActivation) {
+              window.requestAnimationFrame(() => {
+                if (mobileFilters) focusElement(doneButton.current, true)
+                else if (compact) focusElement(filterButton.current)
+                else focusElement(searchInput.current)
+              })
+            }
           }}>Reset link</button>
         </div>
       )}
@@ -346,7 +406,7 @@ export default function App() {
           </button>
         )}
         <ActiveFilters view={view} groupRef={controlsChips}
-          onRemove={(next, index) => removeActiveFilter(next, index, 'controls')} />
+          onRemove={filter => removeActiveFilter(filter, 'controls')} />
       </section>
       {guideOpen && <GuideDialog onClose={() => { setGuideOpen(false); setHighlightRegion(null) }}>{guide}</GuideDialog>}
       {mobileFilters && (
@@ -360,7 +420,7 @@ export default function App() {
               </div>
             </header>
             <ActiveFilters view={view} groupRef={dialogChips}
-              onRemove={(next, index) => removeActiveFilter(next, index, 'dialog')} />
+              onRemove={filter => removeActiveFilter(filter, 'dialog')} />
             <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
           </div>
         </div>
