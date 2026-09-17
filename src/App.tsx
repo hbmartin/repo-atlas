@@ -18,7 +18,7 @@ import { SearchBox } from './components/SearchBox'
 import { COMPACT_MEDIA_QUERY, formatDate, toggleValue, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { atlasPresentation, knownLanguage, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues } from './presentation'
+import { atlasPresentation, knownLanguage, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -40,12 +40,6 @@ const FOCUSABLE = [
   'textarea:not([disabled])',
   '[tabindex]:not([tabindex="-1"])',
 ].join(',')
-
-function sameFilters(a: ViewState, b: ViewState) {
-  return a.since === b.since
-    && a.languages.length === b.languages.length && a.languages.every((name, index) => name === b.languages[index])
-    && a.regions.length === b.regions.length && a.regions.every((name, index) => name === b.regions[index])
-}
 
 function focusElement(element: HTMLElement | null, reveal = false) {
   if (!element) return
@@ -98,18 +92,27 @@ export default function App() {
 
   const setView = useCallback((next: ViewState, options?: SelectionOptions) => {
     const current = viewRef.current
-    const normalized = { ...next,
-      languages: preserveValues(current.languages, normalizeLanguages(next.languages)),
-      regions: preserveValues(current.regions, normalizeRegions(next.regions)) }
+    const nextLanguages = normalizeLanguages(next.languages)
+    const nextRegions = normalizeRegions(next.regions)
+    const filtersChanged = next.since !== current.since
+      || !sameValues(nextLanguages, current.languages) || !sameValues(nextRegions, current.regions)
+    const normalized = {
+      ...next,
+      languages: preserveValues(current.languages, nextLanguages),
+      regions: preserveValues(current.regions, nextRegions),
+    }
+    const changed = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
     if (options?.navigate !== false && next.repo && (next.repo !== current.repo || options?.navigate)) {
       requestNavigation('repo', next.repo, options?.clickToken)
-    } else if (!next.repo || options?.navigate === false || normalized.languages !== current.languages || normalized.regions !== current.regions || next.since !== current.since) {
+    } else if (!next.repo || options?.navigate === false || filtersChanged) {
       setNavigationRequest(null)
     }
+    if (!changed) return false
     viewRef.current = normalized
     setViewState(normalized)
     setUrlWarning([])
     window.history.replaceState(null, '', writeViewState(normalized))
+    return true
   }, [requestNavigation])
 
   useLayoutEffect(() => {
@@ -143,7 +146,7 @@ export default function App() {
 
   const closeMobileFilters = useCallback(() => {
     setMobileFilters(false)
-    window.requestAnimationFrame(() => focusElement(filterButton.current))
+    window.requestAnimationFrame(() => focusElement(filterButton.current, true))
   }, [])
 
   useEffect(() => {
@@ -268,14 +271,12 @@ export default function App() {
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
   const clearFilters = (scope: FilterFocusRequest['scope']) => {
     const current = viewRef.current
-    if (!current.languages.length && !current.regions.length && !current.since) return
     pendingFilterFocus.current = { scope, index: null }
-    setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })
+    if (!setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })) pendingFilterFocus.current = null
   }
   const removeActiveFilter = (next: ViewState, index: number, scope: FilterFocusRequest['scope']) => {
-    if (sameFilters(viewRef.current, next)) return
     pendingFilterFocus.current = { scope, index }
-    setView(next)
+    if (!setView(next)) pendingFilterFocus.current = null
   }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)

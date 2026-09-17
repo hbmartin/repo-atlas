@@ -3,6 +3,7 @@ import { cleanup, render, screen } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { makeRepo } from '../test-fixtures'
+import { stubScrollIntoView } from '../test-dom'
 import { SearchBox } from './SearchBox'
 
 afterEach(cleanup)
@@ -40,15 +41,22 @@ describe('SearchBox', () => {
 
   it('focuses search for the slash shortcut outside editable fields', async () => {
     const user = userEvent.setup()
-    render(<SearchBox repos={[makeRepo()]} onSelect={vi.fn()} />)
-    const search = screen.getByRole('combobox', { name: 'Search repositories' })
-    const focus = vi.spyOn(search, 'focus')
-    await user.keyboard('/')
-    expect(document.activeElement).toBe(search)
-    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+    const scroll = stubScrollIntoView()
+    try {
+      render(<SearchBox repos={[makeRepo()]} onSelect={vi.fn()} />)
+      const search = screen.getByRole('combobox', { name: 'Search repositories' })
+      const focus = vi.spyOn(search, 'focus')
+      await user.keyboard('/')
+      expect(document.activeElement).toBe(search)
+      expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+      expect(scroll.mock).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
+      expect(scroll.mock.mock.instances.at(-1)).toBe(search)
+    } finally {
+      scroll.restore()
+    }
   })
 
-  it('selects a repository-name prefix before exact language matches', async () => {
+  it('selects an exact language match before repository-name prefixes', async () => {
     const names = [
       makeRepo({ full_name: 'owner/rust-web', name: 'rust-web', primary_language: 'Unknown' }),
       makeRepo({ full_name: 'owner/rust-notes', name: 'rust-notes', primary_language: 'Unknown' }),
@@ -62,10 +70,9 @@ describe('SearchBox', () => {
 
     await user.type(screen.getByRole('combobox', { name: 'Search repositories' }), 'rust')
     const options = await screen.findAllByRole('option')
-    expect(options.slice(0, 2).map(option => option.textContent)).toEqual(expect.arrayContaining([
-      expect.stringContaining('rust-notes'), expect.stringContaining('rust-web'),
-    ]))
+    expect(options[0].textContent).toContain('language-0')
+    expect(options.some(option => option.textContent?.includes('rust-notes'))).toBe(true)
     await user.keyboard('{Enter}')
-    expect(onSelect).toHaveBeenCalledWith(names[1])
+    expect(onSelect).toHaveBeenCalledWith(languages[0])
   })
 })

@@ -2,32 +2,31 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
+import type { ActiveFilters } from './components/ActiveFilters'
 import type { MapView } from './components/MapView'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas, makeRepo } from './test-fixtures'
-import { stubMedia } from './test-dom'
+import { stubMedia, stubScrollIntoView } from './test-dom'
 import App from './App'
 
-const { mapSpy } = vi.hoisted(() => ({ mapSpy: vi.fn() }))
-vi.mock('./components/MapView', () => ({ MapView: (props: ComponentProps<typeof MapView>) => { mapSpy(props); return <div>Map fixture</div> } }))
-const currentMap = () => mapSpy.mock.lastCall![0] as ComponentProps<typeof MapView>
-
-function stubScrollIntoView() {
-  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
-  const mock = vi.fn()
-  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: mock })
+const { activeFiltersSpy, mapSpy } = vi.hoisted(() => ({ activeFiltersSpy: vi.fn(), mapSpy: vi.fn() }))
+vi.mock('./components/ActiveFilters', async (importOriginal) => {
+  const original = await importOriginal<typeof import('./components/ActiveFilters')>()
   return {
-    mock,
-    restore() {
-      if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
-      else Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
+    ActiveFilters: (props: ComponentProps<typeof original.ActiveFilters>) => {
+      activeFiltersSpy(props)
+      return <original.ActiveFilters {...props} />
     },
   }
-}
+})
+vi.mock('./components/MapView', () => ({ MapView: (props: ComponentProps<typeof MapView>) => { mapSpy(props); return <div>Map fixture</div> } }))
+const currentMap = () => mapSpy.mock.lastCall![0] as ComponentProps<typeof MapView>
+const currentActiveFilters = () => activeFiltersSpy.mock.lastCall![0] as ComponentProps<typeof ActiveFilters>
 
 let media: ReturnType<typeof stubMedia>
 
 beforeEach(() => {
+  activeFiltersSpy.mockClear()
   mapSpy.mockClear()
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true,
@@ -54,17 +53,25 @@ afterEach(() => {
 describe('App mobile filters', () => {
   it('moves focus into the modal, closes on Escape, and restores focus', async () => {
     const user = userEvent.setup()
-    render(<App />)
-    await screen.findByRole('heading', { name: 'Repo Atlas' })
-    const trigger = screen.getByRole('button', { name: 'Filters' })
-    const triggerFocus = vi.spyOn(trigger, 'focus')
-    await user.click(trigger)
-    const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
-    expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Done' }))
-    await user.keyboard('{Escape}')
-    await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
-    expect(document.activeElement).toBe(trigger)
-    expect(triggerFocus).toHaveBeenCalledWith({ preventScroll: true })
+    const scroll = stubScrollIntoView()
+    try {
+      render(<App />)
+      await screen.findByRole('heading', { name: 'Repo Atlas' })
+      const trigger = screen.getByRole('button', { name: 'Filters' })
+      const triggerFocus = vi.spyOn(trigger, 'focus')
+      await user.click(trigger)
+      const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
+      expect(document.activeElement).toBe(within(dialog).getByRole('button', { name: 'Done' }))
+      scroll.mock.mockClear()
+      await user.keyboard('{Escape}')
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull())
+      expect(document.activeElement).toBe(trigger)
+      expect(triggerFocus).toHaveBeenCalledWith({ preventScroll: true })
+      expect(scroll.mock).toHaveBeenCalledWith({ block: 'nearest', inline: 'nearest' })
+      expect(scroll.mock.mock.instances.at(-1)).toBe(trigger)
+    } finally {
+      scroll.restore()
+    }
   })
 
   it('focuses Done before Clear all when opening with active filters', async () => {
@@ -425,6 +432,28 @@ it('scrolls the next chip into view when removing one from a long controls strip
   } finally {
     scroll.restore()
   }
+})
+
+it('clears a focus request when a normalized filter update changes nothing', async () => {
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  window.history.replaceState(null, '', '/?lang=TypeScript')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+  const mapButton = screen.getByRole('button', { name: 'Map' })
+  mapButton.focus()
+  const filters = currentActiveFilters()
+
+  act(() => filters.onRemove({ ...filters.view, languages: ['TypeScript', 'TypeScript'] }, 0))
+  expect(currentMap().view.languages).toEqual(['TypeScript'])
+  act(() => { execute?.({ since: '2025-06' }) })
+
+  expect(currentMap().view.since).toBe('2025-06')
+  expect(document.activeElement).toBe(mapButton)
 })
 
 it('uses one clear behavior and restores focus for controls and no-results actions', async () => {

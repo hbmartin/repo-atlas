@@ -4,6 +4,8 @@ import { monthIndex } from './month'
 const uniqueValues = (names: string[]) => [...new Set(names)]
 export const normalizeLanguages = uniqueValues
 export const normalizeRegions = uniqueValues
+export const sameValues = (a: string[], b: string[]) =>
+  a.length === b.length && a.every((value, index) => value === b[index])
 export const languageCategories = (data: AtlasData) => data.languages
 const languageIndices = new WeakMap<AtlasData, { names: string[]; nameSet: Set<string>; categorySet: Set<string> }>()
 export function languageIndex(data: AtlasData) {
@@ -26,7 +28,7 @@ export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: st
     : repo.primary_language === name
 
 export function preserveValues(previous: string[], next: string[]) {
-  return previous.length === next.length && previous.every((value, i) => value === next[i]) ? previous : next
+  return sameValues(previous, next) ? previous : next
 }
 
 export function atlasPresentation(data: AtlasData) {

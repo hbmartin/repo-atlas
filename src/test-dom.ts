@@ -6,6 +6,19 @@ type MediaSettings = { compact: boolean; reduced: boolean }
 
 type ResizeRegistration = { callback: ResizeObserverCallback; observer: ResizeObserver; targets: Set<Element> }
 
+export function stubScrollIntoView() {
+  const original = Object.getOwnPropertyDescriptor(Element.prototype, 'scrollIntoView')
+  const mock = vi.fn()
+  Object.defineProperty(Element.prototype, 'scrollIntoView', { configurable: true, value: mock })
+  return {
+    mock,
+    restore() {
+      if (original) Object.defineProperty(Element.prototype, 'scrollIntoView', original)
+      else Reflect.deleteProperty(Element.prototype, 'scrollIntoView')
+    },
+  }
+}
+
 export function stubResizeObserver() {
   const registrations: ResizeRegistration[] = []
   vi.stubGlobal('ResizeObserver', class {
