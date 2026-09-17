@@ -70,6 +70,7 @@ describe('SearchBox', () => {
 
     await user.type(screen.getByRole('combobox', { name: 'Search repositories' }), 'rust')
     const options = await screen.findAllByRole('option')
+    expect(options).toHaveLength(8)
     expect(options[0].textContent).toContain('rust-notes')
     expect(options[1].textContent).toContain('rust-web')
     expect(options.slice(2).every(option => option.textContent?.includes('language-'))).toBe(true)

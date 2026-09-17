@@ -508,6 +508,42 @@ it('does not read the SVG origin when scrolling without a visible tooltip', () =
   expect(bounds).not.toHaveBeenCalled()
 })
 
+it('does not read the SVG origin when scrolling a keyboard-focus tooltip', () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container } = render(<MapView {...props} />)
+  const dot = container.querySelector<SVGCircleElement>('.repo-dot')!
+  fireEvent.focus(dot)
+  const bounds = vi.mocked(SVGSVGElement.prototype.getBoundingClientRect)
+  bounds.mockClear()
+
+  originLeft = 90; originTop = 200
+  fireEvent.scroll(window)
+  advanceCameraBy(20)
+
+  expect(screen.getByRole('tooltip')).toBeDefined()
+  expect(bounds).not.toHaveBeenCalled()
+})
+
+it('keeps one scroll listener across hover changes', () => {
+  stubMedia({ compact: false, reduced: true })
+  const add = vi.spyOn(window, 'addEventListener')
+  const remove = vi.spyOn(window, 'removeEventListener')
+  const { container, unmount } = render(<MapView {...props} />)
+  const points = container.querySelectorAll<SVGGElement>('.repo-point')
+  const scrollAdds = () => add.mock.calls.filter(([type]) => type === 'scroll').length
+  const scrollRemoves = () => remove.mock.calls.filter(([type]) => type === 'scroll').length
+  expect(scrollAdds()).toBe(1)
+
+  fireEvent.pointerEnter(points[0], { clientX: 100, clientY: 220 })
+  fireEvent.pointerLeave(points[0])
+  fireEvent.pointerEnter(points[1], { clientX: 120, clientY: 240 })
+
+  expect(scrollAdds()).toBe(1)
+  expect(scrollRemoves()).toBe(0)
+  unmount()
+  expect(scrollRemoves()).toBe(1)
+})
+
 it('positions a remounted tooltip immediately at unchanged pointer coordinates', () => {
   stubMedia({ compact: false, reduced: true })
   originLeft = 75; originTop = 190
@@ -535,11 +571,18 @@ it('preserves the pointer anchor while filters hide and restore the hovered repo
 
   rerender(<MapView {...props} visible={new Set([second.full_name])} />)
   expect(screen.queryByRole('tooltip')).toBeNull()
+  originLeft = 90; originTop = 200
+  const bounds = vi.mocked(SVGSVGElement.prototype.getBoundingClientRect)
+  bounds.mockClear()
+  fireEvent.scroll(window)
+  advanceCameraBy(20)
+  expect(bounds).not.toHaveBeenCalled()
   rerender(<MapView {...props} visible={visible} />)
 
   const tooltip = screen.getByRole('tooltip')
   expect(tooltip.textContent).toContain(first.name)
-  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '24px', top: '34px' })
+  expect(bounds).toHaveBeenCalledTimes(1)
 })
 
 it('restores the pointer anchor after a focused tooltip temporarily takes over', () => {
@@ -579,6 +622,20 @@ it('repositions a hover tooltip once when controls move and resize the map', () 
   const tooltip = screen.getByRole('tooltip')
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '8px' })
   expect(frame).not.toHaveBeenCalled()
+})
+
+it('repositions a hover tooltip when a breakpoint moves the map without resizing it', () => {
+  const media = stubMedia({ compact: false, reduced: true })
+  originLeft = 75; originTop = 190
+  const { container } = render(<MapView {...props} />)
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+  expect(screen.getByRole('tooltip').style.top).toBe('44px')
+
+  originTop = 200
+  media.set({ compact: true })
+
+  expect(screen.getByRole('tooltip').style.top).toBe('34px')
 })
 
 it('repositions a clamped tooltip when its observed height changes', () => {

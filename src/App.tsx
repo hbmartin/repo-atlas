@@ -30,7 +30,9 @@ const EMPTY_VIEW: ViewState = {
 }
 
 type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
-type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean }
+type ViewUpdate = ViewState | ((current: ViewState) => ViewState)
+type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean }
+type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: ViewState }
 
 const FOCUSABLE = [
   'a[href]',
@@ -91,8 +93,9 @@ export default function App() {
       .catch((reason) => setError(reason instanceof Error ? reason : new Error(String(reason))))
   }, [requestNavigation])
 
-  const setView = useCallback((next: ViewState, options?: SelectionOptions) => {
+  const setView = useCallback((update: ViewUpdate, options?: ViewUpdateOptions) => {
     const current = viewRef.current
+    const next = typeof update === 'function' ? update(current) : update
     const nextLanguages = normalizeLanguages(next.languages)
     const nextRegions = normalizeRegions(next.regions)
     const filtersChanged = next.since !== current.since
@@ -103,22 +106,21 @@ export default function App() {
       regions: preserveValues(current.regions, nextRegions),
     }
     const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
-    const shouldNavigate = options?.navigate !== false && normalized.repo !== null
-      && (normalized.repo !== current.repo || options?.navigate === true)
-    if (!stateChanged) {
-      if (shouldNavigate) requestNavigation('repo', normalized.repo!, options?.clickToken)
-      return { stateChanged: false, filtersChanged: false } satisfies ViewUpdateResult
-    }
-    if (shouldNavigate) {
-      requestNavigation('repo', normalized.repo!, options?.clickToken)
-    } else if (!normalized.repo || options?.navigate === false || filtersChanged) {
+    const navigationTarget = options?.navigate !== false && normalized.repo
+      && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
+    if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
+    else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
       setNavigationRequest(null)
     }
-    viewRef.current = normalized
-    setViewState(normalized)
-    setUrlWarning([])
-    window.history.replaceState(null, '', writeViewState(normalized))
-    return { stateChanged: true, filtersChanged } satisfies ViewUpdateResult
+    if (stateChanged) {
+      viewRef.current = normalized
+      setViewState(normalized)
+    }
+    if (stateChanged || options?.canonicalizeUrl) {
+      setUrlWarning([])
+      window.history.replaceState(null, '', writeViewState(normalized))
+    }
+    return { stateChanged, filtersChanged, view: normalized } satisfies ViewUpdateResult
   }, [requestNavigation])
 
   useLayoutEffect(() => {
@@ -200,7 +202,7 @@ export default function App() {
         type: 'object',
         additionalProperties: false,
         properties: {
-          repo: { type: ['string', 'null'], description: 'Exact owner/name, or null to clear selection.' },
+          repo: { type: ['string', 'null'], minLength: 1, description: 'Exact owner/name, or null to clear selection.' },
           languages: { type: 'array', description: 'Case-sensitive map categories or raw primary-language names currently in the atlas.', items: { type: 'string', enum: languageFilterNames(data) } },
           regions: { type: 'array', items: { type: 'string' } },
           since: { type: ['string', 'null'], pattern: '^\\d{4}-(0[1-9]|1[0-2])$' },
@@ -211,27 +213,28 @@ export default function App() {
       execute(input) {
         if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Input must be an object.')
         const value = input as Partial<ViewState>
-        const current = viewRef.current
         if (value.languages !== undefined && !Array.isArray(value.languages)) throw new Error('languages must be an array.')
         if (value.regions !== undefined && !Array.isArray(value.regions)) throw new Error('regions must be an array.')
-        const languages = value.languages ?? current.languages
-        const regions = value.regions ?? current.regions
-        const repo = value.repo === undefined ? current.repo : value.repo
-        const since = value.since === undefined ? current.since : value.since
-        if (!languages.every((name) => knownLanguage(data, name))) throw new Error('Unknown language category or raw primary-language filter.')
-        if (!regions.every((name) => name === 'Unclustered' || data.clusters.some((item) => item.label === name))) {
-          throw new Error('Unknown region filter.')
-        }
-        if (repo && !data.repos.some((item) => item.full_name === repo)) throw new Error('Unknown repository.')
-        if (since && !validMonth(since)) throw new Error('since must use a valid YYYY-MM month.')
-        const next = {
-          repo,
-          languages: normalizeLanguages(languages),
-          regions: normalizeRegions(regions),
-          since,
-          layoutAlt: value.layoutAlt ?? current.layoutAlt,
-        }
-        setView(next)
+        if (typeof value.repo === 'string' && !value.repo.trim()) throw new Error('repo must be an exact owner/name or null.')
+        const next = setView((current) => {
+          const languages = value.languages ?? current.languages
+          const regions = value.regions ?? current.regions
+          const repo = value.repo === undefined ? current.repo : value.repo
+          const since = value.since === undefined ? current.since : value.since
+          if (!languages.every((name) => knownLanguage(data, name))) throw new Error('Unknown language category or raw primary-language filter.')
+          if (!regions.every((name) => name === 'Unclustered' || data.clusters.some((item) => item.label === name))) {
+            throw new Error('Unknown region filter.')
+          }
+          if (repo !== null && !data.repos.some((item) => item.full_name === repo)) throw new Error('Unknown repository.')
+          if (since && !validMonth(since)) throw new Error('since must use a valid YYYY-MM month.')
+          return {
+            repo,
+            languages: normalizeLanguages(languages),
+            regions: normalizeRegions(regions),
+            since,
+            layoutAlt: value.layoutAlt ?? current.layoutAlt,
+          }
+        }).view
         return {
           selected_repo: next.repo,
           languages: next.languages,
@@ -276,30 +279,29 @@ export default function App() {
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
   const clearFilters = (scope: FilterFocusRequest['scope']) => {
-    const current = viewRef.current
     pendingFilterFocus.current = { scope, index: null }
-    if (!setView({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt }).filtersChanged) pendingFilterFocus.current = null
+    if (!setView(current => ({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })).filtersChanged) pendingFilterFocus.current = null
   }
-  const removeActiveFilter = (next: ViewState, index: number, scope: FilterFocusRequest['scope']) => {
+  const removeActiveFilter = (update: (current: ViewState) => ViewState, index: number, scope: FilterFocusRequest['scope']) => {
     pendingFilterFocus.current = { scope, index }
-    if (!setView(next).filtersChanged) pendingFilterFocus.current = null
+    if (!setView(update).filtersChanged) pendingFilterFocus.current = null
   }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)
-    setView({ ...viewRef.current, repo: repo?.full_name ?? null }, { ...options, navigate: options?.navigate ?? true })
+    setView(current => ({ ...current, repo: repo?.full_name ?? null }), { ...options, navigate: options?.navigate ?? true })
   }
   const backgroundInert = mobileFilters || guideOpen ? true : undefined
   const profileUrl = `https://github.com/${encodeURIComponent(data.owner)}`
 
   const chooseRegion = (label: string, clickToken?: number) => {
-    setView({ ...view, repo: null, regions: [label] })
+    setView(current => ({ ...current, repo: null, regions: [label] }))
     requestNavigation('region', label, clickToken)
     setListMode(false)
     setGuideOpen(false)
     setHighlightRegion(null)
   }
   const guide = <AtlasGuide data={data} presentation={presentation} view={view}
-    onLanguage={name => setView({ ...view, languages: toggleValue(view.languages, name) })}
+    onLanguage={name => setView(current => ({ ...current, languages: toggleValue(current.languages, name) }))}
     onRegion={chooseRegion} onHighlight={setHighlightRegion} />
 
   return (
@@ -308,11 +310,8 @@ export default function App() {
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
           <button onClick={() => {
-            const result = setView(EMPTY_VIEW)
-            if (!result.stateChanged) {
-              setUrlWarning([])
-              window.history.replaceState(null, '', writeViewState(EMPTY_VIEW))
-            }
+            setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
+            window.requestAnimationFrame(() => focusElement(searchInput.current))
           }}>Reset link</button>
         </div>
       )}

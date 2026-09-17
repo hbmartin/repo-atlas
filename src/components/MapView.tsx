@@ -104,6 +104,10 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   }, [])
   const positionVisibleTooltip = useCallback((node = tooltipRef.current) => {
     if (!node) return
+    if (tooltipUsesPointer.current && tooltipOriginDirty.current) {
+      tooltipOriginDirty.current = false
+      refreshSvgOrigin()
+    }
     const pointer = lastPointer.current
     const point = tooltipUsesPointer.current && pointer
       ? { x: pointer.clientX - svgOrigin.current.left, y: pointer.clientY - svgOrigin.current.top }
@@ -112,27 +116,20 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const next = positionTooltip(point, tooltipSize.current, viewportRef.current.size)
     node.style.left = `${next.left}px`
     node.style.top = `${next.top}px`
-  }, [])
+  }, [refreshSvgOrigin])
   const scheduleTooltipPosition = useCallback((refreshOrigin = false, immediate = false) => {
     if (refreshOrigin) tooltipOriginDirty.current = true
-    const position = () => {
-      if (tooltipOriginDirty.current) {
-        tooltipOriginDirty.current = false
-        refreshSvgOrigin()
-      }
-      positionVisibleTooltip()
-    }
     if (immediate) {
       if (tooltipFrame.current != null) cancelAnimationFrame(tooltipFrame.current)
       tooltipFrame.current = null
-      position()
+      positionVisibleTooltip()
     } else if (tooltipFrame.current == null) {
       tooltipFrame.current = requestAnimationFrame(() => {
         tooltipFrame.current = null
-        position()
+        positionVisibleTooltip()
       })
     }
-  }, [positionVisibleTooltip, refreshSvgOrigin])
+  }, [positionVisibleTooltip])
   const updateTooltipPointer = useCallback((clientX: number, clientY: number, immediate = false) => {
     lastPointer.current = { clientX, clientY }
     scheduleTooltipPosition(immediate, immediate)
@@ -264,6 +261,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const resize = () => {
       const rect = node.getBoundingClientRect()
       svgOrigin.current = { left: rect.left, top: rect.top }
+      tooltipOriginDirty.current = false
       if (rect.width <= 0 || rect.height <= 0) return
       const current = viewportRef.current
       const behavior = zoomRef.current!
@@ -272,7 +270,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         ? current.size : { width: rect.width, height: rect.height }
       const inputsChanged = current.layoutToken !== preparedLabels
       if (current.measured && nextSize === current.size && !inputsChanged) {
-        if (tooltipRef.current) scheduleTooltipPosition()
+        positionVisibleTooltip()
         return
       }
       const nextFit = fitOverview(data, view.layoutAlt, nextSize, sizes.radius, measure, fontSize, preparedLabels)
@@ -295,12 +293,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       configureZoom(behavior, nextFit)
       setViewport(nextViewport)
       writeTransform(nextTransform)
+      positionVisibleTooltip()
     }
     const observer = new ResizeObserver(resize)
     observer.observe(node)
     resize()
     return () => observer.disconnect()
-  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick, cancelCameraAnimation, configureZoom, scheduleTooltipPosition, writeTransform])
+  }, [data, view.layoutAlt, sizes, measure, fontSize, preparedLabels, bounds, cancelClick, cancelCameraAnimation, configureZoom, positionVisibleTooltip, writeTransform])
 
   useLayoutEffect(() => {
     const node = svgRef.current
@@ -479,11 +478,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     positionVisibleTooltip()
   }, [hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
   useEffect(() => {
-    if (!hasTooltip) return
-    const handleScroll = () => scheduleTooltipPosition(true)
+    const handleScroll = () => {
+      tooltipOriginDirty.current = true
+      if (tooltipUsesPointer.current && tooltipRef.current) scheduleTooltipPosition()
+    }
     window.addEventListener('scroll', handleScroll, { capture: true, passive: true })
     return () => window.removeEventListener('scroll', handleScroll, true)
-  }, [hasTooltip, scheduleTooltipPosition])
+  }, [scheduleTooltipPosition])
   useLayoutEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const node = tooltipRef.current
