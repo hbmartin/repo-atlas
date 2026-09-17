@@ -11,7 +11,7 @@ export function Filters({
 }: {
   data: AtlasData
   view: ViewState
-  setView: (next: ViewState) => void
+  setView: (update: (current: ViewState) => ViewState) => void
   minMonth: number
   maxMonth: number
 }) {
@@ -26,10 +26,10 @@ export function Filters({
               <input
                 type="checkbox"
                 checked={view.languages.includes(language.name)}
-                onChange={() => setView({
-                  ...view,
-                  languages: toggleValue(view.languages, language.name),
-                })}
+                onChange={() => setView(current => ({
+                  ...current,
+                  languages: toggleValue(current.languages, language.name),
+                }))}
               />
               <i style={{ background: language.color }} />
               <span>{language.name}</span>
@@ -49,10 +49,10 @@ export function Filters({
               <input
                 type="checkbox"
                 checked={view.regions.includes(region.label)}
-                onChange={() => setView({
-                  ...view,
-                  regions: toggleValue(view.regions, region.label),
-                })}
+                onChange={() => setView(current => ({
+                  ...current,
+                  regions: toggleValue(current.regions, region.label),
+                }))}
               />
               <span>{region.label}</span>
               <small>{region.count}</small>
@@ -71,7 +71,7 @@ export function Filters({
           value={sinceIndex}
           onChange={(event) => {
             const value = Number(event.target.value)
-            setView({ ...view, since: value === minMonth ? null : monthValue(value) })
+            setView(current => ({ ...current, since: value === minMonth ? null : monthValue(value) }))
           }}
         />
       </label>
@@ -80,7 +80,7 @@ export function Filters({
       <button
         className={`layout-toggle ${view.layoutAlt ? 'active' : ''}`}
         aria-pressed={view.layoutAlt}
-        onClick={() => setView({ ...view, layoutAlt: !view.layoutAlt })}
+        onClick={() => setView(current => ({ ...current, layoutAlt: !current.layoutAlt }))}
       >
         Alternate layout
       </button>
