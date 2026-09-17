@@ -26,25 +26,25 @@ describe('atlas data utilities', () => {
     const formula = makeRepo({ full_name: 'owner/homebrew-graphviz2drawio', name: 'homebrew-graphviz2drawio' })
     expect(searchRepos([formula, exact], 'graphviz2drawio')[0]).toBe(exact)
   })
-  it('keeps a name prefix discoverable without ranking it above exact language matches', () => {
+  it('ranks every repository-name prefix ahead of exact language matches', () => {
     const primary = Array.from({ length: 9 }, (_, index) => makeRepo({
-      full_name: `owner/primary-${index}`, name: `primary-${index}`, primary_language: 'Python',
+      full_name: `owner/language-${index}`, name: `language-${index}`, primary_language: 'Rust',
     }))
-    const named = makeRepo({
-      full_name: 'owner/python-comparison', name: 'python-comparison', primary_language: 'Unknown',
-    })
-    const results = searchRepos([...primary, named], 'python')
+    const notes = makeRepo({ full_name: 'owner/rust-notes', name: 'rust-notes', primary_language: 'Unknown' })
+    const web = makeRepo({ full_name: 'owner/rust-web', name: 'rust-web', primary_language: 'Unknown' })
+    const results = searchRepos([...primary, web, notes], 'rust')
     expect(results).toHaveLength(8)
-    expect(results.slice(0, 7).every(repo => repo.primary_language === 'Python')).toBe(true)
-    expect(results[7]).toBe(named)
-    expect(searchRepos([...primary, named], 'python-')).toEqual([named])
+    expect(results.slice(0, 2)).toEqual([notes, web])
+    expect(results.slice(2).every(repo => repo.primary_language === 'Rust')).toBe(true)
+    expect(searchRepos([...primary, web, notes], 'rust-')).toEqual([notes, web])
   })
-  it('ranks exact technology metadata ahead of a whole-name prefix', () => {
+  it('ranks whole-name and token prefixes ahead of exact technology metadata', () => {
     const platform = makeRepo({ full_name: 'owner/terminal', name: 'terminal', platform: 'CLI' })
     const prefix = makeRepo({ full_name: 'owner/clicker', name: 'clicker', platform: 'Web' })
-    expect(searchRepos([prefix, platform], 'cli')).toEqual([platform, prefix])
+    const token = makeRepo({ full_name: 'owner/tool-cli', name: 'tool-cli', platform: 'Web' })
+    expect(searchRepos([platform, token, prefix], 'cli')).toEqual([prefix, token, platform])
   })
-  it('represents every substantive match tier before filling the result cap', () => {
+  it('orders every match tier by repository-name relevance before semantic metadata', () => {
     const fullName = makeRepo({ full_name: 'python', name: 'full-name' })
     const exactName = makeRepo({ full_name: 'owner/exact-name', name: 'python' })
     const primary = makeRepo({ full_name: 'owner/primary', name: 'primary', primary_language: 'Python' })
@@ -56,19 +56,13 @@ describe('atlas data utilities', () => {
     const wholePrefix = makeRepo({ full_name: 'owner/python-tools', name: 'python-tools' })
     const tokenPrefix = makeRepo({ full_name: 'owner/tool-python', name: 'toolPythonKit' })
     const text = makeRepo({ full_name: 'owner/text', name: 'text', one_liner: 'Python examples' })
-    const extraPrimary = Array.from({ length: 9 }, (_, index) => makeRepo({
-      full_name: `owner/extra-primary-${index}`, name: `extra-primary-${index}`, primary_language: 'Python',
-    }))
-    const repos = [text, ...extraPrimary, tokenPrefix, wholePrefix, metadata, composition, primary, exactName, fullName]
-    const results = searchRepos(repos, 'python')
-    expect(results).toHaveLength(8)
-    expect(results.slice(0, 2)).toEqual([fullName, exactName])
-    expect(results.some(repo => repo.primary_language === 'Python')).toBe(true)
-    expect(results).toEqual(expect.arrayContaining([composition, metadata, wholePrefix, tokenPrefix]))
-    expect(results).not.toContain(text)
-    expect(searchRepos(repos, 'python')).toEqual(results)
+    expect(searchRepos([
+      text, metadata, composition, primary, tokenPrefix, wholePrefix, exactName, fullName,
+    ], 'python')).toEqual([
+      fullName, exactName, wholePrefix, tokenPrefix, primary, composition, metadata, text,
+    ])
   })
-  it.each(['c', 'sdk'])('keeps an exact %s match visible among many name prefixes', (query) => {
+  it.each(['c', 'sdk'])('applies the eight-result cap after ranking %s name prefixes', (query) => {
     const prefixes = Array.from({ length: 9 }, (_, index) => makeRepo({
       full_name: `owner/${query}-prefix-${index}`, name: `${query}-prefix-${index}`, primary_language: 'Unknown',
     }))
@@ -77,8 +71,8 @@ describe('atlas data utilities', () => {
       : makeRepo({ full_name: 'owner/sdk-platform', name: 'semantic-platform', platform: 'SDK' })
     const results = searchRepos([...prefixes, exact], query)
     expect(results).toHaveLength(8)
-    expect(results).toContain(exact)
-    expect(results[0]).toBe(exact)
+    expect(results).toEqual(prefixes.slice(0, 8))
+    expect(results).not.toContain(exact)
   })
   it('matches whole-name prefixes containing separators', () => {
     const repos = [
@@ -98,12 +92,12 @@ describe('atlas data utilities', () => {
     expect(searchRepos([token], 'drawio')).toEqual([token])
   })
   it('ranks exact raw language names without treating Java as JavaScript', () => {
-    const java = makeRepo({ full_name: 'owner/java-repo', name: 'java-repo', primary_language: 'Java' })
-    const javascript = makeRepo({ full_name: 'owner/javascript-repo', name: 'javascript-repo', primary_language: 'JavaScript' })
+    const java = makeRepo({ full_name: 'owner/java-repo', name: 'jvm', primary_language: 'Java' })
+    const javascript = makeRepo({ full_name: 'owner/javascript-repo', name: 'ecmascript', primary_language: 'JavaScript' })
     const cpp = makeRepo({ full_name: 'owner/cpp-repo', primary_language: 'C++' })
     const mixed = makeRepo({ full_name: 'owner/mixed', primary_language: 'TypeScript', languages: [{ name: 'C++', pct: 20, color: '#f34b7d' }] })
     const text = makeRepo({ full_name: 'owner/text', primary_language: 'Python', one_liner: 'Uses some Java examples.' })
-    expect(searchRepos([text, javascript, java], 'Java').map(repo => repo.full_name)).toEqual(['owner/java-repo', 'owner/javascript-repo', 'owner/text'])
+    expect(searchRepos([text, javascript, java], 'Java').map(repo => repo.full_name)).toEqual(['owner/java-repo', 'owner/text'])
     expect(searchRepos([mixed, cpp], 'C++').map(repo => repo.full_name)).toEqual(['owner/cpp-repo', 'owner/mixed'])
   })
   it('rejects impossible month values', () => {

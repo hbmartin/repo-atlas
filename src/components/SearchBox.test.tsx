@@ -56,7 +56,7 @@ describe('SearchBox', () => {
     }
   })
 
-  it('selects an exact language match before repository-name prefixes', async () => {
+  it('selects repository-name prefixes before exact language matches', async () => {
     const names = [
       makeRepo({ full_name: 'owner/rust-web', name: 'rust-web', primary_language: 'Unknown' }),
       makeRepo({ full_name: 'owner/rust-notes', name: 'rust-notes', primary_language: 'Unknown' }),
@@ -70,9 +70,10 @@ describe('SearchBox', () => {
 
     await user.type(screen.getByRole('combobox', { name: 'Search repositories' }), 'rust')
     const options = await screen.findAllByRole('option')
-    expect(options[0].textContent).toContain('language-0')
-    expect(options.some(option => option.textContent?.includes('rust-notes'))).toBe(true)
+    expect(options[0].textContent).toContain('rust-notes')
+    expect(options[1].textContent).toContain('rust-web')
+    expect(options.slice(2).every(option => option.textContent?.includes('language-'))).toBe(true)
     await user.keyboard('{Enter}')
-    expect(onSelect).toHaveBeenCalledWith(languages[0])
+    expect(onSelect).toHaveBeenCalledWith(names[1])
   })
 })

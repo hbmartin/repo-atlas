@@ -303,25 +303,16 @@ export function searchRepos(repos: AtlasRepo[], query: string): AtlasRepo[] {
     .map((entry) => {
       const textScore = entry.fields.reduce((sum, value, index) => sum + (value.includes(needle) ? entry.weights[index] ?? 1 : 0), 0)
       const tier = entry.fullName === needle ? 8 : entry.name === needle ? 7
-        : entry.primaryLanguage === needle ? 6 : entry.compositionLanguages.includes(needle) ? 5
-        : entry.exactMetadata.has(needle) ? 4 : entry.name.startsWith(needle) ? 3
-        : entry.tokens.some(token => token.startsWith(needle)) ? 2
+        : entry.name.startsWith(needle) ? 6
+        : entry.tokens.some(token => token.startsWith(needle)) ? 5
+        : entry.primaryLanguage === needle ? 4 : entry.compositionLanguages.includes(needle) ? 3
+        : entry.exactMetadata.has(needle) ? 2
         : textScore ? 1 : 0
       return { repo: entry.repo, tier, textScore }
     })
     .filter((entry) => entry.tier > 0)
     .sort((a, b) => b.tier - a.tier || b.textScore - a.textScore
       || a.repo.name.localeCompare(b.repo.name))
-  const selected = new Set<(typeof ranked)[number]>()
-  for (let tier = 8; tier >= 2 && selected.size < 8; tier -= 1) {
-    const representative = ranked.find(entry => entry.tier === tier)
-    if (representative) selected.add(representative)
-  }
-  for (const entry of ranked) {
-    if (selected.size >= 8) break
-    selected.add(entry)
-  }
-  return ranked
-    .filter(entry => selected.has(entry))
+  return ranked.slice(0, 8)
     .map((entry) => entry.repo)
 }

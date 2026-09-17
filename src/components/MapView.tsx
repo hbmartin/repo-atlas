@@ -146,11 +146,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     tooltipObserver.current?.observe(node)
     positionVisibleTooltip(node)
   }, [positionVisibleTooltip])
-  useEffect(() => {
-    const handleScroll = () => scheduleTooltipPosition(true)
-    window.addEventListener('scroll', handleScroll, { capture: true, passive: true })
-    return () => window.removeEventListener('scroll', handleScroll, true)
-  }, [scheduleTooltipPosition])
   const commitTransform = useCallback((next: ZoomTransform) => {
     if (frame.current != null) cancelAnimationFrame(frame.current)
     frame.current = null
@@ -277,7 +272,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         ? current.size : { width: rect.width, height: rect.height }
       const inputsChanged = current.layoutToken !== preparedLabels
       if (current.measured && nextSize === current.size && !inputsChanged) {
-        scheduleTooltipPosition()
+        if (tooltipRef.current) scheduleTooltipPosition()
         return
       }
       const nextFit = fitOverview(data, view.layoutAlt, nextSize, sizes.radius, measure, fontSize, preparedLabels)
@@ -297,7 +292,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       cancelCameraAnimation()
       targetTransformRef.current = nextTransform
       viewportRef.current = nextViewport
-      scheduleTooltipPosition()
       configureZoom(behavior, nextFit)
       setViewport(nextViewport)
       writeTransform(nextTransform)
@@ -484,6 +478,12 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     tooltipMapAnchor.current = hasTooltip && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
     positionVisibleTooltip()
   }, [hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
+  useEffect(() => {
+    if (!hasTooltip) return
+    const handleScroll = () => scheduleTooltipPosition(true)
+    window.addEventListener('scroll', handleScroll, { capture: true, passive: true })
+    return () => window.removeEventListener('scroll', handleScroll, true)
+  }, [hasTooltip, scheduleTooltipPosition])
   useLayoutEffect(() => {
     const observer = new ResizeObserver((entries) => {
       const node = tooltipRef.current
