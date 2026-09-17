@@ -1,4 +1,4 @@
-import { knownLanguage, normalizeLanguages, normalizeRegions } from './presentation'
+import { knownLanguage, knownRegion, normalizeLanguages, normalizeRegions } from './presentation'
 import type { AtlasData, AtlasRepo, ViewState } from './types'
 
 export { monthIndex, monthValue } from './month'
@@ -206,13 +206,12 @@ export async function loadAtlas(): Promise<AtlasData> {
 
 export function parseViewState(search: string, data: AtlasData): ViewState {
   const params = new URLSearchParams(search)
-  const knownRegions = new Set([...data.clusters.map((cluster) => cluster.label), 'Unclustered'])
   const repo = params.get('repo')
   const since = params.get('since')
   return {
     repo: repo && data.repos.some((item) => item.full_name === repo) ? repo : null,
     languages: normalizeLanguages((params.get('lang') ?? '').split(',').filter((value) => knownLanguage(data, value))),
-    regions: normalizeRegions((params.get('region') ?? '').split(',').filter((value) => knownRegions.has(value))),
+    regions: normalizeRegions((params.get('region') ?? '').split(',').filter((value) => knownRegion(data, value))),
     since: since && validMonth(since) ? since : null,
     layoutAlt: params.get('layout') === 'alt',
   }
@@ -225,8 +224,7 @@ export function unknownViewParameters(search: string, data: AtlasData): string[]
   const repo = params.get('repo')
   if (repo && !data.repos.some((item) => item.full_name === repo)) unknown.push(`repo=${repo}`)
   for (const value of (params.get('lang') ?? '').split(',').filter(Boolean)) if (!knownLanguage(data, value)) unknown.push(`lang=${value}`)
-  const regions = new Set([...data.clusters.map((item) => item.label), 'Unclustered'])
-  for (const value of (params.get('region') ?? '').split(',').filter(Boolean)) if (!regions.has(value)) unknown.push(`region=${value}`)
+  for (const value of (params.get('region') ?? '').split(',').filter(Boolean)) if (!knownRegion(data, value)) unknown.push(`region=${value}`)
   const since = params.get('since')
   if (since && !validMonth(since)) unknown.push(`since=${since}`)
   const layout = params.get('layout')

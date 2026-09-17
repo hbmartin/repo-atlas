@@ -8,6 +8,7 @@ export const sameValues = (a: string[], b: string[]) =>
   a.length === b.length && a.every((value, index) => value === b[index])
 export const languageCategories = (data: AtlasData) => data.languages
 const languageIndices = new WeakMap<AtlasData, { names: string[]; nameSet: Set<string>; categorySet: Set<string> }>()
+const regionIndices = new WeakMap<AtlasData, Set<string>>()
 export function languageIndex(data: AtlasData) {
   const cached = languageIndices.get(data)
   if (cached) return cached
@@ -22,6 +23,14 @@ export function languageIndex(data: AtlasData) {
 }
 export const languageFilterNames = (data: AtlasData) => languageIndex(data).names
 export const knownLanguage = (data: AtlasData, name: string) => languageIndex(data).nameSet.has(name)
+export function knownRegion(data: AtlasData, name: string) {
+  let names = regionIndices.get(data)
+  if (!names) {
+    names = new Set([...data.clusters.map(cluster => cluster.label), 'Unclustered'])
+    regionIndices.set(data, names)
+  }
+  return names.has(name)
+}
 export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: string) =>
   languageIndex(data).categorySet.has(name)
     ? repo.primary_language_category === name

@@ -1,6 +1,6 @@
 import { monthIndex, monthValue } from '../data'
 import type { AtlasData, ViewState } from '../types'
-import { formatDate, toggleValue } from '../view-utils'
+import { formatDate } from '../view-utils'
 
 export function Filters({
   data,
@@ -26,10 +26,15 @@ export function Filters({
               <input
                 type="checkbox"
                 checked={view.languages.includes(language.name)}
-                onChange={() => setView(current => ({
-                  ...current,
-                  languages: toggleValue(current.languages, language.name),
-                }))}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked
+                  setView(current => ({
+                    ...current,
+                    languages: checked
+                      ? current.languages.includes(language.name) ? current.languages : [...current.languages, language.name]
+                      : current.languages.filter(name => name !== language.name),
+                  }))
+                }}
               />
               <i style={{ background: language.color }} />
               <span>{language.name}</span>
@@ -49,10 +54,15 @@ export function Filters({
               <input
                 type="checkbox"
                 checked={view.regions.includes(region.label)}
-                onChange={() => setView(current => ({
-                  ...current,
-                  regions: toggleValue(current.regions, region.label),
-                }))}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked
+                  setView(current => ({
+                    ...current,
+                    regions: checked
+                      ? current.regions.includes(region.label) ? current.regions : [...current.regions, region.label]
+                      : current.regions.filter(label => label !== region.label),
+                  }))
+                }}
               />
               <span>{region.label}</span>
               <small>{region.count}</small>

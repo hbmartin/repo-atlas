@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { atlasPresentation, preserveValues, fileSizeScale, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, sameValues } from './presentation'
+import { atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, sameValues } from './presentation'
 import { parseViewState, unknownViewParameters, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
@@ -29,6 +29,9 @@ describe('atlas presentation', () => {
     expect(matchesLanguageFilter(data, cpp, 'Java')).toBe(false)
     expect(matchesLanguageFilter(data, cpp, 'Other')).toBe(true)
     expect(matchesLanguageFilter(data, cpp, 'Python')).toBe(false)
+    expect(knownRegion(data, 'Developer Tools')).toBe(true)
+    expect(knownRegion(data, 'Unclustered')).toBe(true)
+    expect(knownRegion(data, 'Missing')).toBe(false)
   })
   it('retains equivalent filter arrays', () => {
     const previous = ['Java', 'HTML']

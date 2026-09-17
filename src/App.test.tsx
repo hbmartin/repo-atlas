@@ -2,31 +2,19 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import type { ComponentProps } from 'react'
-import type { ActiveFilters } from './components/ActiveFilters'
 import type { MapView } from './components/MapView'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { makeAtlas, makeRepo } from './test-fixtures'
 import { stubMedia, stubScrollIntoView } from './test-dom'
 import App from './App'
 
-const { activeFiltersSpy, mapSpy } = vi.hoisted(() => ({ activeFiltersSpy: vi.fn(), mapSpy: vi.fn() }))
-vi.mock('./components/ActiveFilters', async (importOriginal) => {
-  const original = await importOriginal<typeof import('./components/ActiveFilters')>()
-  return {
-    ActiveFilters: (props: ComponentProps<typeof original.ActiveFilters>) => {
-      activeFiltersSpy(props)
-      return <original.ActiveFilters {...props} />
-    },
-  }
-})
+const { mapSpy } = vi.hoisted(() => ({ mapSpy: vi.fn() }))
 vi.mock('./components/MapView', () => ({ MapView: (props: ComponentProps<typeof MapView>) => { mapSpy(props); return <div>Map fixture</div> } }))
 const currentMap = () => mapSpy.mock.lastCall![0] as ComponentProps<typeof MapView>
-const currentActiveFilters = () => activeFiltersSpy.mock.lastCall![0] as ComponentProps<typeof ActiveFilters>
 
 let media: ReturnType<typeof stubMedia>
 
 beforeEach(() => {
-  activeFiltersSpy.mockClear()
   mapSpy.mockClear()
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
     ok: true,
@@ -126,7 +114,7 @@ describe('App mobile filters', () => {
     expect(second.languages).toEqual(['TypeScript'])
   })
 
-  it('rejects an empty model-context repository without changing view or navigation', async () => {
+  it('rejects invalid model-context values without changing view, navigation, or URL', async () => {
     let execute: ((input: unknown) => unknown) | undefined
     Object.defineProperty(document, 'modelContext', {
       configurable: true,
@@ -138,10 +126,46 @@ describe('App mobile filters', () => {
     await waitFor(() => expect(execute).toBeDefined())
     const beforeView = currentMap().view
     const beforeNavigation = currentMap().navigationRequest
+    const beforeUrl = window.location.href
 
-    expect(() => execute?.({ repo: '' })).toThrow('repo must be an exact owner/name or null.')
+    for (const [input, message] of [
+      [{ repo: '' }, 'repo must be an exact owner/name or null.'],
+      [{ since: '' }, 'since must use a valid YYYY-MM month or null.'],
+      [{ since: 0 }, 'since must use a valid YYYY-MM month or null.'],
+      [{ since: false }, 'since must use a valid YYYY-MM month or null.'],
+      [{ layoutAlt: 'true' }, 'layoutAlt must be a boolean.'],
+      [{ layoutAlt: 0 }, 'layoutAlt must be a boolean.'],
+      [{ unexpected: true }, 'Unknown view property: unexpected.'],
+    ] as const) {
+      expect(() => execute?.(input)).toThrow(message)
+    }
     expect(currentMap().view).toEqual(beforeView)
     expect(currentMap().navigationRequest).toEqual(beforeNavigation)
+    expect(window.location.href).toBe(beforeUrl)
+  })
+
+  it('does not expose state-owned filter arrays in model-context results', async () => {
+    let execute: ((input: unknown) => unknown) | undefined
+    Object.defineProperty(document, 'modelContext', {
+      configurable: true,
+      value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+    })
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await waitFor(() => expect(execute).toBeDefined())
+    let result: { languages: string[]; regions: string[] } | undefined
+
+    act(() => {
+      result = execute?.({ languages: ['TypeScript'], regions: ['Developer Tools'] }) as typeof result
+    })
+    result!.languages.push('Rust')
+    result!.regions.length = 0
+    fireEvent.click(screen.getByRole('button', { name: 'List' }))
+
+    expect(currentMap().view.languages).toEqual(['TypeScript'])
+    expect(currentMap().view.regions).toEqual(['Developer Tools'])
+    expect(screen.getByRole('button', { name: 'Remove language filter TypeScript' })).toBeDefined()
+    expect(screen.getByRole('button', { name: 'Remove region filter Developer Tools' })).toBeDefined()
   })
 
   it('links Source & method to the actual atlas repository', async () => {
@@ -272,15 +296,15 @@ describe('App mobile filters', () => {
     expect(screen.queryByRole('status')).toBeNull()
   })
 
-  it('canonicalizes an invalid-only URL when Reset link leaves view state unchanged', async () => {
+  it('canonicalizes an invalid-only URL and focuses Filters on compact screens', async () => {
     const user = userEvent.setup()
     window.history.replaceState(null, '', '/?repo=missing%2Frepo&wat=1#invalid-state')
     render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
     expect(currentMap().view).toEqual({ repo: null, languages: [], regions: [], since: null, layoutAlt: false })
     expect(screen.getByRole('status').textContent).toContain('missing/repo')
-    const search = screen.getByRole('combobox', { name: 'Search repositories' })
-    const focus = vi.spyOn(search, 'focus')
+    const filters = screen.getByRole('button', { name: 'Filters' })
+    const focus = vi.spyOn(filters, 'focus')
 
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
@@ -288,7 +312,56 @@ describe('App mobile filters', () => {
     expect(window.location.search).toBe('')
     expect(window.location.hash).toBe('')
     expect(screen.queryByRole('status')).toBeNull()
+    expect(document.activeElement).toBe(filters)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+  })
+
+  it('focuses search after a wide-layout keyboard Reset link activation', async () => {
+    media.set({ compact: false })
+    window.history.replaceState(null, '', '/?wat=1')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    const reset = screen.getByRole('button', { name: 'Reset link' })
+    const search = screen.getByRole('combobox', { name: 'Search repositories' })
+    const focus = vi.spyOn(search, 'focus')
+    reset.focus()
+
+    fireEvent.click(reset, { detail: 0 })
+
     expect(document.activeElement).toBe(search)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+  })
+
+  it('does not focus search after a wide-layout pointer Reset link activation', async () => {
+    const user = userEvent.setup()
+    media.set({ compact: false })
+    window.history.replaceState(null, '', '/?wat=1')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    const search = screen.getByRole('combobox', { name: 'Search repositories' })
+    const focus = vi.spyOn(search, 'focus')
+
+    await user.click(screen.getByRole('button', { name: 'Reset link' }))
+
+    expect(document.activeElement).not.toBe(search)
+    expect(focus).not.toHaveBeenCalled()
+  })
+
+  it('keeps Reset link focus inside an open mobile filter dialog', async () => {
+    const user = userEvent.setup()
+    window.history.replaceState(null, '', '/?wat=1')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await user.click(screen.getByRole('button', { name: 'Filters' }))
+    const dialog = screen.getByRole('dialog', { name: 'Filter the atlas' })
+    const done = within(dialog).getByRole('button', { name: 'Done' })
+    const focus = vi.spyOn(done, 'focus')
+
+    await user.click(screen.getByRole('button', { name: 'Reset link' }))
+
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(document.activeElement).toBe(done)
+    expect(dialog.contains(document.activeElement)).toBe(true)
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
@@ -472,57 +545,57 @@ it('scrolls the next chip into view when removing one from a long controls strip
   }
 })
 
-it('applies a stale filter callback to the latest view state', async () => {
+it('removes a stale rendered chip and focuses from the latest filter order', async () => {
   let execute: ((input: unknown) => unknown) | undefined
   Object.defineProperty(document, 'modelContext', {
     configurable: true,
     value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
   })
-  window.history.replaceState(null, '', '/?lang=TypeScript')
-  render(<App />)
+  media.set({ compact: false })
+  window.history.replaceState(null, '', '/?lang=TypeScript,Python')
+  const { container } = render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
   await waitFor(() => expect(execute).toBeDefined())
-  const mapButton = screen.getByRole('button', { name: 'Map' })
-  mapButton.focus()
-  const filters = currentActiveFilters()
+  const strip = container.querySelector<HTMLElement>('.controls .active-filters')!
+  const staleChip = within(strip).getByRole('button', { name: 'Remove language filter TypeScript' })
 
-  act(() => { execute?.({ layoutAlt: true }) })
-  expect(currentMap().view.layoutAlt).toBe(true)
-  const staleLanguage = filters.view.languages[0]
-  act(() => filters.onRemove(current => ({
-    ...current,
-    languages: current.languages.filter(language => language !== staleLanguage),
-  }), 0))
+  act(() => {
+    execute?.({ languages: ['Rust', 'TypeScript', 'Python'], layoutAlt: true })
+    staleChip.click()
+  })
 
-  expect(currentMap().view.languages).toEqual([])
+  expect(currentMap().view.languages).toEqual(['Rust', 'Python'])
   expect(currentMap().view.layoutAlt).toBe(true)
-  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Filters' }))
+  expect(document.activeElement).toBe(within(strip).getByRole('button', { name: 'Remove language filter Python' }))
 })
 
-it('clears a no-op filter focus request without losing newer view state', async () => {
+it('applies a stale rendered checkbox value instead of toggling newer model state', async () => {
+  const data = makeAtlas([
+    makeRepo(),
+    makeRepo({ full_name: 'owner/python', name: 'python', primary_language: 'Python' }),
+  ])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
   let execute: ((input: unknown) => unknown) | undefined
   Object.defineProperty(document, 'modelContext', {
     configurable: true,
     value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
   })
-  window.history.replaceState(null, '', '/?lang=TypeScript')
-  render(<App />)
+  media.set({ compact: false })
+  const { container } = render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
   await waitFor(() => expect(execute).toBeDefined())
-  const mapButton = screen.getByRole('button', { name: 'Map' })
-  mapButton.focus()
-  const filters = currentActiveFilters()
+  const languageFilter = container.querySelector<HTMLElement>('.desktop-filters details')!
+  fireEvent.click(languageFilter.querySelector('summary')!)
+  const python = within(languageFilter).getByRole<HTMLInputElement>('checkbox', { name: /Python/ })
+  expect(python.checked).toBe(false)
 
-  act(() => { execute?.({ layoutAlt: true }) })
-  act(() => filters.onRemove(current => ({
-    ...current,
-    languages: [...current.languages, current.languages[0]],
-  }), 0))
-  expect(currentMap().view).toMatchObject({ languages: ['TypeScript'], layoutAlt: true })
-  act(() => { execute?.({ since: '2025-06' }) })
+  act(() => {
+    execute?.({ languages: ['Python'] })
+    python.click()
+  })
 
-  expect(currentMap().view.since).toBe('2025-06')
-  expect(document.activeElement).toBe(mapButton)
+  expect(currentMap().view.languages).toEqual(['Python'])
+  expect(screen.getByRole('button', { name: 'Remove language filter Python' })).toBeDefined()
 })
 
 it('uses one clear behavior and restores focus for controls and no-results actions', async () => {
@@ -569,17 +642,19 @@ it('acknowledges only the current navigation request and does not replay consume
 })
 
 it('keeps a pending region navigation when a normalized view update is a no-op', async () => {
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
   render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
   act(() => currentMap().onRegion?.('Developer Tools'))
   const pending = currentMap().navigationRequest
   expect(pending).toMatchObject({ kind: 'region', target: 'Developer Tools' })
-  const filters = currentActiveFilters()
 
-  act(() => filters.onRemove(current => ({
-    ...current,
-    regions: [...current.regions, ...current.regions],
-  }), 0))
+  act(() => { execute?.({ regions: ['Developer Tools', 'Developer Tools'] }) })
 
   expect(currentMap().navigationRequest).toEqual(pending)
 })
@@ -598,13 +673,19 @@ it('issues a fresh navigation request when the selected repository is explicitly
   expect(currentMap().navigationRequest!.nonce).toBeGreaterThan(initial.nonce)
 })
 
-it('cancels pending navigation when a double-click restores the selected repository', async () => {
+it('cancels only the pending navigation matching a double-click rollback token', async () => {
   window.history.replaceState(null, '', '?repo=owner%2Fexample')
   render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
-  expect(currentMap().navigationRequest).toMatchObject({ kind: 'repo', target: 'owner/example' })
+  const repo = currentMap().data.repos[0]
+  act(() => currentMap().onSelect(repo, { clickToken: 7 }))
+  const pending = currentMap().navigationRequest
+  expect(pending).toMatchObject({ kind: 'repo', target: 'owner/example', clickToken: 7 })
 
-  act(() => currentMap().onSelect(currentMap().data.repos[0], { navigate: false }))
+  act(() => currentMap().onSelect(repo, { navigate: false, clickToken: 8 }))
+  expect(currentMap().navigationRequest).toEqual(pending)
+
+  act(() => currentMap().onSelect(repo, { navigate: false, clickToken: 7 }))
 
   expect(currentMap().view.repo).toBe('owner/example')
   expect(currentMap().navigationRequest).toBeNull()

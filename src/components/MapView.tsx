@@ -293,7 +293,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       configureZoom(behavior, nextFit)
       setViewport(nextViewport)
       writeTransform(nextTransform)
-      positionVisibleTooltip()
+      if (nextSize === current.size) positionVisibleTooltip()
     }
     const observer = new ResizeObserver(resize)
     observer.observe(node)
@@ -537,7 +537,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
           if (!gesture.committed) onRegion?.(gesture.target as string)
           return
         }
-        if (gesture?.kind === 'repo' && gesture.committed) onSelect(gesture.selection, { navigate: false })
+        if (gesture?.kind === 'repo' && gesture.committed) onSelect(gesture.selection, { navigate: false, clickToken: gesture.token })
         zoomAtPointer(event.clientX, event.clientY, gesture?.kind === 'repo' ? gesture.camera : undefined)
       }}>
       <rect width={size.width} height={size.height} className="map-bg" />
