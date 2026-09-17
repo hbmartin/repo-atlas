@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { AtlasData, ViewState } from '../types'
-import type { AtlasPresentation } from '../presentation'
+import { regionFilterOptions, type AtlasPresentation } from '../presentation'
 import { FallbackLabel, FALLBACK_LABEL_EXPLANATION } from './FallbackLabel'
 
 export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onHighlight }: {
@@ -11,6 +11,10 @@ export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onH
   const currentRegion = view.regions.length === 1 ? view.regions[0] : null
   const fallbackLabels = useMemo(() => new Set(data.fallback_label_ids ?? []), [data.fallback_label_ids])
   const [expanded, setExpanded] = useState<number | null>(null)
+  const regions = regionFilterOptions(data)
+  const clusteredRegions = regions.filter(region => region.cluster !== null)
+    .toSorted((a, b) => a.label.localeCompare(b.label))
+  const unclustered = regions.find(region => region.cluster === null)
   return <div className="atlas-guide">
     <header><span className="eyebrow">EXPLORE THE LANDSCAPE</span><h2>Atlas guide</h2>
       <p>One point, one repository. Nearby projects share ideas and techniques.</p></header>
@@ -30,7 +34,9 @@ export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onH
       <p className="confidence-key"><i />Sparse README / low-confidence summary</p>
     </section>
     <section className="guide-regions"><h3>Regions <small>select to focus</small></h3>
-      {data.clusters.toSorted((a, b) => a.label.localeCompare(b.label)).map(cluster => <div key={cluster.id}>
+      {clusteredRegions.map(region => {
+        const cluster = region.cluster!
+        return <div key={cluster.id}>
         <button aria-current={currentRegion === cluster.label ? 'true' : undefined} onClick={() => onRegion(cluster.label)}
           onPointerEnter={() => { onHighlight(cluster.id); setExpanded(cluster.id) }}
           onPointerLeave={() => { onHighlight(null); setExpanded(null) }}
@@ -41,8 +47,9 @@ export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onH
         {(expanded === cluster.id || view.regions.includes(cluster.label)) && <p>{cluster.gloss}
           {fallbackLabels.has(cluster.id) && <span className="fallback-explanation">{FALLBACK_LABEL_EXPLANATION}</span>}
         </p>}
-      </div>)}
-      {data.stats.noise_count > 0 && <button onClick={() => onRegion('Unclustered')} aria-current={currentRegion === 'Unclustered' ? 'true' : undefined}>Unclustered <small>{data.stats.noise_count}</small></button>}
+      </div>
+      })}
+      {unclustered && <button onClick={() => onRegion(unclustered.label)} aria-current={currentRegion === unclustered.label ? 'true' : undefined}>{unclustered.label} <small>{unclustered.count}</small></button>}
     </section>
     <details className="guide-method"><summary>How this map works</summary>
       <p>Each README is normalized to a fixed schema, embedded by meaning, clustered in full-dimensional space, then projected here. Distance is an approximation; nearest-neighbor lists use the original embeddings.</p>

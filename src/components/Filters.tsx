@@ -1,5 +1,6 @@
 import { monthIndex, monthValue } from '../data'
 import type { AtlasData, ViewState } from '../types'
+import { regionFilterOptions } from '../presentation'
 import { formatDate, setIncluded } from '../view-utils'
 
 export function Filters({
@@ -45,10 +46,7 @@ export function Filters({
       <details className="filter-popover">
         <summary>Region{view.regions.length ? ` · ${view.regions.length}` : ''}</summary>
         <div className="filter-menu regions">
-          {[
-            ...data.clusters.map((cluster) => ({ label: cluster.label, count: cluster.member_count })),
-            ...(data.stats.noise_count > 0 ? [{ label: 'Unclustered', count: data.stats.noise_count }] : []),
-          ].map((region) => (
+          {regionFilterOptions(data).map((region) => (
             <label key={region.label}>
               <input
                 type="checkbox"

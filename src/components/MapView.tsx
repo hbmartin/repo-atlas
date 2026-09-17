@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { select } from 'd3-selection'
 import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
@@ -28,6 +28,19 @@ const positionTooltip = (anchor: { x: number; y: number }, tooltip: Size, viewpo
   left: Math.max(8, Math.min(anchor.x + 14, viewport.width - tooltip.width - 8)),
   top: Math.max(8, Math.min(anchor.y + 14, viewport.height - tooltip.height - 8)),
 })
+type MapTooltipProps = {
+  repo: AtlasRepo | null
+  ready: boolean
+  setNode: (node: HTMLDivElement | null) => void
+}
+// Keep the last committed tooltip subtree while viewport inputs are between layouts.
+const MapTooltip = memo(function MapTooltip({ repo, setNode }: MapTooltipProps) {
+  if (!repo) return null
+  return <div ref={setNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
+    <strong>{repo.name}</strong><span>{repo.one_liner}</span><small>{repo.primary_language} · updated {formatDate(repo.pushed_at)}</small>
+    {repo.low_confidence && <small>Sparse README / low-confidence summary</small>}
+  </div>
+}, (previous, next) => !next.ready || (previous.repo === next.repo && previous.setNode === next.setNode))
 
 export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
@@ -98,12 +111,15 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   useLayoutEffect(() => { boundsRef.current = bounds }, [bounds])
   useLayoutEffect(() => { viewportRef.current = viewport }, [viewport])
   const { size, fit, transform } = viewport
+  const viewportReady = viewport.measured && viewport.alt === view.layoutAlt && viewport.layoutToken === preparedLabels
+  const viewportReadyRef = useRef(false)
+  useLayoutEffect(() => { viewportReadyRef.current = viewportReady }, [viewportReady])
   const refreshSvgOrigin = useCallback(() => {
     const rect = svgRef.current?.getBoundingClientRect()
     if (rect) svgOrigin.current = { left: rect.left, top: rect.top }
   }, [])
   const positionVisibleTooltip = useCallback((node = tooltipRef.current) => {
-    if (!node) return
+    if (!node || !viewportReadyRef.current) return
     if (tooltipUsesPointer.current && tooltipOriginDirty.current) {
       tooltipOriginDirty.current = false
       refreshSvgOrigin()
@@ -141,8 +157,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (!node) return
     tooltipSize.current = TOOLTIP_FALLBACK_SIZE
     tooltipObserver.current?.observe(node)
-    positionVisibleTooltip(node)
-  }, [positionVisibleTooltip])
+  }, [])
   const commitTransform = useCallback((next: ZoomTransform) => {
     if (frame.current != null) cancelAnimationFrame(frame.current)
     frame.current = null
@@ -315,7 +330,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   useLayoutEffect(() => {
     if (!navigationRequest || consumedRequest.current === navigationRequest.nonce) return
     if (navigationRequest.clickToken !== clickGesture.current?.token) cancelClick()
-    if (!viewport.measured || viewport.alt !== view.layoutAlt) return
+    if (!viewportReady) return
     consumedRequest.current = navigationRequest.nonce
     if (navigationRequest.kind === 'repo') {
       const repo = reposByName.get(navigationRequest.target)
@@ -332,7 +347,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       }
     }
     onNavigationHandled?.(navigationRequest.nonce)
-  }, [navigationRequest, viewport.measured, viewport.alt, view.layoutAlt, data, reposByName, pointX, pointY, size, fit.k, apply, centerRepo, onNavigationHandled, cancelClick])
+  }, [navigationRequest, viewportReady, data, reposByName, pointX, pointY, size, fit.k, apply, centerRepo, onNavigationHandled, cancelClick])
 
   useLayoutEffect(() => {
     const old = previousView.current
@@ -471,13 +486,12 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const mapAnchorX = mapTooltipAnchor?.x ?? 0
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
-  const tooltipViewportReady = viewport.alt === view.layoutAlt && viewport.layoutToken === preparedLabels
   useLayoutEffect(() => {
-    if (!tooltipViewportReady) return
+    if (!viewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor
     tooltipMapAnchor.current = hasTooltip && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
     positionVisibleTooltip()
-  }, [tooltipViewportReady, hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
+  }, [viewportReady, activeRepo, hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
   useEffect(() => {
     const handleScroll = () => {
       tooltipOriginDirty.current = true
@@ -584,9 +598,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    {activeRepo && <div ref={setTooltipNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
-      <strong>{activeRepo.name}</strong><span>{activeRepo.one_liner}</span><small>{activeRepo.primary_language} · updated {formatDate(activeRepo.pushed_at)}</small>
-      {activeRepo.low_confidence && <small>Sparse README / low-confidence summary</small>}
-    </div>}
+    <MapTooltip repo={activeRepo} ready={viewportReady} setNode={setTooltipNode} />
   </div>
 }

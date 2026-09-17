@@ -2,9 +2,9 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   AtlasRequestError,
   loadAtlas,
+  monthValue,
   normalizeAtlasSince,
-  parseViewState,
-  unknownViewParameters,
+  readViewState,
   validAtlasMonth,
   writeViewState,
 } from './data'
@@ -70,7 +70,7 @@ function validateToolViewUpdate(input: unknown, data: AtlasData, presentation: A
   }
   if ('since' in value) {
     if (value.since !== null && (typeof value.since !== 'string' || !validAtlasMonth(value.since, data))) {
-      throw new Error('since must use a valid YYYY-MM month or null.')
+      throw new Error(`since must be null or a valid YYYY-MM month no later than ${monthValue(presentation.maxMonth)}.`)
     }
     update.since = typeof value.since === 'string' ? normalizeAtlasSince(value.since, data) : null
   }
@@ -111,11 +111,13 @@ export default function App() {
   const [urlWarning, setUrlWarning] = useState<string[]>([])
   const navigationSequence = useRef(0)
   const navigationRequestRef = useRef<MapNavigationRequest | null>(null)
+  const rollbackClickToken = useRef<number | null>(null)
   const replaceNavigation = useCallback((request: MapNavigationRequest | null) => {
     navigationRequestRef.current = request
     setNavigationRequest(request)
   }, [])
   const requestNavigation = useCallback((kind: 'repo' | 'region', target: string, clickToken?: number) => {
+    rollbackClickToken.current = clickToken ?? null
     replaceNavigation({ kind, target, clickToken, nonce: ++navigationSequence.current })
   }, [replaceNavigation])
   const acknowledgeNavigation = useCallback((nonce: number) => {
@@ -135,12 +137,11 @@ export default function App() {
     loadAtlas()
       .then((atlas) => {
         setData(atlas)
-        const warning = unknownViewParameters(window.location.search, atlas)
-        const initial = parseViewState(window.location.search, atlas)
+        const { view: initial, unknown } = readViewState(window.location.search, atlas)
         viewRef.current = initial
         setViewState(initial)
         if (initial.repo) requestNavigation('repo', initial.repo)
-        setUrlWarning(warning)
+        setUrlWarning(unknown)
       })
       .catch((reason) => setError(reason instanceof Error ? reason : new Error(String(reason))))
   }, [requestNavigation])
@@ -149,7 +150,7 @@ export default function App() {
     const current = viewRef.current
     const rollbackToken = options?.navigate === false ? options.clickToken : undefined
     const pendingNavigation = navigationRequestRef.current
-    if (rollbackToken !== undefined && pendingNavigation && pendingNavigation.clickToken !== rollbackToken) {
+    if (rollbackToken !== undefined && rollbackClickToken.current !== rollbackToken) {
       return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
     }
     const next = typeof update === 'function' ? update(current) : update
@@ -167,9 +168,14 @@ export default function App() {
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
     else if (rollbackToken !== undefined) {
-      if (navigationRequestRef.current?.clickToken === rollbackToken) replaceNavigation(null)
+      rollbackClickToken.current = null
+      if (pendingNavigation?.clickToken === rollbackToken) replaceNavigation(null)
     } else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
       replaceNavigation(null)
+    }
+    if (rollbackToken === undefined && !navigationTarget
+      && (stateChanged || options?.navigate === true || options?.navigate === false || options?.canonicalizeUrl)) {
+      rollbackClickToken.current = null
     }
     if (stateChanged) {
       viewRef.current = normalized
@@ -199,13 +205,13 @@ export default function App() {
   useEffect(() => {
     if (!data) return
     const restore = () => {
-      const warning = unknownViewParameters(window.location.search, data)
-      const restored = parseViewState(window.location.search, data)
+      rollbackClickToken.current = null
+      const { view: restored, unknown } = readViewState(window.location.search, data)
       viewRef.current = restored
       setViewState(restored)
       if (restored.repo) requestNavigation('repo', restored.repo)
       else replaceNavigation(null)
-      setUrlWarning(warning)
+      setUrlWarning(unknown)
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
@@ -253,6 +259,8 @@ export default function App() {
   useEffect(() => {
     if (!data || !presentation || !document.modelContext?.registerTool) return
     const lifecycle = new AbortController()
+    const earliestMonth = monthValue(presentation.minMonth)
+    const latestMonth = monthValue(presentation.maxMonth)
     const registration = document.modelContext.registerTool({
       name: 'configure_atlas_view',
       title: 'Configure Repo Atlas view',
@@ -264,7 +272,11 @@ export default function App() {
           repo: { type: ['string', 'null'], minLength: 1, description: 'Exact owner/name, or null to clear selection.' },
           languages: { type: 'array', description: 'Case-sensitive map categories or raw primary-language names currently in the atlas.', items: { type: 'string', enum: languageFilterNames(data) } },
           regions: { type: 'array', items: { type: 'string' } },
-          since: { type: ['string', 'null'], pattern: '^\\d{4}-(0[1-9]|1[0-2])$' },
+          since: {
+            type: ['string', 'null'],
+            pattern: '^\\d{4}-(0[1-9]|1[0-2])$',
+            description: `YYYY-MM no later than ${latestMonth}, or null. Months through ${earliestMonth} normalize to All dates.`,
+          },
           layoutAlt: { type: 'boolean' },
         },
       },
@@ -368,13 +380,16 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={() => {
+          <button onClick={(event) => {
+            const keyboardActivation = event.detail === 0
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            window.requestAnimationFrame(() => {
-              if (mobileFilters) focusElement(doneButton.current, true)
-              else if (compact) focusElement(filterButton.current)
-              else focusElement(searchInput.current)
-            })
+            if (mobileFilters || compact || keyboardActivation) {
+              window.requestAnimationFrame(() => {
+                if (mobileFilters) focusElement(doneButton.current, true)
+                else if (compact) focusElement(filterButton.current)
+                else focusElement(searchInput.current)
+              })
+            }
           }}>Reset link</button>
         </div>
       )}

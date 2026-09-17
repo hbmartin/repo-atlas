@@ -127,15 +127,15 @@ describe('App mobile filters', () => {
     const beforeView = currentMap().view
     const beforeNavigation = currentMap().navigationRequest
     const beforeUrl = window.location.href
+    const sinceError = 'since must be null or a valid YYYY-MM month no later than 2025-06.'
 
     for (const [input, message] of [
       [{ repo: '' }, 'repo must be an exact owner/name or null.'],
       [{ repo: undefined }, 'repo must be an exact owner/name or null.'],
-      [{ since: '' }, 'since must use a valid YYYY-MM month or null.'],
-      [{ since: '1990-01' }, 'since must use a valid YYYY-MM month or null.'],
-      [{ since: '2999-01' }, 'since must use a valid YYYY-MM month or null.'],
-      [{ since: 0 }, 'since must use a valid YYYY-MM month or null.'],
-      [{ since: false }, 'since must use a valid YYYY-MM month or null.'],
+      [{ since: '' }, sinceError],
+      [{ since: '2999-01' }, sinceError],
+      [{ since: 0 }, sinceError],
+      [{ since: false }, sinceError],
       [{ layoutAlt: 'true' }, 'layoutAlt must be a boolean.'],
       [{ layoutAlt: 0 }, 'layoutAlt must be a boolean.'],
       [{ unexpected: true }, 'Unknown view property: unexpected.'],
@@ -148,22 +148,36 @@ describe('App mobile filters', () => {
     expect(window.location.href).toBe(beforeUrl)
   })
 
-  it('normalizes the earliest model-context month to all dates', async () => {
+  it('documents date bounds and normalizes earlier model-context months to all dates', async () => {
+    const data = makeAtlas([
+      makeRepo({ pushed_at: '2024-01-15' }),
+      makeRepo({ full_name: 'owner/newer', pushed_at: '2025-06-01' }),
+    ])
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
     let execute: ((input: unknown) => { since: string | null }) | undefined
+    let description: string | undefined
     Object.defineProperty(document, 'modelContext', {
       configurable: true,
-      value: { registerTool(tool: { execute(input: unknown): { since: string | null } }) { execute = tool.execute } },
+      value: { registerTool(tool: { execute(input: unknown): { since: string | null }; inputSchema: { properties: { since: { description: string } } } }) {
+        execute = tool.execute
+        description = tool.inputSchema.properties.since.description
+      } },
     })
     render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
     await waitFor(() => expect(execute).toBeDefined())
 
     let result: { since: string | null } | undefined
-    act(() => { result = execute?.({ since: '2025-06' }) })
+    expect(description).toBe('YYYY-MM no later than 2025-06, or null. Months through 2024-01 normalize to All dates.')
+    act(() => { result = execute?.({ since: '1990-01' }) })
 
     expect(result?.since).toBeNull()
     expect(currentMap().view.since).toBeNull()
     expect(window.location.search).toBe('')
+
+    act(() => { result = execute?.({ since: '2025-06' }) })
+    expect(result?.since).toBe('2025-06')
+    expect(currentMap().view.since).toBe('2025-06')
   })
 
   it('does not expose state-owned filter arrays in model-context results', async () => {
@@ -354,7 +368,7 @@ describe('App mobile filters', () => {
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
-  it('focuses search after a wide-layout pointer Reset link activation', async () => {
+  it('does not focus search after a wide-layout pointer Reset link activation', async () => {
     const user = userEvent.setup()
     media.set({ compact: false })
     window.history.replaceState(null, '', '/?wat=1')
@@ -365,8 +379,8 @@ describe('App mobile filters', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
-    expect(document.activeElement).toBe(search)
-    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(document.activeElement).not.toBe(search)
+    expect(focus).not.toHaveBeenCalled()
   })
 
   it('keeps Reset link focus inside an open mobile filter dialog', async () => {
@@ -620,6 +634,33 @@ it('ignores a stale rendered chip whose filter is already gone without moving fo
   expect(document.activeElement).toBe(mapButton)
 })
 
+it('ignores a stale since chip after the model selects a newer month', async () => {
+  const data = makeAtlas([
+    makeRepo({ pushed_at: '2024-01-15' }),
+    makeRepo({ full_name: 'owner/newer', pushed_at: '2025-06-01' }),
+  ])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  media.set({ compact: false })
+  window.history.replaceState(null, '', '/?since=2025-05')
+  const { container } = render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+  const staleChip = container.querySelector<HTMLButtonElement>('.controls .active-filters button')!
+
+  act(() => {
+    execute?.({ since: '2025-06' })
+    staleChip.click()
+  })
+
+  expect(currentMap().view.since).toBe('2025-06')
+  expect(screen.getByRole('button', { name: 'Remove updated since filter Jun 2025' })).toBeDefined()
+})
+
 it('applies a stale rendered checkbox value instead of toggling newer model state', async () => {
   const data = makeAtlas([
     makeRepo(),
@@ -768,6 +809,58 @@ it('rejects a stale double-click rollback while preserving a newer pending move'
 
   expect(currentMap().view.repo).toBeNull()
   expect(currentMap().navigationRequest).toBeNull()
+})
+
+it('rejects rollbacks superseded by model, filter, and history state', async () => {
+  const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
+  const data = makeAtlas([first, second])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  window.history.replaceState(null, '', `/?repo=${encodeURIComponent(first.full_name)}`)
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+
+  act(() => currentMap().onSelect(second, { clickToken: 21 }))
+  act(() => {
+    execute?.({ repo: null })
+    currentMap().onSelect(first, { navigate: false, clickToken: 21 })
+  })
+  expect(currentMap().view.repo).toBeNull()
+
+  act(() => currentMap().onSelect(second, { clickToken: 22 }))
+  act(() => {
+    execute?.({ languages: ['TypeScript'] })
+    currentMap().onSelect(null, { navigate: false, clickToken: 22 })
+  })
+  expect(currentMap().view).toMatchObject({ repo: second.full_name, languages: ['TypeScript'] })
+
+  act(() => currentMap().onSelect(first, { clickToken: 23 }))
+  window.history.replaceState(null, '', '/?lang=TypeScript')
+  fireEvent.popState(window)
+  act(() => currentMap().onSelect(second, { navigate: false, clickToken: 23 }))
+  expect(currentMap().view).toMatchObject({ repo: null, languages: ['TypeScript'] })
+})
+
+it('allows a matching rollback after its navigation was acknowledged', async () => {
+  const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
+  const data = makeAtlas([first, second])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  window.history.replaceState(null, '', `/?repo=${encodeURIComponent(first.full_name)}`)
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+
+  act(() => currentMap().onSelect(second, { clickToken: 31 }))
+  const request = currentMap().navigationRequest!
+  act(() => currentMap().onNavigationHandled?.(request.nonce))
+  expect(currentMap().navigationRequest).toBeNull()
+
+  act(() => currentMap().onSelect(first, { navigate: false, clickToken: 31 }))
+  expect(currentMap().view.repo).toBe(first.full_name)
 })
 
 it('keeps presentation and visibility stable on selection and projection updates', async () => {
