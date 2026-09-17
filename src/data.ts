@@ -1,4 +1,5 @@
-import { knownLanguage, knownRegion, normalizeLanguages, normalizeRegions } from './presentation'
+import { atlasMonthRange, knownLanguage, knownRegion, normalizeLanguages, normalizeRegions } from './presentation'
+import { monthIndex } from './month'
 import type { AtlasData, AtlasRepo, ViewState } from './types'
 
 export { monthIndex, monthValue } from './month'
@@ -47,6 +48,17 @@ function normalizeHttpUrl(value: unknown, path: string, nullable = false): strin
 
 export function validMonth(value: string): boolean {
   return MONTH.test(value)
+}
+
+export function validAtlasMonth(value: string, data: AtlasData): boolean {
+  if (!validMonth(value)) return false
+  const index = monthIndex(value)
+  const { minMonth, maxMonth } = atlasMonthRange(data)
+  return index >= minMonth && index <= maxMonth
+}
+
+export function normalizeAtlasSince(value: string, data: AtlasData): string | null {
+  return monthIndex(value) === atlasMonthRange(data).minMonth ? null : value
 }
 
 export function validateAtlas(value: unknown): AtlasData {
@@ -204,15 +216,24 @@ export async function loadAtlas(): Promise<AtlasData> {
   return validateAtlas(await response.json())
 }
 
+function viewParameterValues(
+  params: URLSearchParams,
+  key: string,
+  knownValue: (value: string) => boolean,
+): string[] {
+  return params.getAll(key).flatMap(value => knownValue(value) ? [value] : value.split(',')).filter(Boolean)
+}
+
 export function parseViewState(search: string, data: AtlasData): ViewState {
   const params = new URLSearchParams(search)
   const repo = params.get('repo')
   const since = params.get('since')
+  const regions = viewParameterValues(params, 'region', value => knownRegion(data, value))
   return {
     repo: repo && data.repos.some((item) => item.full_name === repo) ? repo : null,
     languages: normalizeLanguages((params.get('lang') ?? '').split(',').filter((value) => knownLanguage(data, value))),
-    regions: normalizeRegions((params.get('region') ?? '').split(',').filter((value) => knownRegion(data, value))),
-    since: since && validMonth(since) ? since : null,
+    regions: normalizeRegions(regions.filter((value) => knownRegion(data, value))),
+    since: since && validAtlasMonth(since, data) ? normalizeAtlasSince(since, data) : null,
     layoutAlt: params.get('layout') === 'alt',
   }
 }
@@ -224,9 +245,9 @@ export function unknownViewParameters(search: string, data: AtlasData): string[]
   const repo = params.get('repo')
   if (repo && !data.repos.some((item) => item.full_name === repo)) unknown.push(`repo=${repo}`)
   for (const value of (params.get('lang') ?? '').split(',').filter(Boolean)) if (!knownLanguage(data, value)) unknown.push(`lang=${value}`)
-  for (const value of (params.get('region') ?? '').split(',').filter(Boolean)) if (!knownRegion(data, value)) unknown.push(`region=${value}`)
+  for (const value of viewParameterValues(params, 'region', item => knownRegion(data, item))) if (!knownRegion(data, value)) unknown.push(`region=${value}`)
   const since = params.get('since')
-  if (since && !validMonth(since)) unknown.push(`since=${since}`)
+  if (since && !validAtlasMonth(since, data)) unknown.push(`since=${since}`)
   const layout = params.get('layout')
   if (layout && layout !== 'alt') unknown.push(`layout=${layout}`)
   return unknown
@@ -236,7 +257,7 @@ export function writeViewState(state: ViewState): string {
   const params = new URLSearchParams()
   if (state.repo) params.set('repo', state.repo)
   if (state.languages.length) params.set('lang', normalizeLanguages(state.languages).join(','))
-  if (state.regions.length) params.set('region', normalizeRegions(state.regions).join(','))
+  for (const region of normalizeRegions(state.regions)) params.append('region', region)
   if (state.since) params.set('since', state.since)
   if (state.layoutAlt) params.set('layout', 'alt')
   const value = params.toString()

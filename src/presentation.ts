@@ -9,6 +9,7 @@ export const sameValues = (a: string[], b: string[]) =>
 export const languageCategories = (data: AtlasData) => data.languages
 const languageIndices = new WeakMap<AtlasData, { names: string[]; nameSet: Set<string>; categorySet: Set<string> }>()
 const regionIndices = new WeakMap<AtlasData, Set<string>>()
+const monthRanges = new WeakMap<AtlasData, { minMonth: number; maxMonth: number }>()
 export function languageIndex(data: AtlasData) {
   const cached = languageIndices.get(data)
   if (cached) return cached
@@ -26,7 +27,10 @@ export const knownLanguage = (data: AtlasData, name: string) => languageIndex(da
 export function knownRegion(data: AtlasData, name: string) {
   let names = regionIndices.get(data)
   if (!names) {
-    names = new Set([...data.clusters.map(cluster => cluster.label), 'Unclustered'])
+    names = new Set([
+      ...data.clusters.map(cluster => cluster.label),
+      ...(data.stats.noise_count > 0 ? ['Unclustered'] : []),
+    ])
     regionIndices.set(data, names)
   }
   return names.has(name)
@@ -40,17 +44,26 @@ export function preserveValues(previous: string[], next: string[]) {
   return sameValues(previous, next) ? previous : next
 }
 
-export function atlasPresentation(data: AtlasData) {
-  const languages = data.languages
-  const languageColors = new Map(languages.map(item => [item.name, item.color]))
-  const reposByName = new Map(data.repos.map(repo => [repo.full_name, repo]))
-  const clustersById = new Map(data.clusters.map(cluster => [cluster.id, cluster]))
+export function atlasMonthRange(data: AtlasData) {
+  const cached = monthRanges.get(data)
+  if (cached) return cached
   let minMonth = Infinity, maxMonth = -Infinity
   for (const repo of data.repos) {
     const value = monthIndex(repo.pushed_at)
     minMonth = Math.min(minMonth, value)
     maxMonth = Math.max(maxMonth, value)
   }
+  const range = { minMonth, maxMonth }
+  monthRanges.set(data, range)
+  return range
+}
+
+export function atlasPresentation(data: AtlasData) {
+  const languages = data.languages
+  const languageColors = new Map(languages.map(item => [item.name, item.color]))
+  const reposByName = new Map(data.repos.map(repo => [repo.full_name, repo]))
+  const clustersById = new Map(data.clusters.map(cluster => [cluster.id, cluster]))
+  const { minMonth, maxMonth } = atlasMonthRange(data)
   return { languages, languageColors, reposByName, clustersById, minMonth, maxMonth,
     sizes: fileSizeScale(data.repos), colors: regionColors(data) }
 }

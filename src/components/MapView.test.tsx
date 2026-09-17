@@ -10,6 +10,7 @@ import {
   mobileMapTargetY,
   nearestRepoAtPoint,
   pointerToMapPoint,
+  setIncluded,
 } from '../view-utils'
 import { atlasBounds, constrainMapTransform } from '../map-geometry'
 import { atlasPresentation } from '../presentation'
@@ -32,6 +33,13 @@ afterEach(() => {
 })
 
 describe('MapView', () => {
+  it('sets membership idempotently', () => {
+    const values = ['TypeScript']
+    expect(setIncluded(values, 'TypeScript', true)).toBe(values)
+    expect(setIncluded(values, 'Python', false)).toBe(values)
+    expect(setIncluded(values, 'Python', true)).toEqual(['TypeScript', 'Python'])
+    expect(setIncluded(values, 'TypeScript', false)).toEqual([])
+  })
   it('chooses the geometrically nearest repository in overlapping hit areas', () => {
     const first = makeAtlas().repos[0]
     const second = { ...first, full_name: 'owner/second', name: 'second', x: 515 }

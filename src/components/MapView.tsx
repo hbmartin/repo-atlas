@@ -293,7 +293,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       configureZoom(behavior, nextFit)
       setViewport(nextViewport)
       writeTransform(nextTransform)
-      if (nextSize === current.size) positionVisibleTooltip()
     }
     const observer = new ResizeObserver(resize)
     observer.observe(node)
@@ -472,11 +471,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const mapAnchorX = mapTooltipAnchor?.x ?? 0
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
+  const tooltipViewportReady = viewport.alt === view.layoutAlt && viewport.layoutToken === preparedLabels
   useLayoutEffect(() => {
+    if (!tooltipViewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor
     tooltipMapAnchor.current = hasTooltip && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
     positionVisibleTooltip()
-  }, [hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
+  }, [tooltipViewportReady, hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
   useEffect(() => {
     const handleScroll = () => {
       tooltipOriginDirty.current = true

@@ -1,32 +1,28 @@
 import type { RefObject } from 'react'
 import type { ViewState } from '../types'
 import { formatDate } from '../view-utils'
-
-export type ActiveFilterRemoval =
-  | { kind: 'language'; value: string }
-  | { kind: 'region'; value: string }
-  | { kind: 'since' }
+import { activeFilterEntries, activeFilterKey, type ActiveFilterRemoval } from '../active-filters'
 
 export function ActiveFilters({ view, onRemove, groupRef }: {
   view: ViewState
   onRemove: (filter: ActiveFilterRemoval) => void
   groupRef?: RefObject<HTMLDivElement | null>
 }) {
-  if (!view.languages.length && !view.regions.length && !view.since) return null
+  const filters = activeFilterEntries(view)
+  if (!filters.length) return null
   return <div ref={groupRef} className="active-filters" role="group" aria-label="Active filters">
-    {view.languages.map(name => <button key={`language-${name}`} type="button"
-      aria-label={`Remove language filter ${name}`}
-      onClick={() => onRemove({ kind: 'language', value: name })}>
-      Language · {name}<span aria-hidden="true">×</span>
-    </button>)}
-    {view.regions.map(name => <button key={`region-${name}`} type="button"
-      aria-label={`Remove region filter ${name}`}
-      onClick={() => onRemove({ kind: 'region', value: name })}>
-      Region · {name}<span aria-hidden="true">×</span>
-    </button>)}
-    {view.since && <button type="button" aria-label={`Remove updated since filter ${formatDate(view.since)}`}
-      onClick={() => onRemove({ kind: 'since' })}>
-      Since · {formatDate(view.since)}<span aria-hidden="true">×</span>
-    </button>}
+    {filters.map(filter => {
+      if (filter.kind === 'since') return <button key="since" type="button"
+        aria-label={`Remove updated since filter ${formatDate(view.since!)}`}
+        onClick={() => onRemove(filter)}>
+        Since · {formatDate(view.since!)}<span aria-hidden="true">×</span>
+      </button>
+      const label = filter.kind === 'language' ? 'Language' : 'Region'
+      return <button key={activeFilterKey(filter)} type="button"
+        aria-label={`Remove ${filter.kind} filter ${filter.value}`}
+        onClick={() => onRemove(filter)}>
+        {label} · {filter.value}<span aria-hidden="true">×</span>
+      </button>
+    })}
   </div>
 }

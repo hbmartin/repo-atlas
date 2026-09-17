@@ -2,23 +2,25 @@ import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } fr
 import {
   AtlasRequestError,
   loadAtlas,
+  normalizeAtlasSince,
   parseViewState,
   unknownViewParameters,
-  validMonth,
+  validAtlasMonth,
   writeViewState,
 } from './data'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from './types'
 import { DetailPanel } from './components/DetailPanel'
-import { ActiveFilters, type ActiveFilterRemoval } from './components/ActiveFilters'
+import { ActiveFilters } from './components/ActiveFilters'
+import { activeFilterEntries, activeFilterKey, type ActiveFilterRemoval } from './active-filters'
 import { Filters } from './components/Filters'
 import { ListView } from './components/ListView'
 import { Loading } from './components/Loading'
 import { MapView } from './components/MapView'
 import { SearchBox } from './components/SearchBox'
-import { COMPACT_MEDIA_QUERY, formatDate, toggleValue, useMediaQuery } from './view-utils'
+import { COMPACT_MEDIA_QUERY, formatDate, setIncluded, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { atlasPresentation, knownLanguage, knownRegion, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues } from './presentation'
+import { atlasPresentation, knownLanguage, knownRegion, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues, type AtlasPresentation } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -36,18 +38,18 @@ type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: 
 
 const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'languages', 'regions', 'since', 'layoutAlt'])
 
-function validateToolViewUpdate(input: unknown, data: AtlasData): Partial<ViewState> {
+function validateToolViewUpdate(input: unknown, data: AtlasData, presentation: AtlasPresentation): Partial<ViewState> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Input must be an object.')
   const value = input as Record<string, unknown>
   const unknownKey = Object.keys(value).find(key => !TOOL_VIEW_KEYS.has(key as keyof ViewState))
-  if (unknownKey) throw new Error(`Unknown view property: ${unknownKey}.`)
+  if (unknownKey !== undefined) throw new Error(`Unknown view property: ${unknownKey || '""'}.`)
   const update: Partial<ViewState> = {}
 
   if ('repo' in value) {
     if (value.repo !== null && (typeof value.repo !== 'string' || !value.repo.trim())) {
       throw new Error('repo must be an exact owner/name or null.')
     }
-    if (typeof value.repo === 'string' && !data.repos.some(item => item.full_name === value.repo)) {
+    if (typeof value.repo === 'string' && !presentation.reposByName.has(value.repo)) {
       throw new Error('Unknown repository.')
     }
     update.repo = value.repo as string | null
@@ -57,20 +59,20 @@ function validateToolViewUpdate(input: unknown, data: AtlasData): Partial<ViewSt
     if (!value.languages.every(name => typeof name === 'string' && knownLanguage(data, name))) {
       throw new Error('Unknown language category or raw primary-language filter.')
     }
-    update.languages = normalizeLanguages(value.languages as string[])
+    update.languages = value.languages as string[]
   }
   if ('regions' in value) {
     if (!Array.isArray(value.regions)) throw new Error('regions must be an array.')
     if (!value.regions.every(name => typeof name === 'string' && knownRegion(data, name))) {
       throw new Error('Unknown region filter.')
     }
-    update.regions = normalizeRegions(value.regions as string[])
+    update.regions = value.regions as string[]
   }
   if ('since' in value) {
-    if (value.since !== null && (typeof value.since !== 'string' || !validMonth(value.since))) {
+    if (value.since !== null && (typeof value.since !== 'string' || !validAtlasMonth(value.since, data))) {
       throw new Error('since must use a valid YYYY-MM month or null.')
     }
-    update.since = value.since as string | null
+    update.since = typeof value.since === 'string' ? normalizeAtlasSince(value.since, data) : null
   }
   if ('layoutAlt' in value) {
     if (typeof value.layoutAlt !== 'boolean') throw new Error('layoutAlt must be a boolean.')
@@ -108,12 +110,17 @@ export default function App() {
   if (mobileFilters && !compact) setMobileFilters(false)
   const [urlWarning, setUrlWarning] = useState<string[]>([])
   const navigationSequence = useRef(0)
+  const navigationRequestRef = useRef<MapNavigationRequest | null>(null)
+  const replaceNavigation = useCallback((request: MapNavigationRequest | null) => {
+    navigationRequestRef.current = request
+    setNavigationRequest(request)
+  }, [])
   const requestNavigation = useCallback((kind: 'repo' | 'region', target: string, clickToken?: number) => {
-    setNavigationRequest({ kind, target, clickToken, nonce: ++navigationSequence.current })
-  }, [])
+    replaceNavigation({ kind, target, clickToken, nonce: ++navigationSequence.current })
+  }, [replaceNavigation])
   const acknowledgeNavigation = useCallback((nonce: number) => {
-    setNavigationRequest(current => current?.nonce === nonce ? null : current)
-  }, [])
+    if (navigationRequestRef.current?.nonce === nonce) replaceNavigation(null)
+  }, [replaceNavigation])
   const viewRef = useRef(view)
   const searchInput = useRef<HTMLInputElement>(null)
   const filterButton = useRef<HTMLButtonElement>(null)
@@ -122,6 +129,7 @@ export default function App() {
   const controlsChips = useRef<HTMLDivElement>(null)
   const dialogChips = useRef<HTMLDivElement>(null)
   const pendingFilterFocus = useRef<FilterFocusRequest | null>(null)
+  const presentation = useMemo(() => data ? atlasPresentation(data) : null, [data])
 
   useEffect(() => {
     loadAtlas()
@@ -139,6 +147,11 @@ export default function App() {
 
   const setView = useCallback((update: ViewUpdate, options?: ViewUpdateOptions) => {
     const current = viewRef.current
+    const rollbackToken = options?.navigate === false ? options.clickToken : undefined
+    const pendingNavigation = navigationRequestRef.current
+    if (rollbackToken !== undefined && pendingNavigation && pendingNavigation.clickToken !== rollbackToken) {
+      return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
+    }
     const next = typeof update === 'function' ? update(current) : update
     const nextLanguages = normalizeLanguages(next.languages)
     const nextRegions = normalizeRegions(next.regions)
@@ -153,10 +166,10 @@ export default function App() {
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
-    else if (options?.navigate === false && options.clickToken !== undefined) {
-      setNavigationRequest(current => current?.clickToken === options.clickToken ? null : current)
+    else if (rollbackToken !== undefined) {
+      if (navigationRequestRef.current?.clickToken === rollbackToken) replaceNavigation(null)
     } else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
-      setNavigationRequest(null)
+      replaceNavigation(null)
     }
     if (stateChanged) {
       viewRef.current = normalized
@@ -167,7 +180,7 @@ export default function App() {
       window.history.replaceState(null, '', writeViewState(normalized))
     }
     return { stateChanged, filtersChanged, view: normalized } satisfies ViewUpdateResult
-  }, [requestNavigation])
+  }, [replaceNavigation, requestNavigation])
 
   useLayoutEffect(() => {
     const request = pendingFilterFocus.current
@@ -191,12 +204,12 @@ export default function App() {
       viewRef.current = restored
       setViewState(restored)
       if (restored.repo) requestNavigation('repo', restored.repo)
-      else setNavigationRequest(null)
+      else replaceNavigation(null)
       setUrlWarning(warning)
     }
     window.addEventListener('popstate', restore)
     return () => window.removeEventListener('popstate', restore)
-  }, [data, requestNavigation])
+  }, [data, replaceNavigation, requestNavigation])
 
   const closeMobileFilters = useCallback(() => {
     setMobileFilters(false)
@@ -238,7 +251,7 @@ export default function App() {
   }, [closeMobileFilters, mobileFilters])
 
   useEffect(() => {
-    if (!data || !document.modelContext?.registerTool) return
+    if (!data || !presentation || !document.modelContext?.registerTool) return
     const lifecycle = new AbortController()
     const registration = document.modelContext.registerTool({
       name: 'configure_atlas_view',
@@ -257,7 +270,7 @@ export default function App() {
       },
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute(input) {
-        const value = validateToolViewUpdate(input, data)
+        const value = validateToolViewUpdate(input, data, presentation)
         const next = setView((current) => {
           const languages = value.languages ?? current.languages
           const regions = value.regions ?? current.regions
@@ -282,9 +295,7 @@ export default function App() {
     }, { signal: lifecycle.signal })
     Promise.resolve(registration).catch(() => undefined)
     return () => lifecycle.abort()
-  }, [data, setView])
-
-  const presentation = useMemo(() => data ? atlasPresentation(data) : null, [data])
+  }, [data, presentation, setView])
   const derived = useMemo(() => {
     if (!data || !presentation) return null
     const { clustersById } = presentation
@@ -321,20 +332,15 @@ export default function App() {
   const removeActiveFilter = (filter: ActiveFilterRemoval, scope: FilterFocusRequest['scope']) => {
     pendingFilterFocus.current = null
     const result = setView(current => {
+      const index = activeFilterEntries(current).findIndex(entry => activeFilterKey(entry) === activeFilterKey(filter))
+      if (index < 0) return current
+      pendingFilterFocus.current = { scope, index }
       if (filter.kind === 'language') {
-        const index = current.languages.indexOf(filter.value)
-        if (index < 0) return current
-        pendingFilterFocus.current = { scope, index }
         return { ...current, languages: current.languages.filter(value => value !== filter.value) }
       }
       if (filter.kind === 'region') {
-        const index = current.regions.indexOf(filter.value)
-        if (index < 0) return current
-        pendingFilterFocus.current = { scope, index: current.languages.length + index }
         return { ...current, regions: current.regions.filter(value => value !== filter.value) }
       }
-      if (!current.since) return current
-      pendingFilterFocus.current = { scope, index: current.languages.length + current.regions.length }
       return { ...current, since: null }
     })
     if (!result.filtersChanged) pendingFilterFocus.current = null
@@ -354,7 +360,7 @@ export default function App() {
     setHighlightRegion(null)
   }
   const guide = <AtlasGuide data={data} presentation={presentation} view={view}
-    onLanguage={name => setView(current => ({ ...current, languages: toggleValue(current.languages, name) }))}
+    onLanguage={(name, included) => setView(current => ({ ...current, languages: setIncluded(current.languages, name, included) }))}
     onRegion={chooseRegion} onHighlight={setHighlightRegion} />
 
   return (
@@ -362,16 +368,13 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={(event) => {
-            const keyboardActivation = event.detail === 0
+          <button onClick={() => {
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            if (mobileFilters || compact || keyboardActivation) {
-              window.requestAnimationFrame(() => {
-                if (mobileFilters) focusElement(doneButton.current, true)
-                else if (compact) focusElement(filterButton.current)
-                else focusElement(searchInput.current)
-              })
-            }
+            window.requestAnimationFrame(() => {
+              if (mobileFilters) focusElement(doneButton.current, true)
+              else if (compact) focusElement(filterButton.current)
+              else focusElement(searchInput.current)
+            })
           }}>Reset link</button>
         </div>
       )}

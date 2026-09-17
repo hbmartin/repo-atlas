@@ -130,18 +130,40 @@ describe('App mobile filters', () => {
 
     for (const [input, message] of [
       [{ repo: '' }, 'repo must be an exact owner/name or null.'],
+      [{ repo: undefined }, 'repo must be an exact owner/name or null.'],
       [{ since: '' }, 'since must use a valid YYYY-MM month or null.'],
+      [{ since: '1990-01' }, 'since must use a valid YYYY-MM month or null.'],
+      [{ since: '2999-01' }, 'since must use a valid YYYY-MM month or null.'],
       [{ since: 0 }, 'since must use a valid YYYY-MM month or null.'],
       [{ since: false }, 'since must use a valid YYYY-MM month or null.'],
       [{ layoutAlt: 'true' }, 'layoutAlt must be a boolean.'],
       [{ layoutAlt: 0 }, 'layoutAlt must be a boolean.'],
       [{ unexpected: true }, 'Unknown view property: unexpected.'],
+      [{ '': true }, 'Unknown view property: "".'],
     ] as const) {
       expect(() => execute?.(input)).toThrow(message)
     }
     expect(currentMap().view).toEqual(beforeView)
     expect(currentMap().navigationRequest).toEqual(beforeNavigation)
     expect(window.location.href).toBe(beforeUrl)
+  })
+
+  it('normalizes the earliest model-context month to all dates', async () => {
+    let execute: ((input: unknown) => { since: string | null }) | undefined
+    Object.defineProperty(document, 'modelContext', {
+      configurable: true,
+      value: { registerTool(tool: { execute(input: unknown): { since: string | null } }) { execute = tool.execute } },
+    })
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+    await waitFor(() => expect(execute).toBeDefined())
+
+    let result: { since: string | null } | undefined
+    act(() => { result = execute?.({ since: '2025-06' }) })
+
+    expect(result?.since).toBeNull()
+    expect(currentMap().view.since).toBeNull()
+    expect(window.location.search).toBe('')
   })
 
   it('does not expose state-owned filter arrays in model-context results', async () => {
@@ -332,7 +354,7 @@ describe('App mobile filters', () => {
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
-  it('does not focus search after a wide-layout pointer Reset link activation', async () => {
+  it('focuses search after a wide-layout pointer Reset link activation', async () => {
     const user = userEvent.setup()
     media.set({ compact: false })
     window.history.replaceState(null, '', '/?wat=1')
@@ -343,8 +365,8 @@ describe('App mobile filters', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
-    expect(document.activeElement).not.toBe(search)
-    expect(focus).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(search)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
   it('keeps Reset link focus inside an open mobile filter dialog', async () => {
@@ -418,7 +440,10 @@ it('does not mark labels in legacy data as fallbacks', async () => {
 
 it('shows and individually removes raw-language, region, and date chips without changing selection or layout', async () => {
   const user = userEvent.setup()
-  const data = makeAtlas([makeRepo({ primary_language: 'Java' }), makeRepo({ full_name: 'owner/python', primary_language: 'Python' })])
+  const data = makeAtlas([
+    makeRepo({ primary_language: 'Java' }),
+    makeRepo({ full_name: 'owner/python', primary_language: 'Python', pushed_at: '2024-01-01' }),
+  ])
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
   window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=Java&region=Developer+Tools&since=2025-06&layout=alt')
   render(<App />)
@@ -459,6 +484,8 @@ it('clears every filter inside the mobile dialog while keeping selection and lay
   const user = userEvent.setup()
   const scroll = stubScrollIntoView()
   try {
+    const data = makeAtlas([makeRepo(), makeRepo({ full_name: 'owner/older', pushed_at: '2024-01-01' })])
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
     window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=TypeScript&region=Developer+Tools&since=2025-06&layout=alt')
     render(<App />)
     await screen.findByRole('heading', { name: 'Repo Atlas' })
@@ -569,6 +596,30 @@ it('removes a stale rendered chip and focuses from the latest filter order', asy
   expect(document.activeElement).toBe(within(strip).getByRole('button', { name: 'Remove language filter Python' }))
 })
 
+it('ignores a stale rendered chip whose filter is already gone without moving focus', async () => {
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  media.set({ compact: false })
+  window.history.replaceState(null, '', '/?lang=TypeScript')
+  const { container } = render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+  const staleChip = container.querySelector<HTMLButtonElement>('.controls .active-filters button')!
+  const mapButton = screen.getByRole('button', { name: 'Map' })
+  mapButton.focus()
+
+  act(() => {
+    execute?.({ languages: [], layoutAlt: true })
+    staleChip.click()
+  })
+
+  expect(currentMap().view).toMatchObject({ languages: [], layoutAlt: true })
+  expect(document.activeElement).toBe(mapButton)
+})
+
 it('applies a stale rendered checkbox value instead of toggling newer model state', async () => {
   const data = makeAtlas([
     makeRepo(),
@@ -596,6 +647,30 @@ it('applies a stale rendered checkbox value instead of toggling newer model stat
 
   expect(currentMap().view.languages).toEqual(['Python'])
   expect(screen.getByRole('button', { name: 'Remove language filter Python' })).toBeDefined()
+})
+
+it('applies stale rendered layout and guide targets instead of toggling newer model state', async () => {
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  media.set({ compact: false })
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+  const layout = screen.getByRole('button', { name: 'Alternate layout' })
+  const language = screen.getByRole('button', { name: 'Filter by TypeScript: 1 repositories' })
+  expect(layout.getAttribute('aria-pressed')).toBe('false')
+  expect(language.getAttribute('aria-pressed')).toBe('false')
+
+  act(() => {
+    execute?.({ layoutAlt: true, languages: ['TypeScript'] })
+    layout.click()
+    language.click()
+  })
+
+  expect(currentMap().view).toMatchObject({ layoutAlt: true, languages: ['TypeScript'] })
 })
 
 it('uses one clear behavior and restores focus for controls and no-results actions', async () => {
@@ -673,21 +748,25 @@ it('issues a fresh navigation request when the selected repository is explicitly
   expect(currentMap().navigationRequest!.nonce).toBeGreaterThan(initial.nonce)
 })
 
-it('cancels only the pending navigation matching a double-click rollback token', async () => {
-  window.history.replaceState(null, '', '?repo=owner%2Fexample')
+it('rejects a stale double-click rollback while preserving a newer pending move', async () => {
+  const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
+  const data = makeAtlas([first, second])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
   render(<App />)
   await screen.findByRole('heading', { name: 'Repo Atlas' })
-  const repo = currentMap().data.repos[0]
-  act(() => currentMap().onSelect(repo, { clickToken: 7 }))
-  const pending = currentMap().navigationRequest
-  expect(pending).toMatchObject({ kind: 'repo', target: 'owner/example', clickToken: 7 })
 
-  act(() => currentMap().onSelect(repo, { navigate: false, clickToken: 8 }))
-  expect(currentMap().navigationRequest).toEqual(pending)
+  act(() => currentMap().onSelect(first, { clickToken: 7 }))
+  act(() => {
+    currentMap().onSelect(second, { clickToken: 8 })
+    currentMap().onSelect(null, { navigate: false, clickToken: 7 })
+  })
 
-  act(() => currentMap().onSelect(repo, { navigate: false, clickToken: 7 }))
+  expect(currentMap().view.repo).toBe(second.full_name)
+  expect(currentMap().navigationRequest).toMatchObject({ kind: 'repo', target: second.full_name, clickToken: 8 })
 
-  expect(currentMap().view.repo).toBe('owner/example')
+  act(() => currentMap().onSelect(null, { navigate: false, clickToken: 8 }))
+
+  expect(currentMap().view.repo).toBeNull()
   expect(currentMap().navigationRequest).toBeNull()
 })
 
