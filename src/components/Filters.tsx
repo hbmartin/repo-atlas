@@ -1,6 +1,6 @@
 import { monthIndex, monthValue } from '../data'
 import type { AtlasData, ViewState } from '../types'
-import { formatDate } from '../view-utils'
+import { formatDate, setIncluded } from '../view-utils'
 
 export function Filters({
   data,
@@ -16,6 +16,7 @@ export function Filters({
   maxMonth: number
 }) {
   const sinceIndex = view.since ? monthIndex(view.since) : minMonth
+  const nextLayoutAlt = !view.layoutAlt
   return (
     <div className="filter-content">
       <details className="filter-popover">
@@ -30,9 +31,7 @@ export function Filters({
                   const checked = event.currentTarget.checked
                   setView(current => ({
                     ...current,
-                    languages: checked
-                      ? current.languages.includes(language.name) ? current.languages : [...current.languages, language.name]
-                      : current.languages.filter(name => name !== language.name),
+                    languages: setIncluded(current.languages, language.name, checked),
                   }))
                 }}
               />
@@ -58,9 +57,7 @@ export function Filters({
                   const checked = event.currentTarget.checked
                   setView(current => ({
                     ...current,
-                    regions: checked
-                      ? current.regions.includes(region.label) ? current.regions : [...current.regions, region.label]
-                      : current.regions.filter(label => label !== region.label),
+                    regions: setIncluded(current.regions, region.label, checked),
                   }))
                 }}
               />
@@ -90,7 +87,7 @@ export function Filters({
       <button
         className={`layout-toggle ${view.layoutAlt ? 'active' : ''}`}
         aria-pressed={view.layoutAlt}
-        onClick={() => setView(current => ({ ...current, layoutAlt: !current.layoutAlt }))}
+        onClick={() => setView(current => ({ ...current, layoutAlt: nextLayoutAlt }))}
       >
         Alternate layout
       </button>

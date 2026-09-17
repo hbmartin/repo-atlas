@@ -658,6 +658,41 @@ it('positions a keyboard tooltip only once with the final resized anchor', async
   expect(mutations).toHaveLength(2)
 })
 
+it('positions a keyboard tooltip only once after a same-size projection redraw', async () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container, rerender } = render(<MapView {...props} />)
+  fireEvent.focus(container.querySelector<SVGCircleElement>('.repo-dot')!)
+  const tooltip = screen.getByRole('tooltip')
+  const mutations: MutationRecord[] = []
+  const observer = new MutationObserver(records => mutations.push(...records))
+  observer.observe(tooltip, { attributes: true, attributeFilter: ['style'] })
+
+  rerender(<MapView {...props} view={{ ...empty, layoutAlt: true }} />)
+  await Promise.resolve()
+  observer.disconnect()
+
+  expect(mutations).toHaveLength(2)
+})
+
+it('positions a pointer tooltip once from the final origin after a same-size redraw', async () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container, rerender } = render(<MapView {...props} />)
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+  const tooltip = screen.getByRole('tooltip')
+  const mutations: MutationRecord[] = []
+  const observer = new MutationObserver(records => mutations.push(...records))
+  observer.observe(tooltip, { attributes: true, attributeFilter: ['style'] })
+
+  originTop = 20
+  rerender(<MapView {...props} view={{ ...empty, layoutAlt: true }} />)
+  await Promise.resolve()
+  observer.disconnect()
+
+  expect(mutations).toHaveLength(1)
+  expect(tooltip.style.top).toBe('214px')
+})
+
 it('repositions a hover tooltip when a breakpoint moves the map without resizing it', () => {
   const media = stubMedia({ compact: false, reduced: true })
   originLeft = 75; originTop = 190

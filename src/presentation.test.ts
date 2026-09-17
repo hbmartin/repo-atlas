@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, sameValues } from './presentation'
+import { atlasMonthRange, atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, sameValues } from './presentation'
 import { parseViewState, unknownViewParameters, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
@@ -30,8 +30,41 @@ describe('atlas presentation', () => {
     expect(matchesLanguageFilter(data, cpp, 'Other')).toBe(true)
     expect(matchesLanguageFilter(data, cpp, 'Python')).toBe(false)
     expect(knownRegion(data, 'Developer Tools')).toBe(true)
-    expect(knownRegion(data, 'Unclustered')).toBe(true)
+    expect(knownRegion(data, 'Unclustered')).toBe(false)
+    expect(parseViewState('?region=Unclustered', data).regions).toEqual([])
+    expect(unknownViewParameters('?region=Unclustered', data)).toEqual(['region=Unclustered'])
+    const withNoise = makeAtlas([makeRepo({ cluster_id: null })])
+    expect(knownRegion(withNoise, 'Unclustered')).toBe(true)
+    expect(parseViewState('?region=Unclustered', withNoise).regions).toEqual(['Unclustered'])
     expect(knownRegion(data, 'Missing')).toBe(false)
+  })
+  it('round-trips comma-containing and repeated regions while reading legacy lists', () => {
+    const data = makeAtlas()
+    data.clusters[0].label = 'Tools, Scripts'
+    data.clusters.push({ ...data.clusters[0], id: 1, label: 'Research' })
+    const state = { repo: null, languages: [], regions: ['Tools, Scripts', 'Research'], since: null, layoutAlt: false }
+    const written = writeViewState(state)
+    expect(written).toBe('?region=Tools%2C+Scripts&region=Research')
+    expect(parseViewState(written, data).regions).toEqual(['Tools, Scripts', 'Research'])
+    expect(parseViewState('?region=Tools%2C+Scripts', data).regions).toEqual(['Tools, Scripts'])
+
+    const legacy = makeAtlas()
+    legacy.clusters.push({ ...legacy.clusters[0], id: 1, label: 'Research' })
+    expect(parseViewState('?region=Developer+Tools,Research', legacy).regions).toEqual(['Developer Tools', 'Research'])
+    expect(unknownViewParameters('?region=Developer+Tools&region=Missing', legacy)).toEqual(['region=Missing'])
+  })
+  it('bounds saved months and normalizes the earliest month to all dates', () => {
+    const data = makeAtlas([
+      makeRepo({ pushed_at: '2024-01-15' }),
+      makeRepo({ full_name: 'owner/newer', pushed_at: '2025-06-01' }),
+    ])
+    expect(atlasMonthRange(data)).toEqual({ minMonth: 2024 * 12, maxMonth: 2025 * 12 + 5 })
+    expect(parseViewState('?since=2024-01', data).since).toBeNull()
+    expect(unknownViewParameters('?since=2024-01', data)).toEqual([])
+    expect(parseViewState('?since=2025-06', data).since).toBe('2025-06')
+    expect(parseViewState('?since=1990-01', data).since).toBeNull()
+    expect(unknownViewParameters('?since=1990-01', data)).toEqual(['since=1990-01'])
+    expect(unknownViewParameters('?since=2999-01', data)).toEqual(['since=2999-01'])
   })
   it('retains equivalent filter arrays', () => {
     const previous = ['Java', 'HTML']

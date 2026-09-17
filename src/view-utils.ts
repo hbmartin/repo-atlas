@@ -99,10 +99,10 @@ export function nearestRepoAtPoint(
   return nearest
 }
 
-export function toggleValue(values: string[], value: string) {
-  return values.includes(value)
-    ? values.filter((item) => item !== value)
-    : [...values, value]
+export function setIncluded<T>(values: T[], value: T, included: boolean): T[] {
+  const present = values.includes(value)
+  if (included) return present ? values : [...values, value]
+  return present ? values.filter(item => item !== value) : values
 }
 
 export const COMPACT_MEDIA_QUERY = '(max-width: 1023px)'
