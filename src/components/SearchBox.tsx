@@ -32,6 +32,7 @@ export function SearchBox({
       if (!input.current || input.current.closest('[inert]')) return
       event.preventDefault()
       input.current.focus({ preventScroll: true })
+      input.current.scrollIntoView?.({ block: 'nearest', inline: 'nearest' })
     }
     window.addEventListener('keydown', listener)
     return () => window.removeEventListener('keydown', listener)

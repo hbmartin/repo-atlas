@@ -468,7 +468,7 @@ it('keeps the focused tooltip anchored to its dot throughout an arrow-key camera
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(expectedPosition())
 })
 
-it('uses the current SVG origin for every tooltip pointer position update', () => {
+it('caches the SVG origin for pointer moves and refreshes it on scroll', () => {
   stubMedia({ compact: false, reduced: true })
   originLeft = 75; originTop = 190
   const { container } = render(<MapView {...props} />)
@@ -477,12 +477,19 @@ it('uses the current SVG origin for every tooltip pointer position update', () =
   bounds.mockClear()
 
   fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+  expect(bounds).toHaveBeenCalledTimes(1)
   let tooltip = screen.getByRole('tooltip')
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
 
   originLeft = 90; originTop = 200
   bounds.mockClear()
   fireEvent.pointerMove(point, { clientX: 120, clientY: 240 })
+  advanceCameraBy(20)
+  expect(bounds).not.toHaveBeenCalled()
+  tooltip = screen.getByRole('tooltip')
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '59px', top: '64px' })
+
+  fireEvent.scroll(window)
   advanceCameraBy(20)
   expect(bounds).toHaveBeenCalledTimes(1)
   tooltip = screen.getByRole('tooltip')
@@ -503,6 +510,60 @@ it('positions a remounted tooltip immediately at unchanged pointer coordinates',
 
   const tooltip = screen.getByRole('tooltip')
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
+})
+
+it('preserves the pointer anchor while filters hide and restore the hovered repository', () => {
+  stubMedia({ compact: false, reduced: true })
+  originLeft = 75; originTop = 190
+  const visible = new Set(data.repos.map(repo => repo.full_name))
+  const { container, rerender } = render(<MapView {...props} visible={visible} />)
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+  expect(screen.getByRole('tooltip').style.left).toBe('39px')
+
+  rerender(<MapView {...props} visible={new Set([second.full_name])} />)
+  expect(screen.queryByRole('tooltip')).toBeNull()
+  rerender(<MapView {...props} visible={visible} />)
+
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip.textContent).toContain(first.name)
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
+})
+
+it('restores the pointer anchor after a focused tooltip temporarily takes over', () => {
+  stubMedia({ compact: false, reduced: true })
+  originLeft = 75; originTop = 190
+  const visible = new Set(data.repos.map(repo => repo.full_name))
+  const { container, rerender } = render(<MapView {...props} visible={visible} />)
+  const points = container.querySelectorAll<SVGGElement>('.repo-point')
+  const secondDot = container.querySelector<SVGCircleElement>('.repo-dot[data-full-name="owner/second"]')!
+  fireEvent.pointerEnter(points[0], { clientX: 100, clientY: 220 })
+  secondDot.focus()
+
+  rerender(<MapView {...props} visible={new Set([second.full_name])} />)
+  expect(screen.getByRole('tooltip').textContent).toContain(second.name)
+  rerender(<MapView {...props} visible={visible} />)
+
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip.textContent).toContain(first.name)
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '44px' })
+})
+
+it('repositions a hover tooltip when controls move and resize the map', () => {
+  stubMedia({ compact: false, reduced: true })
+  originLeft = 75; originTop = 190
+  const { container } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  const point = container.querySelector<SVGGElement>('.repo-point')!
+  fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+  expect(screen.getByRole('tooltip').style.top).toBe('44px')
+
+  originTop = 240
+  height = 650
+  resizeObserver.notify(svg)
+
+  const tooltip = screen.getByRole('tooltip')
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '39px', top: '8px' })
 })
 
 it('repositions a clamped tooltip when its observed height changes', () => {
@@ -534,20 +595,21 @@ it.each(['missing', 'single'] as const)('falls back safely for %s border-box mea
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '722px', top: '472px' })
 })
 
-it('reuses the tooltip observer and keeps map resize notifications target-specific', () => {
+it('reuses the tooltip observer and repositions against resized map bounds', () => {
   stubMedia({ compact: false, reduced: true })
   const { container } = render(<MapView {...props} />)
   const svg = container.querySelector('svg')!
   const point = container.querySelector<SVGGElement>('.repo-point')!
   const observerCount = resizeObserver.observerCount()
 
-  fireEvent.pointerEnter(point, { clientX: 100, clientY: 100 })
+  fireEvent.pointerEnter(point, { clientX: 890, clientY: 690 })
+  expect(screen.getByRole('tooltip').style.left).toBe('722px')
   fireEvent.pointerLeave(point)
-  fireEvent.pointerEnter(point, { clientX: 110, clientY: 110 })
+  fireEvent.pointerEnter(point, { clientX: 890, clientY: 690 })
   expect(resizeObserver.observerCount()).toBe(observerCount)
   width = 900
   expect(() => resizeObserver.notify(svg)).not.toThrow()
-  expect(screen.getByRole('tooltip')).toBeDefined()
+  expect(screen.getByRole('tooltip').style.left).toBe('622px')
 })
 
 it('does not zoom when region placement moves the second click onto the SVG ancestor', () => {
