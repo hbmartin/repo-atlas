@@ -12,10 +12,10 @@ export function ActiveFilters({ view, onRemove, groupRef }: {
   if (!filters.length) return null
   return <div ref={groupRef} className="active-filters" role="group" aria-label="Active filters">
     {filters.map(filter => {
-      if (filter.kind === 'since') return <button key="since" type="button"
-        aria-label={`Remove updated since filter ${formatDate(view.since!)}`}
+      if (filter.kind === 'since') return <button key={activeFilterKey(filter)} type="button"
+        aria-label={`Remove updated since filter ${formatDate(filter.value)}`}
         onClick={() => onRemove(filter)}>
-        Since · {formatDate(view.since!)}<span aria-hidden="true">×</span>
+        Since · {formatDate(filter.value)}<span aria-hidden="true">×</span>
       </button>
       const label = filter.kind === 'language' ? 'Language' : 'Region'
       return <button key={activeFilterKey(filter)} type="button"

@@ -98,6 +98,34 @@ describe('measured camera navigation', () => {
     rerender(<MapView {...props} navigationRequest={request} onNavigationHandled={handled} />)
     expect(handled).toHaveBeenCalledTimes(1)
   })
+  it('uses the final label layout when navigation arrives with new same-projection data', () => {
+    const request = { kind: 'repo' as const, target: second.full_name, nonce: 33 }
+    const nextData = {
+      ...data,
+      clusters: data.clusters.map(cluster => ({
+        ...cluster,
+        label: `${cluster.label} with an exceptionally long replacement label`,
+      })),
+    }
+    const nextPresentation = atlasPresentation(nextData)
+    const nextProps = {
+      ...props,
+      data: nextData,
+      presentation: nextPresentation,
+      visible: new Set(nextData.repos.map(repo => repo.full_name)),
+      selected: second,
+      navigationRequest: request,
+    }
+    const handled = vi.fn()
+    const changed = render(<MapView {...props} />)
+    changed.rerender(<MapView {...nextProps} onNavigationHandled={handled} />)
+    const actual = zoomTransform(changed.container.querySelector('svg')!).toString()
+    expect(handled).toHaveBeenCalledExactlyOnceWith(request.nonce)
+
+    changed.unmount()
+    const mounted = render(<MapView {...nextProps} />)
+    expect(zoomTransform(mounted.container.querySelector('svg')!).toString()).toBe(actual)
+  })
   it('keeps the placeholder camera synchronized until positive dimensions arrive', () => {
     width = 0; height = 0
     const { container } = render(<MapView {...props} />)
@@ -691,6 +719,39 @@ it('positions a pointer tooltip once from the final origin after a same-size red
 
   expect(mutations).toHaveLength(1)
   expect(tooltip.style.top).toBe('214px')
+})
+
+it('holds committed tooltip content and position until a redraw is ready', async () => {
+  stubMedia({ compact: false, reduced: true })
+  const { container, rerender } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  const dots = container.querySelectorAll<SVGCircleElement>('.repo-dot')
+  fireEvent.focus(dots[0])
+  const tooltip = screen.getByRole('tooltip')
+  const committed = { left: tooltip.style.left, top: tooltip.style.top }
+  const mutations: MutationRecord[] = []
+  const observer = new MutationObserver(records => mutations.push(...records))
+  observer.observe(tooltip, { attributes: true, attributeFilter: ['style'] })
+
+  width = 0; height = 0
+  rerender(<MapView {...props} view={{ ...empty, layoutAlt: true }} />)
+  fireEvent.focus(dots[1])
+  resizeObserver.report(tooltip, 270, 220)
+  fireEvent.scroll(window)
+  advanceCameraBy(20)
+  await Promise.resolve()
+
+  expect(screen.getByRole('tooltip').textContent).toContain(first.name)
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(committed)
+  expect(mutations).toHaveLength(0)
+
+  width = 1000; height = 700
+  resizeObserver.notify(svg)
+  await Promise.resolve()
+  observer.disconnect()
+
+  expect(screen.getByRole('tooltip').textContent).toContain(second.name)
+  expect(mutations).toHaveLength(2)
 })
 
 it('repositions a hover tooltip when a breakpoint moves the map without resizing it', () => {

@@ -1,4 +1,4 @@
-import type { AtlasData, AtlasRepo } from './types'
+import type { AtlasCluster, AtlasData, AtlasRepo } from './types'
 import { monthIndex } from './month'
 
 const uniqueValues = (names: string[]) => [...new Set(names)]
@@ -8,7 +8,8 @@ export const sameValues = (a: string[], b: string[]) =>
   a.length === b.length && a.every((value, index) => value === b[index])
 export const languageCategories = (data: AtlasData) => data.languages
 const languageIndices = new WeakMap<AtlasData, { names: string[]; nameSet: Set<string>; categorySet: Set<string> }>()
-const regionIndices = new WeakMap<AtlasData, Set<string>>()
+export type RegionFilterOption = { label: string; count: number; cluster: AtlasCluster | null }
+const regionIndices = new WeakMap<AtlasData, { options: RegionFilterOption[]; names: Set<string> }>()
 const monthRanges = new WeakMap<AtlasData, { minMonth: number; maxMonth: number }>()
 export function languageIndex(data: AtlasData) {
   const cached = languageIndices.get(data)
@@ -24,17 +25,22 @@ export function languageIndex(data: AtlasData) {
 }
 export const languageFilterNames = (data: AtlasData) => languageIndex(data).names
 export const knownLanguage = (data: AtlasData, name: string) => languageIndex(data).nameSet.has(name)
-export function knownRegion(data: AtlasData, name: string) {
-  let names = regionIndices.get(data)
-  if (!names) {
-    names = new Set([
-      ...data.clusters.map(cluster => cluster.label),
-      ...(data.stats.noise_count > 0 ? ['Unclustered'] : []),
-    ])
-    regionIndices.set(data, names)
+function regionIndex(data: AtlasData) {
+  let index = regionIndices.get(data)
+  if (!index) {
+    const options: RegionFilterOption[] = [
+      ...data.clusters.map(cluster => ({ label: cluster.label, count: cluster.member_count, cluster })),
+      ...(data.stats.noise_count > 0
+        ? [{ label: 'Unclustered', count: data.stats.noise_count, cluster: null }]
+        : []),
+    ]
+    index = { options, names: new Set(options.map(option => option.label)) }
+    regionIndices.set(data, index)
   }
-  return names.has(name)
+  return index
 }
+export const regionFilterOptions = (data: AtlasData) => regionIndex(data).options
+export const knownRegion = (data: AtlasData, name: string) => regionIndex(data).names.has(name)
 export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: string) =>
   languageIndex(data).categorySet.has(name)
     ? repo.primary_language_category === name
