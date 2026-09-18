@@ -686,6 +686,23 @@ it('positions a keyboard tooltip only once with the final resized anchor', async
   expect(mutations).toHaveLength(2)
 })
 
+it('renders an initial keyboard tooltip before positive dimensions and positions it when measured', () => {
+  stubMedia({ compact: false, reduced: true })
+  width = 0; height = 0
+  const { container } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  fireEvent.focus(container.querySelector<SVGCircleElement>('.repo-dot')!)
+
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip.textContent).toContain(first.name)
+  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '', top: '' })
+
+  width = 600; height = 400
+  resizeObserver.notify(svg)
+  expect(tooltip.style.left).not.toBe('')
+  expect(tooltip.style.top).not.toBe('')
+})
+
 it('positions a keyboard tooltip only once after a same-size projection redraw', async () => {
   stubMedia({ compact: false, reduced: true })
   const { container, rerender } = render(<MapView {...props} />)

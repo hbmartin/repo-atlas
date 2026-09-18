@@ -40,7 +40,10 @@ const MapTooltip = memo(function MapTooltip({ repo, setNode }: MapTooltipProps) 
     <strong>{repo.name}</strong><span>{repo.one_liner}</span><small>{repo.primary_language} · updated {formatDate(repo.pushed_at)}</small>
     {repo.low_confidence && <small>Sparse README / low-confidence summary</small>}
   </div>
-}, (previous, next) => !next.ready || (previous.repo === next.repo && previous.setNode === next.setNode))
+}, (previous, next) => {
+  if (!next.ready && previous.ready && previous.repo !== null) return true
+  return previous.ready === next.ready && previous.repo === next.repo
+})
 
 export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
@@ -482,16 +485,15 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const radius = drawnRadius(activeRepo) * transform.k
     return { x: x + radius, y: y - radius }
   })() : null
-  const hasTooltip = Boolean(activeRepo)
   const mapAnchorX = mapTooltipAnchor?.x ?? 0
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
   useLayoutEffect(() => {
     if (!viewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor
-    tooltipMapAnchor.current = hasTooltip && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
+    tooltipMapAnchor.current = activeRepo && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
     positionVisibleTooltip()
-  }, [viewportReady, activeRepo, hasTooltip, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
+  }, [viewportReady, activeRepo, usesPointerAnchor, mapAnchorX, mapAnchorY, size.width, size.height, positionVisibleTooltip])
   useEffect(() => {
     const handleScroll = () => {
       tooltipOriginDirty.current = true

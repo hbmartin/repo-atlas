@@ -111,13 +111,12 @@ export default function App() {
   const [urlWarning, setUrlWarning] = useState<string[]>([])
   const navigationSequence = useRef(0)
   const navigationRequestRef = useRef<MapNavigationRequest | null>(null)
-  const rollbackClickToken = useRef<number | null>(null)
+  const rollbackCandidateToken = useRef<number | null>(null)
   const replaceNavigation = useCallback((request: MapNavigationRequest | null) => {
     navigationRequestRef.current = request
     setNavigationRequest(request)
   }, [])
   const requestNavigation = useCallback((kind: 'repo' | 'region', target: string, clickToken?: number) => {
-    rollbackClickToken.current = clickToken ?? null
     replaceNavigation({ kind, target, clickToken, nonce: ++navigationSequence.current })
   }, [replaceNavigation])
   const acknowledgeNavigation = useCallback((nonce: number) => {
@@ -150,9 +149,10 @@ export default function App() {
     const current = viewRef.current
     const rollbackToken = options?.navigate === false ? options.clickToken : undefined
     const pendingNavigation = navigationRequestRef.current
-    if (rollbackToken !== undefined && rollbackClickToken.current !== rollbackToken) {
+    if (rollbackToken !== undefined && rollbackCandidateToken.current !== rollbackToken) {
       return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
     }
+    rollbackCandidateToken.current = rollbackToken !== undefined ? null : options?.clickToken ?? null
     const next = typeof update === 'function' ? update(current) : update
     const nextLanguages = normalizeLanguages(next.languages)
     const nextRegions = normalizeRegions(next.regions)
@@ -168,14 +168,9 @@ export default function App() {
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
     else if (rollbackToken !== undefined) {
-      rollbackClickToken.current = null
       if (pendingNavigation?.clickToken === rollbackToken) replaceNavigation(null)
     } else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
       replaceNavigation(null)
-    }
-    if (rollbackToken === undefined && !navigationTarget
-      && (stateChanged || options?.navigate === true || options?.navigate === false || options?.canonicalizeUrl)) {
-      rollbackClickToken.current = null
     }
     if (stateChanged) {
       viewRef.current = normalized
@@ -205,7 +200,7 @@ export default function App() {
   useEffect(() => {
     if (!data) return
     const restore = () => {
-      rollbackClickToken.current = null
+      rollbackCandidateToken.current = null
       const { view: restored, unknown } = readViewState(window.location.search, data)
       viewRef.current = restored
       setViewState(restored)
@@ -380,16 +375,13 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={(event) => {
-            const keyboardActivation = event.detail === 0
+          <button onClick={() => {
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            if (mobileFilters || compact || keyboardActivation) {
-              window.requestAnimationFrame(() => {
-                if (mobileFilters) focusElement(doneButton.current, true)
-                else if (compact) focusElement(filterButton.current)
-                else focusElement(searchInput.current)
-              })
-            }
+            window.requestAnimationFrame(() => {
+              if (mobileFilters) focusElement(doneButton.current, true)
+              else if (compact) focusElement(filterButton.current)
+              else focusElement(searchInput.current)
+            })
           }}>Reset link</button>
         </div>
       )}

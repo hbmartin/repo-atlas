@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { monthIndex, monthValue, searchRepos, unknownViewParameters, validMonth, validateAtlas } from './data'
+import { monthIndex, monthValue, readViewState, searchRepos, validMonth, validateAtlas } from './data'
 import type { AtlasData, AtlasRepo } from './types'
 import { makeAtlas, makeRepo } from './test-fixtures'
 import { formatDate } from './view-utils'
@@ -19,7 +19,7 @@ describe('atlas data utilities', () => {
   it('round trips month slider values', () => expect(monthValue(monthIndex('2024-06'))).toBe('2024-06'))
   it('reports unknown URL state without applying it', () => {
     const data = { repos: [{ ...repo, full_name: 'hbmartin/graphviz2drawio' }], languages: [{ name: 'Python' }], clusters: [{ label: 'Developer Tools' }] } as AtlasData
-    expect(unknownViewParameters('?repo=missing/repo&lang=Rust&wat=1', data)).toEqual(['wat', 'repo=missing/repo', 'lang=Rust'])
+    expect(readViewState('?repo=missing/repo&lang=Rust&wat=1', data).unknown).toEqual(['wat', 'repo=missing/repo', 'lang=Rust'])
   })
   it('prioritizes an exact repository name over containing names', () => {
     const exact = makeRepo({ full_name: 'owner/graphviz2drawio', name: 'graphviz2drawio' })
