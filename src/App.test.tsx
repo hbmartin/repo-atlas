@@ -368,7 +368,7 @@ describe('App mobile filters', () => {
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
-  it('focuses search after a wide-layout pointer Reset link activation', async () => {
+  it('does not focus search after a wide-layout pointer Reset link activation', async () => {
     const user = userEvent.setup()
     media.set({ compact: false })
     window.history.replaceState(null, '', '/?wat=1')
@@ -379,9 +379,18 @@ describe('App mobile filters', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
-    expect(document.activeElement).toBe(search)
-    expect(document.activeElement).not.toBe(document.body)
-    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
+    expect(document.activeElement).not.toBe(search)
+    expect(focus).not.toHaveBeenCalled()
+  })
+
+  it('accepts an identical repeated repository without showing Reset link', async () => {
+    window.history.replaceState(null, '', '/?repo=owner%2Fexample&repo=owner%2Fexample')
+    render(<App />)
+    await screen.findByRole('heading', { name: 'Repo Atlas' })
+
+    expect(currentMap().view.repo).toBe('owner/example')
+    expect(screen.queryByRole('status')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Reset link' })).toBeNull()
   })
 
   it('keeps Reset link focus inside an open mobile filter dialog', async () => {
@@ -635,7 +644,7 @@ it('ignores a stale rendered chip whose filter is already gone without moving fo
   expect(document.activeElement).toBe(mapButton)
 })
 
-it('ignores a stale since chip after the model selects a newer month', async () => {
+it('removes the current date filter from a stale since chip', async () => {
   const data = makeAtlas([
     makeRepo({ pushed_at: '2024-01-15' }),
     makeRepo({ full_name: 'owner/newer', pushed_at: '2025-06-01' }),
@@ -658,8 +667,8 @@ it('ignores a stale since chip after the model selects a newer month', async () 
     staleChip.click()
   })
 
-  expect(currentMap().view.since).toBe('2025-06')
-  expect(screen.getByRole('button', { name: 'Remove updated since filter Jun 2025' })).toBeDefined()
+  expect(currentMap().view.since).toBeNull()
+  expect(screen.queryByRole('button', { name: /Remove updated since filter/ })).toBeNull()
 })
 
 it('applies a stale rendered checkbox value instead of toggling newer model state', async () => {
@@ -862,6 +871,30 @@ it('allows a matching rollback after its navigation was acknowledged', async () 
 
   act(() => currentMap().onSelect(first, { navigate: false, clickToken: 31 }))
   expect(currentMap().view.repo).toBe(first.full_name)
+})
+
+it('allows a matching rollback after a no-op WebMCP update', async () => {
+  const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
+  const data = makeAtlas([first, second])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  window.history.replaceState(null, '', `/?repo=${encodeURIComponent(first.full_name)}`)
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+
+  act(() => currentMap().onSelect(second, { clickToken: 33 }))
+  act(() => {
+    execute?.({})
+    currentMap().onSelect(first, { navigate: false, clickToken: 33 })
+  })
+
+  expect(currentMap().view.repo).toBe(first.full_name)
+  expect(currentMap().navigationRequest).toBeNull()
 })
 
 it('allows a committed background click to restore the previous selection on double-click', async () => {

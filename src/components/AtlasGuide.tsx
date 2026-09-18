@@ -1,6 +1,6 @@
 import { useMemo, useState } from 'react'
 import type { AtlasData, ViewState } from '../types'
-import { regionFilterOptions, type AtlasPresentation } from '../presentation'
+import { regionGuideOptions, type AtlasPresentation } from '../presentation'
 import { FallbackLabel, FALLBACK_LABEL_EXPLANATION } from './FallbackLabel'
 
 export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onHighlight }: {
@@ -11,14 +11,7 @@ export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onH
   const currentRegion = view.regions.length === 1 ? view.regions[0] : null
   const fallbackLabels = useMemo(() => new Set(data.fallback_label_ids ?? []), [data.fallback_label_ids])
   const [expanded, setExpanded] = useState<number | null>(null)
-  const { clusteredRegions, unclustered } = useMemo(() => {
-    const regions = regionFilterOptions(data)
-    return {
-      clusteredRegions: regions.filter(region => region.cluster !== null)
-        .toSorted((a, b) => a.label.localeCompare(b.label)),
-      unclustered: regions.find(region => region.cluster === null),
-    }
-  }, [data])
+  const { clusteredRegions, unclustered } = regionGuideOptions(data)
   return <div className="atlas-guide">
     <header><span className="eyebrow">EXPLORE THE LANDSCAPE</span><h2>Atlas guide</h2>
       <p>One point, one repository. Nearby projects share ideas and techniques.</p></header>
