@@ -218,10 +218,15 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
   const params = new URLSearchParams(search)
   const knownKeys = new Set(['repo', 'lang', 'region', 'since', 'layout'])
   const unknown = [...new Set([...params.keys()].filter((key) => !knownKeys.has(key)))]
-  const repo = params.get('repo')
-  const since = params.get('since')
+  const scalarParameter = (key: 'repo' | 'since' | 'layout') => {
+    const [value = null, ...ignored] = params.getAll(key)
+    return { value, ignored }
+  }
+  const repoParameter = scalarParameter('repo')
+  const repo = repoParameter.value
   const repoKnown = Boolean(repo && data.repos.some((item) => item.full_name === repo))
   if (repo && !repoKnown) unknown.push(`repo=${repo}`)
+  for (const value of repoParameter.ignored) unknown.push(`repo=${value}`)
   const languages: string[] = []
   for (const parameter of params.getAll('lang')) {
     if (!parameter) continue
@@ -241,9 +246,14 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
     if (knownRegion(data, value)) regions.push(value)
     else unknown.push(`region=${value}`)
   }
+  const sinceParameter = scalarParameter('since')
+  const since = sinceParameter.value
   if (since && !validAtlasMonth(since, data)) unknown.push(`since=${since}`)
-  const layout = params.get('layout')
+  for (const value of sinceParameter.ignored) unknown.push(`since=${value}`)
+  const layoutParameter = scalarParameter('layout')
+  const layout = layoutParameter.value
   if (layout && layout !== 'alt') unknown.push(`layout=${layout}`)
+  for (const value of layoutParameter.ignored) unknown.push(`layout=${value}`)
   const view = {
     repo: repoKnown ? repo : null,
     languages: normalizeLanguages(languages),
@@ -251,16 +261,13 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
     since: since && validAtlasMonth(since, data) ? normalizeAtlasSince(since, data) : null,
     layoutAlt: layout === 'alt',
   }
-  return { view, unknown }
+  return { view, unknown: [...new Set(unknown)] }
 }
-
-export const parseViewState = (search: string, data: AtlasData): ViewState => readViewState(search, data).view
-export const unknownViewParameters = (search: string, data: AtlasData): string[] => readViewState(search, data).unknown
 
 export function writeViewState(state: ViewState): string {
   const params = new URLSearchParams()
   if (state.repo) params.set('repo', state.repo)
-  if (state.languages.length) params.set('lang', normalizeLanguages(state.languages).join(','))
+  for (const language of normalizeLanguages(state.languages)) params.append('lang', language)
   for (const region of normalizeRegions(state.regions)) params.append('region', region)
   if (state.since) params.set('since', state.since)
   if (state.layoutAlt) params.set('layout', 'alt')

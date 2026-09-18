@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { atlasMonthRange, atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, regionFilterOptions, sameValues } from './presentation'
-import { parseViewState, readViewState, unknownViewParameters, writeViewState } from './data'
+import { readViewState, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
 describe('atlas presentation', () => {
@@ -17,15 +17,15 @@ describe('atlas presentation', () => {
     const java = makeRepo({ primary_language: 'Java' })
     const cpp = makeRepo({ full_name: 'owner/cpp', primary_language: 'C++' })
     const data = makeAtlas([java, cpp])
-    const parsed = parseViewState('?lang=Java,Other,Java&layout=alt', data)
+    const parsed = readViewState('?lang=Java,Other,Java&layout=alt', data).view
     expect(parsed.languages).toEqual(['Java', 'Other'])
-    expect(unknownViewParameters('?lang=Java,Other,Gleam', data)).toEqual(['lang=Gleam'])
-    expect(writeViewState(parsed)).toBe('?lang=Java%2COther&layout=alt')
+    expect(readViewState('?lang=Java,Other,Gleam', data).unknown).toEqual(['lang=Gleam'])
+    expect(writeViewState(parsed)).toBe('?lang=Java&lang=Other&layout=alt')
     expect(writeViewState({ ...parsed, regions: ['Developer Tools', 'Developer Tools'] }))
-      .toBe('?lang=Java%2COther&region=Developer+Tools&layout=alt')
-    expect(parseViewState('?lang=C%2B%2B', data).languages).toEqual(['C++'])
-    expect(parseViewState('?lang=Java&lang=Other,Gleam', data).languages).toEqual(['Java', 'Other'])
-    expect(unknownViewParameters('?lang=Java&lang=Other,Gleam', data)).toEqual(['lang=Gleam'])
+      .toBe('?lang=Java&lang=Other&region=Developer+Tools&layout=alt')
+    expect(readViewState('?lang=C%2B%2B', data).view.languages).toEqual(['C++'])
+    expect(readViewState('?lang=Java&lang=Other,Gleam', data).view.languages).toEqual(['Java', 'Other'])
+    expect(readViewState('?lang=Java&lang=Other,Gleam', data).unknown).toEqual(['lang=Gleam'])
     expect(writeViewState({ ...parsed, languages: ['C++'] })).toBe('?lang=C%2B%2B&layout=alt')
     expect(matchesLanguageFilter(data, java, 'Java')).toBe(true)
     expect(matchesLanguageFilter(data, cpp, 'Java')).toBe(false)
@@ -33,12 +33,23 @@ describe('atlas presentation', () => {
     expect(matchesLanguageFilter(data, cpp, 'Python')).toBe(false)
     expect(knownRegion(data, 'Developer Tools')).toBe(true)
     expect(knownRegion(data, 'Unclustered')).toBe(false)
-    expect(parseViewState('?region=Unclustered', data).regions).toEqual([])
-    expect(unknownViewParameters('?region=Unclustered', data)).toEqual(['region=Unclustered'])
+    expect(readViewState('?region=Unclustered', data).view.regions).toEqual([])
+    expect(readViewState('?region=Unclustered', data).unknown).toEqual(['region=Unclustered'])
     const withNoise = makeAtlas([makeRepo({ cluster_id: null })])
     expect(knownRegion(withNoise, 'Unclustered')).toBe(true)
-    expect(parseViewState('?region=Unclustered', withNoise).regions).toEqual(['Unclustered'])
+    expect(readViewState('?region=Unclustered', withNoise).view.regions).toEqual(['Unclustered'])
     expect(knownRegion(data, 'Missing')).toBe(false)
+  })
+  it('round-trips repeated languages without reinterpreting comma-containing names', () => {
+    const data = makeAtlas([
+      makeRepo({ primary_language: 'Tea, Script' }),
+      makeRepo({ full_name: 'owner/java', name: 'java', primary_language: 'Java' }),
+    ])
+    const state = { repo: null, languages: ['Tea, Script', 'Java'], regions: [], since: null, layoutAlt: false }
+    const written = writeViewState(state)
+    expect(written).toBe('?lang=Tea%2C+Script&lang=Java')
+    expect(readViewState(written, data).view.languages).toEqual(['Tea, Script', 'Java'])
+    expect(readViewState('?lang=Java,Other', data).view.languages).toEqual(['Java', 'Other'])
   })
   it('round-trips repeated regions without reinterpreting comma-separated labels', () => {
     const data = makeAtlas()
@@ -47,8 +58,8 @@ describe('atlas presentation', () => {
     const state = { repo: null, languages: [], regions: ['Tools, Scripts', 'Research'], since: null, layoutAlt: false }
     const written = writeViewState(state)
     expect(written).toBe('?region=Tools%2C+Scripts&region=Research')
-    expect(parseViewState(written, data).regions).toEqual(['Tools, Scripts', 'Research'])
-    expect(parseViewState('?region=Tools%2C+Scripts', data).regions).toEqual(['Tools, Scripts'])
+    expect(readViewState(written, data).view.regions).toEqual(['Tools, Scripts', 'Research'])
+    expect(readViewState('?region=Tools%2C+Scripts', data).view.regions).toEqual(['Tools, Scripts'])
 
     const legacy = makeAtlas()
     legacy.clusters.push({ ...legacy.clusters[0], id: 1, label: 'Research' })
@@ -56,12 +67,16 @@ describe('atlas presentation', () => {
     expect(mixed.view.regions).toEqual(['Research'])
     expect(mixed.unknown).toEqual(['region=Developer Tools,Research', 'region=Missing'])
   })
-  it('leaves repeated scalar parameters on their existing first-value behavior', () => {
-    const data = makeAtlas()
-    const parsed = readViewState('?repo=owner%2Fexample&repo=missing%2Frepo&layout=alt&layout=bad', data)
+  it('applies the first scalar parameter and reports ignored repetitions once', () => {
+    const data = makeAtlas([
+      makeRepo({ pushed_at: '2024-01-15' }),
+      makeRepo({ full_name: 'owner/newer', name: 'newer', pushed_at: '2025-06-01' }),
+    ])
+    const parsed = readViewState('?repo=owner%2Fexample&repo=missing%2Frepo&repo=missing%2Frepo&since=2025-06&since=&layout=alt&layout=bad', data)
     expect(parsed.view.repo).toBe('owner/example')
+    expect(parsed.view.since).toBe('2025-06')
     expect(parsed.view.layoutAlt).toBe(true)
-    expect(parsed.unknown).toEqual([])
+    expect(parsed.unknown).toEqual(['repo=missing/repo', 'since=', 'layout=bad'])
   })
   it('bounds saved months and normalizes the earliest month to all dates', () => {
     const data = makeAtlas([
@@ -69,12 +84,12 @@ describe('atlas presentation', () => {
       makeRepo({ full_name: 'owner/newer', pushed_at: '2025-06-01' }),
     ])
     expect(atlasMonthRange(data)).toEqual({ minMonth: 2024 * 12, maxMonth: 2025 * 12 + 5 })
-    expect(parseViewState('?since=2024-01', data).since).toBeNull()
-    expect(unknownViewParameters('?since=2024-01', data)).toEqual([])
-    expect(parseViewState('?since=2025-06', data).since).toBe('2025-06')
-    expect(parseViewState('?since=1990-01', data).since).toBeNull()
-    expect(unknownViewParameters('?since=1990-01', data)).toEqual([])
-    expect(unknownViewParameters('?since=2999-01', data)).toEqual(['since=2999-01'])
+    expect(readViewState('?since=2024-01', data).view.since).toBeNull()
+    expect(readViewState('?since=2024-01', data).unknown).toEqual([])
+    expect(readViewState('?since=2025-06', data).view.since).toBe('2025-06')
+    expect(readViewState('?since=1990-01', data).view.since).toBeNull()
+    expect(readViewState('?since=1990-01', data).unknown).toEqual([])
+    expect(readViewState('?since=2999-01', data).unknown).toEqual(['since=2999-01'])
   })
   it('retains equivalent filter arrays', () => {
     const previous = ['Java', 'HTML']

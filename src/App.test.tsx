@@ -368,7 +368,7 @@ describe('App mobile filters', () => {
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
-  it('does not focus search after a wide-layout pointer Reset link activation', async () => {
+  it('focuses search after a wide-layout pointer Reset link activation', async () => {
     const user = userEvent.setup()
     media.set({ compact: false })
     window.history.replaceState(null, '', '/?wat=1')
@@ -379,8 +379,9 @@ describe('App mobile filters', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
-    expect(document.activeElement).not.toBe(search)
-    expect(focus).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(search)
+    expect(document.activeElement).not.toBe(document.body)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
   it('keeps Reset link focus inside an open mobile filter dialog', async () => {
@@ -860,6 +861,23 @@ it('allows a matching rollback after its navigation was acknowledged', async () 
   expect(currentMap().navigationRequest).toBeNull()
 
   act(() => currentMap().onSelect(first, { navigate: false, clickToken: 31 }))
+  expect(currentMap().view.repo).toBe(first.full_name)
+})
+
+it('allows a committed background click to restore the previous selection on double-click', async () => {
+  const first = makeRepo()
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => makeAtlas([first]) }))
+  window.history.replaceState(null, '', `/?repo=${encodeURIComponent(first.full_name)}`)
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  const initial = currentMap().navigationRequest!
+  act(() => currentMap().onNavigationHandled?.(initial.nonce))
+
+  act(() => currentMap().onSelect(null, { clickToken: 32 }))
+  expect(currentMap().view.repo).toBeNull()
+  expect(currentMap().navigationRequest).toBeNull()
+
+  act(() => currentMap().onSelect(first, { navigate: false, clickToken: 32 }))
   expect(currentMap().view.repo).toBe(first.full_name)
 })
 
