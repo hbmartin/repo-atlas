@@ -9,7 +9,12 @@ export const sameValues = (a: string[], b: string[]) =>
 export const languageCategories = (data: AtlasData) => data.languages
 const languageIndices = new WeakMap<AtlasData, { names: string[]; nameSet: Set<string>; categorySet: Set<string> }>()
 export type RegionFilterOption = { label: string; count: number; cluster: AtlasCluster | null }
-const regionIndices = new WeakMap<AtlasData, { options: RegionFilterOption[]; names: Set<string> }>()
+type RegionIndex = {
+  options: RegionFilterOption[]
+  names: Set<string>
+  guide: { clusteredRegions: RegionFilterOption[]; unclustered: RegionFilterOption | undefined }
+}
+const regionIndices = new WeakMap<AtlasData, RegionIndex>()
 const monthRanges = new WeakMap<AtlasData, { minMonth: number; maxMonth: number }>()
 export function languageIndex(data: AtlasData) {
   const cached = languageIndices.get(data)
@@ -34,12 +39,21 @@ function regionIndex(data: AtlasData) {
         ? [{ label: 'Unclustered', count: data.stats.noise_count, cluster: null }]
         : []),
     ]
-    index = { options, names: new Set(options.map(option => option.label)) }
+    index = {
+      options,
+      names: new Set(options.map(option => option.label)),
+      guide: {
+        clusteredRegions: options.filter(region => region.cluster !== null)
+          .toSorted((a, b) => a.label.localeCompare(b.label)),
+        unclustered: options.find(region => region.cluster === null),
+      },
+    }
     regionIndices.set(data, index)
   }
   return index
 }
 export const regionFilterOptions = (data: AtlasData) => regionIndex(data).options
+export const regionGuideOptions = (data: AtlasData) => regionIndex(data).guide
 export const knownRegion = (data: AtlasData, name: string) => regionIndex(data).names.has(name)
 export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: string) =>
   languageIndex(data).categorySet.has(name)

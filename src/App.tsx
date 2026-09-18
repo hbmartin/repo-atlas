@@ -152,7 +152,6 @@ export default function App() {
     if (rollbackToken !== undefined && rollbackCandidateToken.current !== rollbackToken) {
       return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
     }
-    rollbackCandidateToken.current = rollbackToken !== undefined ? null : options?.clickToken ?? null
     const next = typeof update === 'function' ? update(current) : update
     const nextLanguages = normalizeLanguages(next.languages)
     const nextRegions = normalizeRegions(next.regions)
@@ -164,6 +163,11 @@ export default function App() {
       regions: preserveValues(current.regions, nextRegions),
     }
     const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
+    if (rollbackToken !== undefined) rollbackCandidateToken.current = null
+    else if (options?.clickToken !== undefined) rollbackCandidateToken.current = options.clickToken
+    else if (stateChanged || options?.navigate === true || options?.navigate === false || options?.canonicalizeUrl) {
+      rollbackCandidateToken.current = null
+    }
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
@@ -375,13 +379,16 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={() => {
+          <button onClick={(event) => {
+            const keyboardActivation = event.detail === 0
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            window.requestAnimationFrame(() => {
-              if (mobileFilters) focusElement(doneButton.current, true)
-              else if (compact) focusElement(filterButton.current)
-              else focusElement(searchInput.current)
-            })
+            if (mobileFilters || compact || keyboardActivation) {
+              window.requestAnimationFrame(() => {
+                if (mobileFilters) focusElement(doneButton.current, true)
+                else if (compact) focusElement(filterButton.current)
+                else focusElement(searchInput.current)
+              })
+            }
           }}>Reset link</button>
         </div>
       )}

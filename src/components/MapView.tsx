@@ -1,4 +1,4 @@
-import { memo, useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 import { select } from 'd3-selection'
 import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
@@ -30,20 +30,15 @@ const positionTooltip = (anchor: { x: number; y: number }, tooltip: Size, viewpo
 })
 type MapTooltipProps = {
   repo: AtlasRepo | null
-  ready: boolean
   setNode: (node: HTMLDivElement | null) => void
 }
-// Keep the last committed tooltip subtree while viewport inputs are between layouts.
-const MapTooltip = memo(function MapTooltip({ repo, setNode }: MapTooltipProps) {
+function MapTooltip({ repo, setNode }: MapTooltipProps) {
   if (!repo) return null
   return <div ref={setNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
     <strong>{repo.name}</strong><span>{repo.one_liner}</span><small>{repo.primary_language} · updated {formatDate(repo.pushed_at)}</small>
     {repo.low_confidence && <small>Sparse README / low-confidence summary</small>}
   </div>
-}, (previous, next) => {
-  if (!next.ready && previous.ready && previous.repo !== null) return true
-  return previous.ready === next.ready && previous.repo === next.repo
-})
+}
 
 export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
@@ -58,6 +53,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const navigated = useRef(false)
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
+  const [lastReadyRepo, setLastReadyRepo] = useState<AtlasRepo | null>(null)
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
   const [focusedRegion, setFocusedRegion] = useState<number | null>(null)
   const svgOrigin = useRef({ left: 0, top: 0 })
@@ -489,6 +485,14 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
   useLayoutEffect(() => {
+    // This is semantic transition state: the previous ready tooltip must survive an unready viewport.
+    if (viewportReady) {
+      // oxlint-disable-next-line react/set-state-in-effect
+      setLastReadyRepo(current => current === activeRepo ? current : activeRepo)
+    }
+  }, [viewportReady, activeRepo])
+  const tooltipRepo = viewportReady ? activeRepo : lastReadyRepo
+  useLayoutEffect(() => {
     if (!viewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor
     tooltipMapAnchor.current = activeRepo && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
@@ -600,6 +604,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    <MapTooltip repo={activeRepo} ready={viewportReady} setNode={setTooltipNode} />
+    <MapTooltip repo={tooltipRepo} setNode={setTooltipNode} />
   </div>
 }

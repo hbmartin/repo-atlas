@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { atlasMonthRange, atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, regionFilterOptions, sameValues } from './presentation'
+import { atlasMonthRange, atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, regionFilterOptions, regionGuideOptions, sameValues } from './presentation'
 import { readViewState, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
 
@@ -76,7 +76,20 @@ describe('atlas presentation', () => {
     expect(parsed.view.repo).toBe('owner/example')
     expect(parsed.view.since).toBe('2025-06')
     expect(parsed.view.layoutAlt).toBe(true)
-    expect(parsed.unknown).toEqual(['repo=missing/repo', 'since=', 'layout=bad'])
+    expect(parsed.unknown).toEqual(['repo=missing/repo', 'layout=bad'])
+  })
+  it('ignores empty and identical scalar repetitions while warning about conflicting values once', () => {
+    const data = makeAtlas([
+      makeRepo({ pushed_at: '2024-01-15' }),
+      makeRepo({ full_name: 'owner/newer', name: 'newer', pushed_at: '2025-06-01' }),
+    ])
+    const repeated = readViewState('?repo=&repo=owner%2Fexample&repo=owner%2Fexample&since=&since=2025-06&since=2025-06&layout=&layout=alt&layout=alt', data)
+    expect(repeated.view).toMatchObject({ repo: 'owner/example', since: '2025-06', layoutAlt: true })
+    expect(repeated.unknown).toEqual([])
+
+    const conflicting = readViewState('?repo=owner%2Fexample&repo=owner%2Fnewer&repo=owner%2Fnewer&since=2025-06&since=2025-05&since=2025-05&layout=alt&layout=other&layout=other', data)
+    expect(conflicting.view).toMatchObject({ repo: 'owner/example', since: '2025-06', layoutAlt: true })
+    expect(conflicting.unknown).toEqual(['repo=owner/newer', 'since=2025-05', 'layout=other'])
   })
   it('bounds saved months and normalizes the earliest month to all dates', () => {
     const data = makeAtlas([
@@ -127,5 +140,17 @@ describe('atlas presentation', () => {
     expect(regionFilterOptions(data).map(({ label, count, cluster }) => ({ label, count, id: cluster?.id ?? null })))
       .toEqual([{ label: 'Developer Tools', count: 0, id: 0 }, { label: 'Unclustered', count: 1, id: null }])
     expect(knownRegion(data, 'Unclustered')).toBe(true)
+  })
+  it('caches sorted guide regions and the unclustered entry per atlas', () => {
+    const data = makeAtlas([makeRepo({ cluster_id: null })])
+    data.clusters.push(
+      { ...data.clusters[0], id: 1, label: 'Zulu' },
+      { ...data.clusters[0], id: 2, label: 'Alpha' },
+    )
+    const guide = regionGuideOptions(data)
+    expect(guide.clusteredRegions.map(region => region.label)).toEqual(['Alpha', 'Developer Tools', 'Zulu'])
+    expect(guide.unclustered?.label).toBe('Unclustered')
+    expect(regionGuideOptions(data)).toBe(guide)
+    expect(regionGuideOptions(data).clusteredRegions).toBe(guide.clusteredRegions)
   })
 })

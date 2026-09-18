@@ -217,16 +217,16 @@ export async function loadAtlas(): Promise<AtlasData> {
 export function readViewState(search: string, data: AtlasData): { view: ViewState; unknown: string[] } {
   const params = new URLSearchParams(search)
   const knownKeys = new Set(['repo', 'lang', 'region', 'since', 'layout'])
-  const unknown = [...new Set([...params.keys()].filter((key) => !knownKeys.has(key)))]
-  const scalarParameter = (key: 'repo' | 'since' | 'layout') => {
-    const [value = null, ...ignored] = params.getAll(key)
-    return { value, ignored }
+  const unknown = [...params.keys()].filter((key) => !knownKeys.has(key))
+  const scalarParameter = (key: 'repo' | 'since' | 'layout', recognized: (value: string) => boolean) => {
+    const [value = null, ...ignored] = params.getAll(key).filter(Boolean)
+    const valueRecognized = value !== null && recognized(value)
+    if (value !== null && !valueRecognized) unknown.push(`${key}=${value}`)
+    for (const item of ignored) if (item !== value) unknown.push(`${key}=${item}`)
+    return { value, recognized: valueRecognized }
   }
-  const repoParameter = scalarParameter('repo')
+  const repoParameter = scalarParameter('repo', value => data.repos.some((item) => item.full_name === value))
   const repo = repoParameter.value
-  const repoKnown = Boolean(repo && data.repos.some((item) => item.full_name === repo))
-  if (repo && !repoKnown) unknown.push(`repo=${repo}`)
-  for (const value of repoParameter.ignored) unknown.push(`repo=${value}`)
   const languages: string[] = []
   for (const parameter of params.getAll('lang')) {
     if (!parameter) continue
@@ -246,20 +246,16 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
     if (knownRegion(data, value)) regions.push(value)
     else unknown.push(`region=${value}`)
   }
-  const sinceParameter = scalarParameter('since')
+  const sinceParameter = scalarParameter('since', value => validAtlasMonth(value, data))
   const since = sinceParameter.value
-  if (since && !validAtlasMonth(since, data)) unknown.push(`since=${since}`)
-  for (const value of sinceParameter.ignored) unknown.push(`since=${value}`)
-  const layoutParameter = scalarParameter('layout')
+  const layoutParameter = scalarParameter('layout', value => value === 'alt')
   const layout = layoutParameter.value
-  if (layout && layout !== 'alt') unknown.push(`layout=${layout}`)
-  for (const value of layoutParameter.ignored) unknown.push(`layout=${value}`)
   const view = {
-    repo: repoKnown ? repo : null,
+    repo: repoParameter.recognized ? repo : null,
     languages: normalizeLanguages(languages),
     regions: normalizeRegions(regions),
-    since: since && validAtlasMonth(since, data) ? normalizeAtlasSince(since, data) : null,
-    layoutAlt: layout === 'alt',
+    since: since && sinceParameter.recognized ? normalizeAtlasSince(since, data) : null,
+    layoutAlt: layoutParameter.recognized && layout === 'alt',
   }
   return { view, unknown: [...new Set(unknown)] }
 }
