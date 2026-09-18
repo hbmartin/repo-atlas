@@ -35,6 +35,7 @@ type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
 type ViewUpdate = ViewState | ((current: ViewState) => ViewState)
 type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean }
 type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: ViewState }
+type RollbackCandidate = { token: number; view: ViewState }
 
 const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'languages', 'regions', 'since', 'layoutAlt'])
 
@@ -111,7 +112,7 @@ export default function App() {
   const [urlWarning, setUrlWarning] = useState<string[]>([])
   const navigationSequence = useRef(0)
   const navigationRequestRef = useRef<MapNavigationRequest | null>(null)
-  const rollbackCandidateToken = useRef<number | null>(null)
+  const rollbackCandidate = useRef<RollbackCandidate | null>(null)
   const replaceNavigation = useCallback((request: MapNavigationRequest | null) => {
     navigationRequestRef.current = request
     setNavigationRequest(request)
@@ -149,7 +150,8 @@ export default function App() {
     const current = viewRef.current
     const rollbackToken = options?.navigate === false ? options.clickToken : undefined
     const pendingNavigation = navigationRequestRef.current
-    if (rollbackToken !== undefined && rollbackCandidateToken.current !== rollbackToken) {
+    if (rollbackToken !== undefined
+      && (rollbackCandidate.current?.token !== rollbackToken || rollbackCandidate.current.view !== current)) {
       return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
     }
     const next = typeof update === 'function' ? update(current) : update
@@ -163,11 +165,10 @@ export default function App() {
       regions: preserveValues(current.regions, nextRegions),
     }
     const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
-    if (rollbackToken !== undefined) rollbackCandidateToken.current = null
-    else if (options?.clickToken !== undefined) rollbackCandidateToken.current = options.clickToken
-    else if (stateChanged || options?.navigate === true || options?.navigate === false || options?.canonicalizeUrl) {
-      rollbackCandidateToken.current = null
-    }
+    const committedView = stateChanged ? normalized : current
+    if (rollbackToken !== undefined) rollbackCandidate.current = null
+    else if (options?.clickToken !== undefined) rollbackCandidate.current = { token: options.clickToken, view: committedView }
+    else if (stateChanged) rollbackCandidate.current = null
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
@@ -204,7 +205,7 @@ export default function App() {
   useEffect(() => {
     if (!data) return
     const restore = () => {
-      rollbackCandidateToken.current = null
+      rollbackCandidate.current = null
       const { view: restored, unknown } = readViewState(window.location.search, data)
       viewRef.current = restored
       setViewState(restored)
@@ -379,16 +380,13 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={(event) => {
-            const keyboardActivation = event.detail === 0
+          <button onClick={() => {
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            if (mobileFilters || compact || keyboardActivation) {
-              window.requestAnimationFrame(() => {
-                if (mobileFilters) focusElement(doneButton.current, true)
-                else if (compact) focusElement(filterButton.current)
-                else focusElement(searchInput.current)
-              })
-            }
+            window.requestAnimationFrame(() => {
+              if (mobileFilters) focusElement(doneButton.current, true)
+              else if (compact) focusElement(filterButton.current)
+              else focusElement(searchInput.current)
+            })
           }}>Reset link</button>
         </div>
       )}

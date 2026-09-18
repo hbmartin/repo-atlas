@@ -220,13 +220,15 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
   const unknown = [...params.keys()].filter((key) => !knownKeys.has(key))
   const scalarParameter = (key: 'repo' | 'since' | 'layout', recognized: (value: string) => boolean) => {
     const [value = null, ...ignored] = params.getAll(key).filter(Boolean)
-    const valueRecognized = value !== null && recognized(value)
-    if (value !== null && !valueRecognized) unknown.push(`${key}=${value}`)
+    if (value === null) return { value, recognized: false as const }
+    const valueRecognized = recognized(value)
+    if (!valueRecognized) unknown.push(`${key}=${value}`)
     for (const item of ignored) if (item !== value) unknown.push(`${key}=${item}`)
-    return { value, recognized: valueRecognized }
+    return valueRecognized
+      ? { value, recognized: true as const }
+      : { value, recognized: false as const }
   }
   const repoParameter = scalarParameter('repo', value => data.repos.some((item) => item.full_name === value))
-  const repo = repoParameter.value
   const languages: string[] = []
   for (const parameter of params.getAll('lang')) {
     if (!parameter) continue
@@ -247,15 +249,13 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
     else unknown.push(`region=${value}`)
   }
   const sinceParameter = scalarParameter('since', value => validAtlasMonth(value, data))
-  const since = sinceParameter.value
   const layoutParameter = scalarParameter('layout', value => value === 'alt')
-  const layout = layoutParameter.value
   const view = {
-    repo: repoParameter.recognized ? repo : null,
+    repo: repoParameter.recognized ? repoParameter.value : null,
     languages: normalizeLanguages(languages),
     regions: normalizeRegions(regions),
-    since: since && sinceParameter.recognized ? normalizeAtlasSince(since, data) : null,
-    layoutAlt: layoutParameter.recognized && layout === 'alt',
+    since: sinceParameter.recognized ? normalizeAtlasSince(sinceParameter.value, data) : null,
+    layoutAlt: layoutParameter.recognized,
   }
   return { view, unknown: [...new Set(unknown)] }
 }
