@@ -368,7 +368,7 @@ describe('App mobile filters', () => {
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
-  it('does not focus search after a wide-layout pointer Reset link activation', async () => {
+  it('focuses search after a wide-layout pointer Reset link activation', async () => {
     const user = userEvent.setup()
     media.set({ compact: false })
     window.history.replaceState(null, '', '/?wat=1')
@@ -379,8 +379,9 @@ describe('App mobile filters', () => {
 
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
-    expect(document.activeElement).not.toBe(search)
-    expect(focus).not.toHaveBeenCalled()
+    expect(document.activeElement).toBe(search)
+    expect(document.activeElement).not.toBe(document.body)
+    expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
   it('accepts an identical repeated repository without showing Reset link', async () => {
@@ -644,7 +645,7 @@ it('ignores a stale rendered chip whose filter is already gone without moving fo
   expect(document.activeElement).toBe(mapButton)
 })
 
-it('removes the current date filter from a stale since chip', async () => {
+it('ignores a stale since chip after the model selects a newer month', async () => {
   const data = makeAtlas([
     makeRepo({ pushed_at: '2024-01-15' }),
     makeRepo({ full_name: 'owner/newer', pushed_at: '2025-06-01' }),
@@ -667,8 +668,8 @@ it('removes the current date filter from a stale since chip', async () => {
     staleChip.click()
   })
 
-  expect(currentMap().view.since).toBeNull()
-  expect(screen.queryByRole('button', { name: /Remove updated since filter/ })).toBeNull()
+  expect(currentMap().view.since).toBe('2025-06')
+  expect(screen.getByRole('button', { name: 'Remove updated since filter Jun 2025' })).toBeDefined()
 })
 
 it('applies a stale rendered checkbox value instead of toggling newer model state', async () => {

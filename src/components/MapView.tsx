@@ -53,7 +53,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const navigated = useRef(false)
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
-  const [lastReadyRepo, setLastReadyRepo] = useState<AtlasRepo | null>(null)
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
   const [focusedRegion, setFocusedRegion] = useState<number | null>(null)
   const svgOrigin = useRef({ left: 0, top: 0 })
@@ -485,14 +484,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
   useLayoutEffect(() => {
-    // This is semantic transition state: the previous ready tooltip must survive an unready viewport.
-    if (viewportReady) {
-      // oxlint-disable-next-line react/set-state-in-effect
-      setLastReadyRepo(current => current === activeRepo ? current : activeRepo)
-    }
-  }, [viewportReady, activeRepo])
-  const tooltipRepo = viewportReady ? activeRepo : lastReadyRepo
-  useLayoutEffect(() => {
     if (!viewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor
     tooltipMapAnchor.current = activeRepo && !usesPointerAnchor ? { x: mapAnchorX, y: mapAnchorY } : null
@@ -604,6 +595,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
       <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    <MapTooltip repo={tooltipRepo} setNode={setTooltipNode} />
+    <MapTooltip repo={activeRepo} setNode={setTooltipNode} />
   </div>
 }
