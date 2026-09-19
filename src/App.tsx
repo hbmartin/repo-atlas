@@ -11,7 +11,7 @@ import {
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from './types'
 import { DetailPanel } from './components/DetailPanel'
 import { ActiveFilters } from './components/ActiveFilters'
-import { activeFilterEntries, activeFilterKey, type ActiveFilterRemoval } from './active-filters'
+import { activeFilterEntries, type ActiveFilterRemoval } from './active-filters'
 import { Filters } from './components/Filters'
 import { ListView } from './components/ListView'
 import { Loading } from './components/Loading'
@@ -131,6 +131,12 @@ export default function App() {
   const controlsChips = useRef<HTMLDivElement>(null)
   const dialogChips = useRef<HTMLDivElement>(null)
   const pendingFilterFocus = useRef<FilterFocusRequest | null>(null)
+  const focusFilterFallback = useCallback((scope: FilterFocusRequest['scope']) => {
+    const dialogFallback = scope === 'dialog' && mobileFilters
+    if (dialogFallback) focusElement(doneButton.current, true)
+    else if (compact) focusElement(filterButton.current)
+    else focusElement(searchInput.current)
+  }, [compact, mobileFilters])
   const presentation = useMemo(() => data ? atlasPresentation(data) : null, [data])
 
   useEffect(() => {
@@ -166,9 +172,10 @@ export default function App() {
     }
     const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
     const committedView = stateChanged ? normalized : current
+    const supersedesRollback = stateChanged || options?.navigate !== undefined || options?.canonicalizeUrl === true
     if (rollbackToken !== undefined) rollbackCandidate.current = null
     else if (options?.clickToken !== undefined) rollbackCandidate.current = { token: options.clickToken, view: committedView }
-    else if (stateChanged) rollbackCandidate.current = null
+    else if (supersedesRollback) rollbackCandidate.current = null
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
@@ -195,12 +202,10 @@ export default function App() {
     const group = (request.scope === 'dialog' ? dialogChips : controlsChips).current
     const chips = group ? [...group.querySelectorAll<HTMLButtonElement>('button')] : []
     const nextChip = request.index === null ? null : chips[Math.min(request.index, chips.length - 1)]
-    const fallback = request.scope === 'dialog' && mobileFilters ? doneButton.current
-      : compact ? filterButton.current : searchInput.current
     if (nextChip) {
       focusElement(nextChip, true)
-    } else focusElement(fallback, request.scope === 'dialog' && mobileFilters)
-  }, [view.languages, view.regions, view.since, mobileFilters, compact])
+    } else focusFilterFallback(request.scope)
+  }, [view.languages, view.regions, view.since, focusFilterFallback])
 
   useEffect(() => {
     if (!data) return
@@ -344,7 +349,8 @@ export default function App() {
   const removeActiveFilter = (filter: ActiveFilterRemoval, scope: FilterFocusRequest['scope']) => {
     pendingFilterFocus.current = null
     const result = setView(current => {
-      const index = activeFilterEntries(current).findIndex(entry => activeFilterKey(entry) === activeFilterKey(filter))
+      const index = activeFilterEntries(current)
+        .findIndex(entry => entry.kind === filter.kind && entry.value === filter.value)
       if (index < 0) return current
       pendingFilterFocus.current = { scope, index }
       if (filter.kind === 'language') {
@@ -380,13 +386,12 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={() => {
+          <button onClick={(event) => {
+            const keyboardActivation = event.detail === 0
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            window.requestAnimationFrame(() => {
-              if (mobileFilters) focusElement(doneButton.current, true)
-              else if (compact) focusElement(filterButton.current)
-              else focusElement(searchInput.current)
-            })
+            if (mobileFilters || compact || keyboardActivation) {
+              window.requestAnimationFrame(() => focusFilterFallback(mobileFilters ? 'dialog' : 'controls'))
+            }
           }}>Reset link</button>
         </div>
       )}

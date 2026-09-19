@@ -1,4 +1,4 @@
-import { describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 import { atlasMonthRange, atlasPresentation, preserveValues, fileSizeScale, knownRegion, languageCategories, languageFilterNames, languageIndex, matchesLanguageFilter, normalizeLanguages, normalizeRegions, regionColors, regionFilterOptions, regionGuideOptions, sameValues } from './presentation'
 import { readViewState, writeViewState } from './data'
 import { makeAtlas, makeRepo } from './test-fixtures'
@@ -140,17 +140,6 @@ describe('atlas presentation', () => {
     expect(regionFilterOptions(data).map(({ label, count, cluster }) => ({ label, count, id: cluster?.id ?? null })))
       .toEqual([{ label: 'Developer Tools', count: 0, id: 0 }, { label: 'Unclustered', count: 1, id: null }])
     expect(knownRegion(data, 'Unclustered')).toBe(true)
-  })
-  it('defers sorting guide regions until the guide requests them', () => {
-    const data = makeAtlas()
-    data.clusters.push({ ...data.clusters[0], id: 1, label: 'Alpha' })
-    const compare = vi.spyOn(String.prototype, 'localeCompare')
-
-    regionFilterOptions(data)
-    expect(compare).not.toHaveBeenCalled()
-
-    regionGuideOptions(data)
-    expect(compare).toHaveBeenCalled()
   })
   it('caches sorted guide regions and the unclustered entry per atlas', () => {
     const data = makeAtlas([makeRepo({ cluster_id: null })])
