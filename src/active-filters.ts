@@ -5,8 +5,8 @@ export type ActiveFilterRemoval =
   | { kind: 'region'; value: string }
   | { kind: 'since'; value: string }
 
-export function activeFilterKey(filter: ActiveFilterRemoval) {
-  return `${filter.kind}:${filter.value}`
+export function activeFilterRenderKey(filter: ActiveFilterRemoval) {
+  return filter.kind === 'since' ? 'since' : `${filter.kind}:${filter.value}`
 }
 
 export function activeFilterEntries(view: ViewState): ActiveFilterRemoval[] {
