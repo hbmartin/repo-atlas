@@ -288,6 +288,7 @@ export default function App() {
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute(input) {
         const value = validateToolViewUpdate(input, data, presentation)
+        const explicitlySelectsRepo = value.repo !== undefined
         const next = setView((current) => {
           const languages = value.languages ?? current.languages
           const regions = value.regions ?? current.regions
@@ -300,7 +301,7 @@ export default function App() {
             since,
             layoutAlt: value.layoutAlt ?? current.layoutAlt,
           }
-        }).view
+        }, explicitlySelectsRepo ? { navigate: true } : undefined).view
         return {
           selected_repo: next.repo,
           languages: [...next.languages],
@@ -386,12 +387,9 @@ export default function App() {
       {urlWarning.length > 0 && (
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
-          <button onClick={(event) => {
-            const keyboardActivation = event.detail === 0
+          <button onClick={() => {
             setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            if (mobileFilters || compact || keyboardActivation) {
-              window.requestAnimationFrame(() => focusFilterFallback(mobileFilters ? 'dialog' : 'controls'))
-            }
+            window.requestAnimationFrame(() => focusFilterFallback('dialog'))
           }}>Reset link</button>
         </div>
       )}
