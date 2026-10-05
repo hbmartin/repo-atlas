@@ -365,6 +365,7 @@ describe('App mobile filters', () => {
     fireEvent.click(reset, { detail: 0 })
 
     expect(document.activeElement).toBe(search)
+    expect(document.activeElement).not.toBe(document.body)
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
@@ -798,6 +799,56 @@ it('issues a fresh navigation request when the selected repository is explicitly
 
   expect(currentMap().navigationRequest).toMatchObject({ kind: 'repo', target: 'owner/example' })
   expect(currentMap().navigationRequest!.nonce).toBeGreaterThan(initial.nonce)
+})
+
+it('rejects a stale rollback after the same repository is explicitly reselected', async () => {
+  const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
+  const data = makeAtlas([first, second])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  window.history.replaceState(null, '', `/?repo=${encodeURIComponent(first.full_name)}`)
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+
+  act(() => currentMap().onSelect(second, { clickToken: 6 }))
+  const clickNavigation = currentMap().navigationRequest!
+  act(() => currentMap().onSelect(second))
+  const reselectionNavigation = currentMap().navigationRequest!
+  expect(reselectionNavigation).toMatchObject({ kind: 'repo', target: second.full_name })
+  expect(reselectionNavigation.clickToken).toBeUndefined()
+  expect(reselectionNavigation.nonce).toBeGreaterThan(clickNavigation.nonce)
+
+  act(() => currentMap().onSelect(first, { navigate: false, clickToken: 6 }))
+
+  expect(currentMap().view.repo).toBe(second.full_name)
+  expect(currentMap().navigationRequest).toEqual(reselectionNavigation)
+})
+
+it('rejects a stale rollback after WebMCP explicitly reselects the same repository', async () => {
+  const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
+  const data = makeAtlas([first, second])
+  vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  window.history.replaceState(null, '', `/?repo=${encodeURIComponent(first.full_name)}`)
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+
+  act(() => currentMap().onSelect(second, { clickToken: 34 }))
+  const clickNavigation = currentMap().navigationRequest!
+  act(() => { execute?.({ repo: second.full_name }) })
+  const reselectionNavigation = currentMap().navigationRequest!
+  expect(reselectionNavigation).toMatchObject({ kind: 'repo', target: second.full_name })
+  expect(reselectionNavigation.clickToken).toBeUndefined()
+  expect(reselectionNavigation.nonce).toBeGreaterThan(clickNavigation.nonce)
+
+  act(() => currentMap().onSelect(first, { navigate: false, clickToken: 34 }))
+
+  expect(currentMap().view.repo).toBe(second.full_name)
+  expect(currentMap().navigationRequest).toEqual(reselectionNavigation)
 })
 
 it('rejects a stale double-click rollback while preserving a newer pending move', async () => {

@@ -6,7 +6,7 @@ import { ActiveFilters } from './ActiveFilters'
 
 afterEach(cleanup)
 
-it('replaces the since chip when its month changes', () => {
+it('keeps the since chip mounted and focused when its month changes', () => {
   const onRemove = vi.fn()
   const view: ViewState = { repo: null, languages: [], regions: [], since: '2025-05', layoutAlt: false }
   const rendered = render(<ActiveFilters view={view} onRemove={onRemove} />)
@@ -16,7 +16,8 @@ it('replaces the since chip when its month changes', () => {
   rendered.rerender(<ActiveFilters view={{ ...view, since: '2025-06' }} onRemove={onRemove} />)
 
   const updated = screen.getByRole('button', { name: 'Remove updated since filter Jun 2025' })
-  expect(updated).not.toBe(chip)
+  expect(updated).toBe(chip)
+  expect(document.activeElement).toBe(chip)
   fireEvent.click(updated)
   expect(onRemove).toHaveBeenCalledWith({ kind: 'since', value: '2025-06' })
 })

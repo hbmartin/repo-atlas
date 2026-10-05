@@ -686,19 +686,19 @@ it('positions a keyboard tooltip only once with the final resized anchor', async
   expect(mutations).toHaveLength(2)
 })
 
-it('renders an initial keyboard tooltip before positive dimensions and positions it when measured', () => {
+it('waits for positive dimensions before rendering an initial keyboard tooltip', () => {
   stubMedia({ compact: false, reduced: true })
   width = 0; height = 0
   const { container } = render(<MapView {...props} />)
   const svg = container.querySelector('svg')!
   fireEvent.focus(container.querySelector<SVGCircleElement>('.repo-dot')!)
 
-  const tooltip = screen.getByRole('tooltip')
-  expect(tooltip.textContent).toContain(first.name)
-  expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual({ left: '', top: '' })
+  expect(screen.queryByRole('tooltip')).toBeNull()
 
   width = 600; height = 400
   resizeObserver.notify(svg)
+  const tooltip = screen.getByRole('tooltip')
+  expect(tooltip.textContent).toContain(first.name)
   expect(tooltip.style.left).not.toBe('')
   expect(tooltip.style.top).not.toBe('')
 })
@@ -738,7 +738,7 @@ it('positions a pointer tooltip once from the final origin after a same-size red
   expect(tooltip.style.top).toBe('214px')
 })
 
-it('updates tooltip content while holding its position until a redraw is ready', async () => {
+it('holds committed tooltip content and position until a redraw is ready', async () => {
   stubMedia({ compact: false, reduced: true })
   const { container, rerender } = render(<MapView {...props} />)
   const svg = container.querySelector('svg')!
@@ -758,7 +758,7 @@ it('updates tooltip content while holding its position until a redraw is ready',
   advanceCameraBy(20)
   await Promise.resolve()
 
-  expect(screen.getByRole('tooltip').textContent).toContain(second.name)
+  expect(screen.getByRole('tooltip').textContent).toContain(first.name)
   expect({ left: tooltip.style.left, top: tooltip.style.top }).toEqual(committed)
   expect(mutations).toHaveLength(0)
 
