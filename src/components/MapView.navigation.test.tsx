@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { useMemo, useRef, useState } from 'react'
+import { Profiler, useMemo, useRef, useState } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { zoomTransform } from 'd3-zoom'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -738,7 +738,7 @@ it('positions a pointer tooltip once from the final origin after a same-size red
   expect(tooltip.style.top).toBe('214px')
 })
 
-it('holds committed tooltip content and position until a redraw is ready', async () => {
+it('holds the same active repo tooltip and position until a redraw is ready', async () => {
   stubMedia({ compact: false, reduced: true })
   const { container, rerender } = render(<MapView {...props} />)
   const svg = container.querySelector('svg')!
@@ -752,7 +752,6 @@ it('holds committed tooltip content and position until a redraw is ready', async
 
   width = 0; height = 0
   rerender(<MapView {...props} view={{ ...empty, layoutAlt: true }} />)
-  fireEvent.focus(dots[1])
   resizeObserver.report(tooltip, 270, 220)
   fireEvent.scroll(window)
   advanceCameraBy(20)
@@ -767,8 +766,50 @@ it('holds committed tooltip content and position until a redraw is ready', async
   await Promise.resolve()
   observer.disconnect()
 
-  expect(screen.getByRole('tooltip').textContent).toContain(second.name)
+  expect(screen.getByRole('tooltip').textContent).toContain(first.name)
   expect(mutations).toHaveLength(2)
+})
+
+it.each(['blur', 'pointer leave', 'filter', 'focus change'])('hides an unready redraw tooltip after %s and recovers after measurement', action => {
+  stubMedia({ compact: false, reduced: true })
+  const { container, rerender } = render(<MapView {...props} />)
+  const svg = container.querySelector('svg')!
+  const points = container.querySelectorAll<SVGGElement>('.repo-point')
+  const dots = container.querySelectorAll<SVGCircleElement>('.repo-dot')
+  if (action === 'pointer leave') fireEvent.pointerEnter(points[0], { clientX: 100, clientY: 220 })
+  else fireEvent.focus(dots[0])
+  expect(screen.getByRole('tooltip').textContent).toContain(first.name)
+
+  width = 0; height = 0
+  const nextView = { ...empty, layoutAlt: true }
+  rerender(<MapView {...props} view={nextView} />)
+  if (action === 'blur') fireEvent.blur(dots[0])
+  if (action === 'pointer leave') fireEvent.pointerLeave(points[0])
+  if (action === 'filter') rerender(<MapView {...props} view={{ ...nextView, languages: ['Python'] }} visible={new Set()} />)
+  if (action === 'focus change') fireEvent.focus(dots[1])
+  expect(screen.queryByRole('tooltip')).toBeNull()
+
+  width = 1000; height = 700
+  resizeObserver.notify(svg)
+  if (action === 'focus change') {
+    const tooltip = screen.getByRole('tooltip')
+    expect(tooltip.textContent).toContain(second.name)
+    expect(tooltip.style.left).not.toBe('')
+    expect(tooltip.style.top).not.toBe('')
+  } else expect(screen.queryByRole('tooltip')).toBeNull()
+})
+
+it('commits each active-repo hover change once', () => {
+  const commits = vi.fn()
+  const { container } = render(<Profiler id="map" onRender={commits}><MapView {...props} /></Profiler>)
+  for (const point of container.querySelectorAll<SVGGElement>('.repo-point')) {
+    commits.mockClear()
+    fireEvent.pointerEnter(point, { clientX: 100, clientY: 220 })
+    expect(commits).toHaveBeenCalledTimes(1)
+  }
+  commits.mockClear()
+  fireEvent.pointerLeave(container.querySelector<SVGGElement>('.repo-point:last-child')!)
+  expect(commits).toHaveBeenCalledTimes(1)
 })
 
 it('repositions a hover tooltip when a breakpoint moves the map without resizing it', () => {
