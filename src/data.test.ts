@@ -10,10 +10,24 @@ const repo = {
 } as AtlasRepo
 
 describe('atlas data utilities', () => {
-  it('requires schema v2', () => {
+  it('supports legacy schema v2 and rejects unknown versions', () => {
     expect(validateAtlas(makeAtlas()).schema_version).toBe(2)
     expect(() => validateAtlas({ ...makeAtlas(), schema_version: 1 })).toThrow('Unsupported atlas schema')
-    expect(() => validateAtlas({ schema_version: 3 })).toThrow('Unsupported atlas schema')
+    expect(() => validateAtlas({ schema_version: 4 })).toThrow('Unsupported atlas schema')
+  })
+  it('validates territory geometry and resolves old region filters alongside a stable focus link', () => {
+    const data = makeAtlas()
+    data.schema_version = 3
+    data.layout = 'territories'
+    data.clusters[0].key = 'developer-tools'
+    data.clusters[0].contours.outer = [[[400, 400], [600, 400], [600, 600], [400, 600], [400, 400]]]
+    data.region_aliases = { 'Old Tools': 'developer-tools' }
+    expect(readViewState('?region=Old+Tools&focus=developer-tools&layout=alt', validateAtlas(data))).toMatchObject({
+      view: { regions: ['Developer Tools'], focusedRegion: 'developer-tools', layoutAlt: true },
+      unknown: [],
+    })
+    data.clusters[0].contours.outer[0].pop()
+    expect(() => validateAtlas(data)).toThrow('closed polygon')
   })
   it('weights and finds repository names', () => expect(searchRepos([repo], 'graphviz')[0]).toBe(repo))
   it('round trips month slider values', () => expect(monthValue(monthIndex('2024-06'))).toBe('2024-06'))

@@ -62,7 +62,18 @@ export function regionGuideOptions(data: AtlasData) {
   }
   return guide
 }
-export const knownRegion = (data: AtlasData, name: string) => regionIndex(data).names.has(name)
+export const regionKey = (cluster: AtlasCluster) => cluster.key ?? `region-${cluster.id}`
+export const UNCLUSTERED_KEY = 'unclustered'
+export const regionByKey = (data: AtlasData, key: string | null | undefined) =>
+  data.clusters.find(cluster => regionKey(cluster) === key)
+export const knownRegionFocus = (data: AtlasData, key: string) =>
+  (key === UNCLUSTERED_KEY && data.stats.noise_count > 0) || Boolean(regionByKey(data, key))
+export const resolveRegionFilter = (data: AtlasData, name: string) => {
+  if (regionIndex(data).names.has(name)) return name
+  const key = data.region_aliases && Object.hasOwn(data.region_aliases, name) ? data.region_aliases[name] : undefined
+  return key ? regionByKey(data, key)?.label : undefined
+}
+export const knownRegion = (data: AtlasData, name: string) => resolveRegionFilter(data, name) !== undefined
 export const matchesLanguageFilter = (data: AtlasData, repo: AtlasRepo, name: string) =>
   languageIndex(data).categorySet.has(name)
     ? repo.primary_language_category === name

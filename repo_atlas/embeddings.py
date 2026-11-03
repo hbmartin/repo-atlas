@@ -5,6 +5,7 @@ from abc import ABC, abstractmethod
 import numpy as np
 
 from .errors import AtlasError
+from .ollama import ollama_url
 
 
 def l2_normalize(vectors: np.ndarray) -> np.ndarray:
@@ -51,6 +52,34 @@ class LocalEmbedder(Embedder):
         return l2_normalize(model.encode(texts, batch_size=16, show_progress_bar=True))
 
 
+class OllamaEmbedder(Embedder):
+    model_id = "ollama:bge-m3"
+
+    def embed(self, texts: list[str]) -> np.ndarray:
+        import httpx
+
+        vectors = []
+        try:
+            with httpx.Client(timeout=180, trust_env=False) as client:
+                for start in range(0, len(texts), 32):
+                    response = client.post(ollama_url("embed"), json={
+                        "model": "bge-m3",
+                        "input": texts[start:start + 32],
+                        "truncate": False,
+                    })
+                    response.raise_for_status()
+                    vectors.extend(response.json()["embeddings"])
+        except httpx.ConnectError as exc:
+            raise AtlasError("Start the local Ollama server.") from exc
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 404:
+                raise AtlasError("Run ollama pull bge-m3.") from exc
+            raise AtlasError(f"Ollama embeddings returned HTTP {exc.response.status_code}.") from exc
+        except httpx.RequestError as exc:
+            raise AtlasError(f"Ollama embedding request failed: {type(exc).__name__}.") from exc
+        return l2_normalize(np.asarray(vectors, dtype=np.float32))
+
+
 class OfflineFallbackEmbedder(Embedder):
     """Deterministic, credit-free fallback used only when hosted quota is exhausted."""
 
@@ -79,4 +108,6 @@ def get_embedder(name: str) -> Embedder:
         return HostedEmbedder()
     if name == "local":
         return LocalEmbedder()
+    if name == "ollama":
+        return OllamaEmbedder()
     raise ValueError(f"Unknown embedder: {name}")

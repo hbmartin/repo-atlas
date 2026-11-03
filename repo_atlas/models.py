@@ -85,7 +85,19 @@ class ClusterLabel(BaseModel):
         label = " ".join(words)
         if label.casefold() == UNCLUSTERED_LABEL.casefold():
             raise ValueError(f"{UNCLUSTERED_LABEL!r} is reserved for repositories without a cluster")
+        if label.casefold() == "undocumented projects":
+            raise ValueError("Name a concrete technical theme for the region")
         return label
+
+    @field_validator("gloss", mode="before")
+    @classmethod
+    def description_sentence(cls, value: str) -> str:
+        if not isinstance(value, str):
+            return value
+        sentence = " ".join(value.split())
+        if sentence and len(sentence) < 100 and not sentence.endswith((".", "!", "?")):
+            return sentence + "."
+        return sentence
 
 
 class Neighbor(BaseModel):

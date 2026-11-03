@@ -1,6 +1,6 @@
 # Cloudflare deployment
 
-Repo Atlas deploys the Vite `dist` directory to Cloudflare Workers Static Assets.
+Martin's Atlas deploys the Vite `dist` directory to Cloudflare Workers Static Assets.
 The Worker is named `repo-atlas`. It has no application code, runtime bindings,
 or runtime secrets. Cloudflare publishes the committed `public/atlas.json` and
 `public/atlas-list.html`; the Python pipeline runs locally before those files are

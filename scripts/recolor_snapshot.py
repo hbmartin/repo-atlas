@@ -1,4 +1,4 @@
-"""Refresh presentation colors in the committed schema-v2 atlas without rerunning analysis."""
+"""Refresh presentation colors in the committed atlas without rerunning analysis."""
 
 from __future__ import annotations
 
@@ -16,8 +16,8 @@ ATLAS = Path(__file__).resolve().parents[1] / "public" / "atlas.json"
 
 
 def recolor(payload: dict) -> dict:
-    if payload.get("schema_version") != 2 or not isinstance(payload.get("repos"), list):
-        raise ValueError("Expected an atlas schema-v2 snapshot")
+    if payload.get("schema_version") not in (2, 3) or not isinstance(payload.get("repos"), list):
+        raise ValueError("Expected an atlas schema-v2 or schema-v3 snapshot")
     if payload["stats"]["repo_count"] != len(payload["repos"]):
         raise ValueError("Snapshot repository count is inconsistent")
     payload["languages"] = language_legend([

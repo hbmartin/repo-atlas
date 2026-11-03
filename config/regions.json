@@ -1,0 +1,182 @@
+{
+  "ai-developer-tools": {
+    "anchor": "hbmartin/diamond-dev",
+    "members": [
+      "hbmartin/catching-jit-tests-vitest",
+      "hbmartin/codet-compiled-agent",
+      "hbmartin/CodexAppServer-Swift",
+      "hbmartin/crucible-review",
+      "hbmartin/Foundation-Models-and-Core-AI-and-MLX-skills",
+      "hbmartin/simpleton",
+      "hbmartin/Trace-Agent-Sessions"
+    ],
+    "label": "AI Developer Tools",
+    "gloss": "These projects use AI to help developers write, review, test, and understand code."
+  },
+  "android-and-eink-tools": {
+    "anchor": "hbmartin/notate",
+    "members": [
+      "hbmartin/awesome-android-lint",
+      "hbmartin/awesome-flipper-plugins",
+      "hbmartin/connectbot",
+      "hbmartin/flipper-plugin-stetho",
+      "hbmartin/flipper-plugin-tabular",
+      "hbmartin/mosh-android",
+      "hbmartin/onyx-android-sdk",
+      "hbmartin/onyx-boox-screensaver-gol",
+      "hbmartin/termlib"
+    ],
+    "label": "Android E-Ink Tools",
+    "gloss": "These projects support Android development, e-ink devices, and mobile terminals."
+  },
+  "api-integrations": {
+    "anchor": "hbmartin/openapi-ts",
+    "members": [
+      "hbmartin/agent-web-search",
+      "hbmartin/ai-sdk-react-model-picker",
+      "hbmartin/attio-ts-sdk",
+      "hbmartin/attio-tui",
+      "hbmartin/cloudflare-email-worker-sqlite",
+      "hbmartin/demystify",
+      "hbmartin/luma-api-event-calendar-webhooks",
+      "hbmartin/mureq-typed",
+      "hbmartin/omni-weather-forecast-apis",
+      "hbmartin/preact",
+      "hbmartin/protobuf_java_to_protobufjs"
+    ],
+    "label": "API Integration Frameworks",
+    "gloss": "These projects connect software to APIs through typed clients, schemas, and webhooks."
+  },
+  "apple-apps-and-libraries": {
+    "anchor": "hbmartin/HighlightKit",
+    "members": [
+      "hbmartin/conversation-notes",
+      "hbmartin/HolodeckShaderCheck",
+      "hbmartin/justaline-ios-resurrected"
+    ],
+    "label": "Apple Native Apps",
+    "gloss": "These projects build Apple apps, Swift libraries, and Metal rendering tools."
+  },
+  "browser-tools": {
+    "anchor": "hbmartin/chrome-tab-extractor",
+    "members": [
+      "hbmartin/chrome-extension-boox-push-booxdrop",
+      "hbmartin/chrome-extension-fuck-nestle",
+      "hbmartin/chrome-extension-github-pr-notifications"
+    ],
+    "label": "Browser Tooling",
+    "gloss": "These projects extend browsers and capture tabs, sessions, and reading history."
+  },
+  "build-and-editor-tools": {
+    "anchor": "hbmartin/danger-spm_version_updates",
+    "members": [
+      "hbmartin/create-trio-app",
+      "hbmartin/create-ts-lib",
+      "hbmartin/FlowDelta",
+      "hbmartin/github-action-spm_version_updates",
+      "hbmartin/gitx",
+      "hbmartin/gradle-plugin-caffeinate",
+      "hbmartin/gradle-plugin-homebrew",
+      "hbmartin/graphviz2drawio",
+      "hbmartin/hbmartin-detekt-rules",
+      "hbmartin/intellij-build-webhook-notifier",
+      "hbmartin/intellij-kotlin-bulk-add-name-params",
+      "hbmartin/intellij-plugin-evaluate-selected-expression",
+      "hbmartin/intellij-replace-string-format-with-kotlin-template",
+      "hbmartin/objective-git",
+      "hbmartin/pyroma621",
+      "hbmartin/react-vscode-webview-ipc",
+      "hbmartin/start-ui-tanstack-drizzle-shadcn-hexagonal",
+      "hbmartin/tailwind-vite-font-kit",
+      "hbmartin/tailwind-vite-font-kit-example",
+      "hbmartin/textmate"
+    ],
+    "label": "Build & Editor Tools",
+    "gloss": "These projects streamline builds, editor workflows, dependency updates, and code navigation."
+  },
+  "comparison-guides": {
+    "anchor": "hbmartin/comparison-hosts-serverless-cloud-function-faas-for-python",
+    "members": [
+      "hbmartin/ios-podcast-player-comparison"
+    ],
+    "label": "Service Comparisons",
+    "gloss": "These projects compare software and services on features, cost, and developer experience."
+  },
+  "data-analysis-tools": {
+    "anchor": "hbmartin/betapert",
+    "members": [
+      "hbmartin/ambientweather2sqlite",
+      "hbmartin/AutoTableCharts",
+      "hbmartin/grounded-weather-forecast",
+      "hbmartin/mathjs-to-func",
+      "hbmartin/mobile-screenshot-classification",
+      "hbmartin/open-sun",
+      "hbmartin/suncalc3-ts",
+      "hbmartin/swift-mlx-text-to-sql"
+    ],
+    "label": "Data Analysis Tools",
+    "gloss": "These projects model data, simulate uncertainty, and analyze weather and other observations."
+  },
+  "hardware-prototypes-and-drivers": {
+    "members": [
+      "hbmartin/homebrew-tap",
+      "hbmartin/lametric-github-activity",
+      "hbmartin/libfreenect2-metal",
+      "hbmartin/lora-dog-tracker",
+      "hbmartin/merton-college-3d",
+      "hbmartin/nope-snek",
+      "hbmartin/pylibfreenect3",
+      "hbmartin/razer-cooling-pad-mac",
+      "hbmartin/tesla-iphone-holder",
+      "hbmartin/usb-c-cable-bracelet-double-sided-connector"
+    ],
+    "label": "Hardware Prototypes & Drivers",
+    "gloss": "These projects design physical prototypes and control cameras, sensors, and other devices."
+  },
+  "ldraw-tooling": {
+    "members": [
+      "hbmartin/Bricky",
+      "hbmartin/legolization",
+      "hbmartin/pyldraw3",
+      "hbmartin/pyldraw3-tui",
+      "hbmartin/rebrickable"
+    ],
+    "label": "LDraw Tooling",
+    "gloss": "These projects build, validate, render, and cross-reference LEGO CAD models in LDraw."
+  },
+  "personal-data-and-media": {
+    "anchor": "hbmartin/podcast-chapter-tools",
+    "members": [
+      "hbmartin/datasette.io",
+      "hbmartin/fireflies-transcript-search",
+      "hbmartin/ics-to-static-site-themes",
+      "hbmartin/myfitnesspal-to-google-sheets",
+      "hbmartin/video-to-chapters-with-transcript"
+    ],
+    "label": "Personal Media & Data",
+    "gloss": "These projects collect, transcribe, convert, and archive personal data and podcast media."
+  },
+  "web-and-creative-apps": {
+    "members": [
+      "hbmartin/ar-disc-golf",
+      "hbmartin/dayforge-bolt",
+      "hbmartin/dayforge-replit",
+      "hbmartin/deal-deck-generator",
+      "hbmartin/event-rsvp",
+      "hbmartin/four-danger",
+      "hbmartin/imagemine",
+      "hbmartin/loglog",
+      "hbmartin/noteflare",
+      "hbmartin/noteflare-deploy-smoke-20261012",
+      "hbmartin/openrndr-game-of-life",
+      "hbmartin/r2j2",
+      "hbmartin/raffy-research",
+      "hbmartin/react-mentions-ts",
+      "hbmartin/repo-atlas",
+      "hbmartin/rive-characters",
+      "hbmartin/selective-designer"
+    ],
+    "label": "Creative Web Apps",
+    "gloss": "These projects build interactive experiences for games, events, journaling, and design."
+  }
+}

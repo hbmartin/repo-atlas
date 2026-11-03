@@ -5,6 +5,7 @@ import html
 import json
 import math
 import os
+import re
 import sqlite3
 import sys
 from collections import Counter, defaultdict
@@ -26,9 +27,11 @@ from .layouts import (
     force_layout,
     postprocess_layout,
     projection_neighbor_counts,
+    territory_layout,
 )
 from .models import UNCLUSTERED_LABEL, ClusterLabel, RepoSummary
 from .summarizers import (
+    OLLAMA_SUMMARY_MODEL,
     CodexPreflightCache,
     SummarizerCancelledError,
     SummarizerConfigurationError,
@@ -39,18 +42,19 @@ from .summarizers import (
 
 STAGES = ("discover", "acquire", "summarize", "embed", "cluster", "label", "project", "emit")
 PROMPT_VERSION = "summary-v2"
-LABEL_PROMPT_VERSION = "label-v2"
+LABEL_PROMPT_VERSION = "label-v5"
 TEMPLATE_VERSION = "embed-v1"
-ALGORITHM_VERSION = "analysis-v2"
+ALGORITHM_VERSION = "analysis-v3"
+MIN_README_WORDS = 40
 ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
 
 OTHER_LANGUAGE_COLOR = "#DDDDDD"
 UNKNOWN_LANGUAGE_COLOR = "#87909E"
 CATEGORY_LANGUAGE_COLORS = {
-    "Python": "#77AADD", "TypeScript": "#EE8866", "Kotlin": "#EEDD88",
-    "JavaScript": "#FFAABB", "Swift": "#99DDFF", "Go": "#44BB99",
-    "Ruby": "#BBCC33", "Rust": "#AAAA00", "Other": OTHER_LANGUAGE_COLOR,
+    "Python": "#33C8FA", "TypeScript": "#6F6FFB", "Kotlin": "#D0965D",
+    "JavaScript": "#92FC83", "Swift": "#C87824", "Go": "#E2B69C",
+    "Ruby": "#A5D21E", "Rust": "#36A2E2", "Other": OTHER_LANGUAGE_COLOR,
     "Unknown": UNKNOWN_LANGUAGE_COLOR,
 }
 PRIMARY_LANGUAGE_CATEGORIES = frozenset(CATEGORY_LANGUAGE_COLORS) - {"Other", "Unknown"}
@@ -118,6 +122,8 @@ def month(value: str) -> str:
 def summarizer_cache_id(name: str) -> str:
     if name == "openai":
         return f"openai:{openai_summary_model()}"
+    if name == "ollama":
+        return f"ollama:{OLLAMA_SUMMARY_MODEL}"
     return name
 
 
@@ -154,6 +160,34 @@ class AtlasPipeline:
         self._vector_snapshot: tuple[list[str], np.ndarray, str] | None = None
         self._best_effort_excluded: set[str] = set()
         self._codex_preflight_cache = CodexPreflightCache()
+        self.region_curation = self._load_region_curation(root / "config" / "regions.json")
+        self.named_exclusions = self._exclude_names()
+
+    @staticmethod
+    def _load_region_curation(path: Path) -> dict:
+        if not path.exists():
+            return {}
+        try:
+            entries = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(entries, dict):
+                raise TypeError("expected an object keyed by stable region identifiers")
+            for key, entry in entries.items():
+                if key == "unclustered" or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", key):
+                    raise ValueError(f"invalid region key {key!r}")
+                if not isinstance(entry, dict) or set(entry) - {"anchor", "members", "label", "gloss"}:
+                    raise ValueError(f"invalid settings for {key!r}")
+                members = entry.get("members", [])
+                if not isinstance(members, list) or any(not isinstance(name, str) or "/" not in name for name in members):
+                    raise ValueError(f"{key!r} members must be owner/name strings")
+                if "anchor" in entry and (not isinstance(entry["anchor"], str) or "/" not in entry["anchor"]):
+                    raise ValueError(f"{key!r} anchor must be an owner/name string")
+                if "label" in entry or "gloss" in entry:
+                    if not isinstance(entry.get("label"), str) or not isinstance(entry.get("gloss"), str):
+                        raise ValueError(f"{key!r} requires both a label and a gloss")
+                    ClusterLabel(label=entry["label"], gloss=entry["gloss"])
+            return entries
+        except (OSError, TypeError, ValueError) as exc:
+            raise AtlasError(f"Invalid region curation in {path.name}: {exc}") from exc
 
     def _invalidate_snapshots(self) -> None:
         self._summary_snapshot = None
@@ -171,6 +205,8 @@ class AtlasPipeline:
         unknown = chosen.difference(STAGES)
         if unknown:
             raise ValueError(f"Unknown stages: {', '.join(sorted(unknown))}")
+        self._invalidate_snapshots()
+        self.named_exclusions = self._exclude_names()
         if "discover" not in chosen:
             self._apply_cached_exclusions()
         for stage in STAGES:
@@ -179,11 +215,11 @@ class AtlasPipeline:
                 getattr(self, stage)()
 
     def _exclude_names(self) -> set[str]:
-        path = self.root / "config" / "exclude.txt"
-        if not path.exists():
-            return set()
         return {
-            line.strip().casefold() for line in path.read_text(encoding="utf-8").splitlines()
+            line.strip().casefold()
+            for filename in ("exclude.default.txt", "exclude.txt")
+            if (path := self.root / "config" / filename).exists()
+            for line in path.read_text(encoding="utf-8").splitlines()
             if line.strip() and not line.lstrip().startswith("#")
         }
 
@@ -298,12 +334,16 @@ class AtlasPipeline:
         for missing in sorted(excluded - matched_exclusions):
             print(f"[discover] warning: exclusion did not match {missing}", file=sys.stderr)
 
+    @staticmethod
+    def _acquisition_key(repo: sqlite3.Row) -> str:
+        return content_hash(ACQUIRE_VERSION, repo["pushed_at"], repo["default_branch"])
+
     def acquire(self) -> None:
         self._invalidate_snapshots()
         self._best_effort_excluded.clear()
         rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         for index, repo in enumerate(rows, 1):
-            key = content_hash(ACQUIRE_VERSION, repo["pushed_at"], repo["default_branch"])
+            key = self._acquisition_key(repo)
             if repo["acquire_key"] == key and repo["content_hash"]:
                 print(f"[acquire {index}/{len(rows)}] cached {repo['full_name']}")
                 continue
@@ -339,8 +379,26 @@ class AtlasPipeline:
                 ),
             )
 
+    def _eligible_repos(self) -> list[sqlite3.Row]:
+        rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
+        pending = [row["full_name"] for row in rows if row["full_name"].casefold() not in self.named_exclusions
+                   and (not row["content_hash"] or row["acquire_key"] != self._acquisition_key(row))]
+        if pending:
+            raise AtlasError(f"Repository evidence is missing or stale for {pending[0]}. Run the acquire stage first.")
+        return [row for row in rows if self._exclusion_reason(row) is None]
+
+    def _exclusion_reason(self, repo: sqlite3.Row) -> str | None:
+        if repo["full_name"].casefold() in self.named_exclusions:
+            return "Named exclusion"
+        if not repo["readme_present"]:
+            return "Missing README"
+        words = repo["readme_word_count"] or 0
+        if words < MIN_README_WORDS:
+            return f"README has {words} cleaned words (minimum {MIN_README_WORDS})"
+        return None
+
     def _summary_context(self, repo: sqlite3.Row) -> tuple[dict, bool, str]:
-        low = not repo["readme_present"] or (repo["readme_word_count"] or 0) < 40
+        low = not repo["readme_present"] or (repo["readme_word_count"] or 0) < MIN_README_WORDS
         languages = json.loads(repo["languages_json"])
         top_languages = sorted(languages.items(), key=lambda item: (-item[1], item[0]))[:3]
         context = {
@@ -360,7 +418,7 @@ class AtlasPipeline:
             or all(row["provider"] == self.summary_provider_id for row in self._summary_snapshot)
         ):
             return self._summary_snapshot
-        repos = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
+        repos = self._eligible_repos()
         summaries = {
             row["full_name"]: row for row in self.cache.rows("SELECT * FROM summaries")
         }
@@ -402,8 +460,8 @@ class AtlasPipeline:
     def summarize(self) -> None:
         self._invalidate_snapshots()
         self._best_effort_excluded.clear()
+        rows = self._eligible_repos()
         provider = self._summarizer()
-        rows = self.cache.rows("SELECT * FROM repos ORDER BY full_name")
         cached_by_name = {
             row["full_name"]: row for row in self.cache.rows("SELECT * FROM summaries")
         }
@@ -634,7 +692,7 @@ class AtlasPipeline:
         vectors = np.stack([np.frombuffer(row["vector"], dtype=np.float32) for row in rows])
         self.effective_embedder_id = model_id
         vector_digest = hashlib.sha256(vectors.round(7).tobytes()).hexdigest()
-        key = content_hash(ALGORITHM_VERSION, model_id, names, vector_digest)
+        key = content_hash(ALGORITHM_VERSION, model_id, names, vector_digest, self.region_curation)
         self._vector_snapshot = (names, vectors, key)
         return self._vector_snapshot
 
@@ -659,11 +717,14 @@ class AtlasPipeline:
                 metric="precomputed", min_cluster_size=max(3, round(n / 25)), min_samples=2,
             ).fit_predict(distances)
             cluster_count = len({int(value) for value in raw if value >= 0})
-            if float(np.mean(raw < 0)) > 0.30 or cluster_count < 3:
+            lower = 8 if n >= 40 else 4
+            if float(np.mean(raw < 0)) > 0.10 or not lower <= cluster_count <= 12:
                 best_score, best = -2.0, None
                 upper = min(12, n - 1)
-                for k in range(4, upper + 1):
+                for k in range(lower, upper + 1):
                     candidate = KMeans(n_clusters=k, random_state=42, n_init=20).fit_predict(vectors)
+                    if not 2 <= len(set(candidate)) < n:
+                        continue
                     score = silhouette_score(vectors, candidate, metric="cosine")
                     if score > best_score:
                         best_score, best = score, candidate
@@ -671,6 +732,7 @@ class AtlasPipeline:
                 algorithm = "kmeans"
             else:
                 algorithm = "hdbscan"
+        raw, curated_keys = self._apply_region_membership(names, raw)
         members = defaultdict(list)
         for name, value in zip(names, raw, strict=True):
             if int(value) >= 0:
@@ -678,10 +740,43 @@ class AtlasPipeline:
         ordered = sorted(members, key=lambda value: tuple(sorted(members[value])))
         remap = {old: new for new, old in enumerate(ordered)}
         labels = [remap.get(int(value)) for value in raw]
-        payload = {"key": key, "names": names, "cluster_ids": labels, "algorithm": algorithm}
+        region_keys = {
+            str(remap[old]): curated_keys.get(old, self._region_key(members[old][0]))
+            for old in ordered
+        }
+        payload = {"key": key, "names": names, "cluster_ids": labels, "algorithm": algorithm,
+                   "region_keys": region_keys}
         self.cache.set_stage("cluster", key, payload, now())
         self.analysis = payload
         print(f"[cluster] {algorithm} produced {len(ordered)} clusters")
+
+    @staticmethod
+    def _region_key(name: str) -> str:
+        slug = re.sub(r"[^a-z0-9]+", "-", name.split("/", 1)[-1].lower()).strip("-") or "repo"
+        return f"region-{slug}-{hashlib.sha256(name.encode()).hexdigest()[:8]}"
+
+    def _apply_region_membership(self, names: list[str], raw: np.ndarray) -> tuple[np.ndarray, dict[int, str]]:
+        assignments = raw.copy()
+        positions = {name.casefold(): index for index, name in enumerate(names)}
+        keys: dict[int, str] = {}
+        claimed: set[int] = set()
+        for key, entry in sorted(self.region_curation.items()):
+            indices = [positions[name.casefold()] for name in entry.get("members", [])
+                       if name.casefold() in positions]
+            anchor = positions.get(entry.get("anchor", "").casefold())
+            if anchor is not None and anchor not in indices:
+                indices.append(anchor)
+            if not indices:
+                continue
+            target = int(raw[anchor]) if anchor is not None else -1
+            if target < 0 or target in keys:
+                target = max([int(raw.max()), *keys]) + 1
+            if claimed.intersection(indices):
+                raise AtlasError(f"Repository membership is specified for multiple regions, including {key}.")
+            claimed.update(indices)
+            assignments[indices] = target
+            keys[target] = key
+        return assignments, keys
 
     def _load_analysis(self) -> dict:
         if self.analysis:
@@ -698,7 +793,11 @@ class AtlasPipeline:
         summary_rows = self.cache.rows(
             "SELECT full_name,summary_json FROM summaries WHERE status='ok' ORDER BY full_name"
         )
-        summaries = {row["full_name"]: RepoSummary.model_validate_json(row["summary_json"]) for row in summary_rows}
+        eligible = set(analysis["names"])
+        summaries = {
+            row["full_name"]: RepoSummary.model_validate_json(row["summary_json"])
+            for row in summary_rows if row["full_name"] in eligible
+        }
         members: dict[int, list[str]] = defaultdict(list)
         for name, cluster_id in zip(analysis["names"], analysis["cluster_ids"], strict=True):
             if cluster_id is not None:
@@ -707,7 +806,7 @@ class AtlasPipeline:
         used: set[str] = set()
         self.labels = {}
         self.fallback_label_ids.clear()
-        signatures, overrides, reserved = self._locked_override_values(members)
+        signatures, overrides, reserved = self._locked_override_values(members, analysis.get("region_keys", {}))
         label_cache = {
             row["cache_key"]: json.loads(row["payload_json"])
             for row in self.cache.rows("SELECT cache_key,payload_json FROM stage_cache WHERE stage='label'")
@@ -715,7 +814,8 @@ class AtlasPipeline:
         for cluster_id in sorted(members):
             signature = signatures[cluster_id]
             override = overrides.get(cluster_id)
-            stage_key = content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id)
+            theme = self._curated_theme(analysis, cluster_id)
+            stage_key = self._label_key(signature, theme)
             cached, cached_fallback = self._label_cache_value(label_cache.get(stage_key))
             value: ClusterLabel | None = None
             if override:
@@ -731,11 +831,13 @@ class AtlasPipeline:
             generated = value is None
             if generated:
                 provider = provider or self._summarizer()
-                descriptions = [summaries[name].one_liner for name in members[cluster_id]][:40]
+                descriptions = [f"{name.split('/', 1)[-1]}: {summaries[name].one_liner}"
+                                for name in members[cluster_id]][:40]
                 try:
-                    value = provider.label(descriptions)
+                    options = {"theme": theme} if theme else {}
+                    value = provider.label(descriptions, **options)
                     if value.label.casefold() in used | reserved:
-                        value = provider.label(descriptions, collision=value.label)
+                        value = provider.label(descriptions, collision=value.label, **options)
                 except (SummarizerConfigurationError, SummarizerCancelledError):
                     raise
                 except (SummarizerInvocationError, ValueError) as exc:
@@ -766,6 +868,14 @@ class AtlasPipeline:
             used.add(value.label.casefold())
             self.labels[cluster_id] = value
             print(f"[label] {cluster_id}: {value.label}")
+
+    def _curated_theme(self, analysis: dict, cluster_id: int) -> str | None:
+        key = analysis.get("region_keys", {}).get(str(cluster_id))
+        return key.replace("-", " ") if key in self.region_curation else None
+
+    def _label_key(self, signature: str, theme: str | None) -> str:
+        parts = (signature, LABEL_PROMPT_VERSION, self.summary_provider_id)
+        return content_hash(*parts, theme) if theme else content_hash(*parts)
 
     @staticmethod
     def _label_cache_value(payload: object) -> tuple[object, bool]:
@@ -805,7 +915,7 @@ class AtlasPipeline:
             # of that user choice as the current public-data contract permits.
             words = str(row["label"] or "").strip().split()[:4]
             normalized_label = " ".join(words) or "Unlabeled"
-            if normalized_label.casefold() == UNCLUSTERED_LABEL.casefold():
+            if normalized_label.casefold() in {UNCLUSTERED_LABEL.casefold(), "undocumented projects"}:
                 normalized_label = "Unlabeled"
             value = ClusterLabel(
                 label=normalized_label,
@@ -825,6 +935,7 @@ class AtlasPipeline:
     def _locked_override_values(
         self,
         members: dict[int, list[str]],
+        region_keys: dict[str, str],
     ) -> tuple[dict[int, str], dict[int, ClusterLabel], set[str]]:
         signatures = {
             cluster_id: content_hash(sorted(names))
@@ -839,6 +950,10 @@ class AtlasPipeline:
             for cluster_id, signature in signatures.items()
             if signature in rows
         }
+        for cluster_id in members:
+            entry = self.region_curation.get(region_keys.get(str(cluster_id), ""), {})
+            if "label" in entry:
+                overrides[cluster_id] = ClusterLabel(label=entry["label"], gloss=entry["gloss"])
         by_label: dict[str, list[int]] = defaultdict(list)
         for cluster_id, value in overrides.items():
             by_label[value.label.casefold()].append(cluster_id)
@@ -858,12 +973,12 @@ class AtlasPipeline:
         used: set[str] = set()
         self.labels = {}
         self.fallback_label_ids.clear()
-        signatures, overrides, reserved = self._locked_override_values(members)
+        signatures, overrides, reserved = self._locked_override_values(members, analysis.get("region_keys", {}))
         for cluster_id, names in sorted(members.items()):
             signature = signatures[cluster_id]
             override = overrides.get(cluster_id)
             cached = self.cache.get_stage(
-                "label", content_hash(signature, LABEL_PROMPT_VERSION, self.summary_provider_id),
+                "label", self._label_key(signature, self._curated_theme(analysis, cluster_id)),
             )
             if override:
                 value = override
@@ -1031,12 +1146,11 @@ class AtlasPipeline:
             fired = "label_collisions"
         else:
             chosen, fired = "umap", "default"
-        alternate = "force" if chosen == "umap" else "umap"
         chosen_xy = umap_xy if chosen == "umap" else force_xy
-        alternate_xy = force_xy if chosen == "umap" else umap_xy
+        territory_xy, territories = territory_layout(chosen_xy, labels)
         similarity = vectors @ vectors.T
-        np.fill_diagonal(similarity, -1)
-        nearest = np.argsort(-similarity, axis=1)[:, : min(5, len(names) - 1)]
+        np.fill_diagonal(similarity, -np.inf)
+        nearest = np.argsort(-similarity, axis=1, kind="stable")[:, : min(5, len(names) - 1)]
         valid_counts = np.asarray([value for value in file_counts if value is not None], dtype=float)
         p5, p95 = (np.percentile(valid_counts, [5, 95]) if len(valid_counts) else (0, 1))
 
@@ -1048,23 +1162,23 @@ class AtlasPipeline:
 
         clusters = []
         selected_contours = contours_by_layout[chosen]
-        alternate_contours = contours_by_layout[alternate]
         for cluster_id, label in sorted(self.labels.items()):
             members = [name for name, value in zip(names, labels, strict=True) if value == cluster_id]
-            rings, anchor, _mask = selected_contours[cluster_id]
-            alt_rings, alt_anchor, _alt_mask = alternate_contours[cluster_id]
+            _rings, anchor, _mask = selected_contours[cluster_id]
             clusters.append({
-                "id": cluster_id, "label": label.label, "gloss": label.gloss,
-                "member_count": len(members), "label_anchor": anchor, "contours": rings,
-                "label_anchor_alt": alt_anchor, "contours_alt": alt_rings,
+                "id": cluster_id, "label": label.label,
+                "gloss": label.gloss or "These repositories share a technical theme.",
+                "key": analysis.get("region_keys", {}).get(str(cluster_id), self._region_key(members[0])),
+                "member_count": len(members), **territories[cluster_id],
+                "label_anchor_alt": anchor, "contours_alt": {"outer": [], "inner": []},
             })
         self.final_payload = {
-            "analysis_key": key, "layout": chosen, "layout_alt": alternate,
+            "analysis_key": key, "layout": "territories", "layout_alt": chosen,
             "embedding_model": self.effective_embedder_id,
             "fallback_label_ids": sorted(self.fallback_label_ids),
             "selection_rule": fired, "metrics": metric_values, "names": names,
-            "cluster_ids": labels, "coordinates": chosen_xy.tolist(),
-            "coordinates_alt": alternate_xy.tolist(), "neighbors": [
+            "cluster_ids": labels, "coordinates": territory_xy.tolist(),
+            "coordinates_alt": chosen_xy.tolist(), "neighbors": [
                 [{"full_name": names[int(j)], "similarity": round(float(similarity[i, j]), 3)} for j in row]
                 for i, row in enumerate(nearest)
             ],
@@ -1100,7 +1214,10 @@ class AtlasPipeline:
                 "Refusing to publish fallback embeddings without --allow-fallback."
             )
         names = projected["names"]
-        self._current_summary_rows()
+        self._summary_snapshot = None
+        current = self._current_summary_rows()
+        if names != [row["full_name"] for row in current]:
+            raise AtlasError("Projection repository set does not match eligible summaries. Run the analysis stages again.")
         placeholders = ",".join("?" for _ in names)
         repo_rows = self.cache.rows(
             f"""SELECT r.*,s.summary_json,s.low_confidence FROM repos r
@@ -1146,8 +1263,9 @@ class AtlasPipeline:
                 "neighbors": projected["neighbors"][index],
             })
         payload = {
-            "schema_version": 2, "generated_at": now(),
+            "schema_version": 3, "generated_at": now(),
             "owner": names[0].split("/", 1)[0],
+            "summary_provider": self.summary_provider_id,
             "embedding_model": projected.get("embedding_model", self.effective_embedder_id),
             "fallback_label_ids": projected.get("fallback_label_ids", []),
             "layout": projected["layout"], "layout_alt": projected["layout_alt"],
@@ -1159,9 +1277,11 @@ class AtlasPipeline:
             },
             "languages": language_items, "clusters": projected["clusters"], "repos": repos,
         }
+        payload["region_aliases"] = {}
         output = self.root / "public" / "atlas.json"
         if output.exists():
             previous = json.loads(output.read_text(encoding="utf-8"))
+            payload["region_aliases"] = self._region_aliases(previous, payload)
             old_compare, new_compare = dict(previous), dict(payload)
             old_compare.pop("generated_at", None)
             new_compare.pop("generated_at", None)
@@ -1172,9 +1292,38 @@ class AtlasPipeline:
         self._record_run(payload, projected)
         print(f"[emit] wrote {output} with {len(repos)} repositories")
 
+    @staticmethod
+    def _region_aliases(previous: dict, payload: dict) -> dict[str, str]:
+        """Resolve renamed region links to the largest surviving member overlap."""
+        keys = {region["id"]: region["key"] for region in payload["clusters"]}
+        labels = {region["label"] for region in payload["clusters"]}
+        current = {repo["full_name"]: keys.get(repo["cluster_id"]) for repo in payload["repos"]}
+        overlaps: dict[int, Counter[str]] = defaultdict(Counter)
+        for repo in previous.get("repos", []):
+            key = current.get(repo["full_name"])
+            if key and repo["cluster_id"] is not None:
+                overlaps[repo["cluster_id"]][key] += 1
+        previous_keys = {}
+        aliases = {}
+        for region in previous.get("clusters", []):
+            key = region.get("key")
+            counts = overlaps[region["id"]]
+            if key not in keys.values():
+                key = min(counts, key=lambda candidate: (-counts[candidate], candidate)) if counts else None
+            if key:
+                if region["label"] not in labels:
+                    aliases[region["label"]] = key
+                if region.get("key"):
+                    previous_keys[region["key"]] = key
+        for label, key in previous.get("region_aliases", {}).items():
+            if label not in labels and key in previous_keys:
+                aliases.setdefault(label, previous_keys[key])
+        return aliases
+
     def _emit_list(self, payload: dict) -> None:
         groups: dict[str, list[dict]] = defaultdict(list)
         labels = {cluster["id"]: cluster["label"] for cluster in payload["clusters"]}
+        descriptions = {cluster["label"]: cluster["gloss"] for cluster in payload["clusters"]}
         for repo in payload["repos"]:
             groups[labels.get(repo["cluster_id"], "Unclustered")].append(repo)
         sections = []
@@ -1184,11 +1333,12 @@ class AtlasPipeline:
                 f'<p>{html.escape(repo["one_liner"])}</p></li>'
                 for repo in sorted(groups[label], key=lambda item: item["name"].casefold())
             )
-            sections.append(f"<section><h2>{html.escape(label)}</h2><ul>{items}</ul></section>")
+            gloss = f"<p>{html.escape(descriptions[label])}</p>" if label in descriptions else ""
+            sections.append(f"<section><h2>{html.escape(label)}</h2>{gloss}<ul>{items}</ul></section>")
         document = f"""<!doctype html><html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width,initial-scale=1"><title>Repo Atlas — List</title>
+<meta name="viewport" content="width=device-width,initial-scale=1"><title>Martin's Atlas — List</title>
 <style>body{{margin:0 auto;max-width:56rem;padding:2rem;background:#071019;color:#dbe7f3;font:16px/1.6 system-ui}}a{{color:#74c7ec}}h1,h2{{color:#fff}}section{{border-top:1px solid #263746;padding:1rem 0}}li{{margin:.75rem 0}}p{{margin:.2rem 0;color:#9fb0c0}}</style></head>
-<body><main><h1>Repo Atlas</h1><p>{payload['stats']['repo_count']} public repositories, grouped by semantic region.</p>{''.join(sections)}</main></body></html>"""
+<body><main><h1>Martin's Atlas</h1><p>{payload['stats']['repo_count']} public repositories, grouped by semantic region.</p>{''.join(sections)}</main></body></html>"""
         (self.root / "public" / "atlas-list.html").write_text(document, encoding="utf-8")
 
     def _record_run(self, payload: dict, projected: dict) -> None:
@@ -1224,9 +1374,9 @@ class AtlasPipeline:
         reports.mkdir(exist_ok=True)
         metrics = projected["metrics"]
         lines = [
-            "# Repo Atlas run", "", f"- Run: `{self.run_id}`",
+            "# Martin's Atlas run", "", f"- Run: `{self.run_id}`",
             f"- Repositories: {len(payload['repos'])}", f"- Clustering: {projected['algorithm']}",
-            f"- Chosen layout: {projected['layout']} ({projected['selection_rule']})", "",
+            f"- Semantic comparison: {projected.get('layout_alt', projected['layout'])} ({projected['selection_rule']})", "",
             "| Layout | KNN-10 | Trustworthiness | Contour overlap | Label collisions |",
             "|---|---:|---:|---:|---:|",
         ]
@@ -1241,4 +1391,20 @@ class AtlasPipeline:
         for layout in ("umap", "force"):
             value = metrics[layout]
             lines.append(f"| {layout} | {value['knn_10_preservation']:.4f} | {value['trustworthiness']:.4f} | {value['contour_overlap']:.4f} | {value['label_collisions']} |")
+        lines += ["", f"- Summary provider: {self.summary_provider_id}",
+                  f"- Embedding model: {payload.get('embedding_model')}", "", "## Regions", ""]
+        grouped_names: dict[int | None, list[str]] = defaultdict(list)
+        for repo in payload["repos"]:
+            grouped_names[repo["cluster_id"]].append(repo["name"])
+        for region in payload["clusters"]:
+            lines += [f"### {region['label']} ({region['member_count']})", "", region["gloss"], "",
+                      ", ".join(grouped_names[region["id"]]), ""]
+        if grouped_names[None]:
+            lines += ["### Unclustered", "", ", ".join(grouped_names[None]), ""]
+        lines += ["", "## Exclusions", ""]
+        lines.extend(f"- `{name}`: Named exclusion" for name in sorted(self.named_exclusions))
+        for repo in self.cache.rows("SELECT * FROM repos ORDER BY full_name"):
+            reason = self._exclusion_reason(repo)
+            if reason and repo["full_name"].casefold() not in self.named_exclusions:
+                lines.append(f"- `{repo['full_name']}`: {reason}")
         (reports / f"run-{self.run_id}.md").write_text("\n".join(lines) + "\n", encoding="utf-8")

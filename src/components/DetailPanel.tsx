@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react'
+import { DetailSheet } from './DetailSheet'
 import type { AtlasCluster, AtlasRepo } from '../types'
 import { formatDate } from '../view-utils'
 import { FallbackLabel, FALLBACK_LABEL_EXPLANATION } from './FallbackLabel'
@@ -11,6 +11,9 @@ export function DetailPanel({
   onSelect,
   onRegion,
   onClose,
+  hiddenConnections = 0,
+  showConnections = false,
+  onShowConnections,
 }: {
   repo: AtlasRepo | null
   cluster: AtlasCluster | undefined
@@ -19,33 +22,13 @@ export function DetailPanel({
   onSelect: (repo: AtlasRepo) => void
   onRegion: (label: string) => void
   onClose: () => void
+  hiddenConnections?: number
+  showConnections?: boolean
+  onShowConnections?: () => void
 }) {
-  const dragStart = useRef<number | null>(null)
-  const panel = useRef<HTMLElement>(null)
-  useEffect(() => {
-    if (repo) panel.current?.focus({ preventScroll: true })
-  }, [repo])
   if (!repo) return null
   return (
-    <aside
-      ref={panel}
-      tabIndex={-1}
-      className="detail-panel populated"
-      aria-label={`${repo.name} details`}
-    >
-      <div
-        className="sheet-handle"
-        aria-hidden="true"
-        onPointerDown={(event) => {
-          if (event.pointerType === 'touch') dragStart.current = event.clientY
-        }}
-        onPointerUp={(event) => {
-          if (event.pointerType === 'touch' && dragStart.current != null && event.clientY - dragStart.current > 80) onClose()
-          dragStart.current = null
-        }}
-        onPointerCancel={() => { dragStart.current = null }}
-      />
-      <button className="panel-close" aria-label="Close details" onClick={onClose}>×</button>
+    <DetailSheet label={`${repo.name} details`} onClose={onClose}>
       <a className="repo-title" href={repo.url} target="_blank" rel="noreferrer">
         {repo.name}<span>↗</span>
       </a>
@@ -93,13 +76,20 @@ export function DetailPanel({
       )}
       <section className="neighbors">
         <h3>Nearest neighbors</h3>
+        <p>Similarity comes from repository descriptions and techniques. Map distance can differ.</p>
+        {hiddenConnections > 0 && <div className="connection-actions">
+          <span>{hiddenConnections} hidden by filters</span>
+          <button aria-pressed={showConnections} onClick={onShowConnections}>
+            {showConnections ? 'Hide extra connections' : 'Show connections'}
+          </button>
+        </div>}
         {repo.neighbors.map((neighbor) => {
           const next = reposByName.get(neighbor.full_name)
           if (!next) return null
           const width = Math.max(0, Math.min(100, neighbor.similarity * 100))
           return (
             <button key={neighbor.full_name} onClick={() => onSelect(next)}>
-              <span><strong>{next.name}</strong><small>{next.one_liner}</small></span>
+              <span><strong>{next.name}</strong><small className="connection-reason">{connectionReason(repo, next)}</small></span>
               <i aria-label={`${Math.round(width)} percent similarity`}><b style={{ width: `${width}%` }} /></i>
             </button>
           )
@@ -111,6 +101,25 @@ export function DetailPanel({
       <a className="github-action" href={repo.url} target="_blank" rel="noreferrer">
         View on GitHub <span>↗</span>
       </a>
-    </aside>
+    </DetailSheet>
   )
+}
+
+
+function connectionReason(repo: AtlasRepo, neighbor: AtlasRepo): string {
+  const shared = (left: string[], right: string[]) => {
+    const normalized = (value: string) => value.trim().toLowerCase()
+    const values = new Set(right.map(normalized))
+    return [...new Set(left.filter(value => !/^(|unknown|unclear|none|general|other|n\/a)$/i.test(value.trim())
+      && values.has(normalized(value))))].slice(0, 2)
+  }
+  const techniques = shared(repo.techniques, neighbor.techniques)
+  if (techniques.length) return `Shared techniques: ${techniques.join(', ')}.`
+  const topics = shared(repo.topics, neighbor.topics)
+  if (topics.length) return `Shared topics: ${topics.join(', ')}.`
+  const domain = shared([repo.domain], [neighbor.domain])[0]
+  if (domain) return `Both work in ${domain}.`
+  const platform = shared([repo.platform], [neighbor.platform])[0]
+  if (platform) return `Both target ${platform}.`
+  return 'Similar in the semantic embeddings, with no specific metadata in common.'
 }

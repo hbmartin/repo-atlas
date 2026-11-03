@@ -3,7 +3,7 @@ import { select } from 'd3-selection'
 import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
 import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
-import type { AtlasPresentation } from '../presentation'
+import { regionByKey, regionKey, UNCLUSTERED_KEY, type AtlasPresentation } from '../presentation'
 import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, type Box, type Size } from '../map-geometry'
 
 const PLACEHOLDER_SIZE = { width: 1000, height: 700 }
@@ -36,15 +36,17 @@ function MapTooltip({ repo, setNode }: MapTooltipProps) {
   if (!repo) return null
   return <div ref={setNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
     <strong>{repo.name}</strong><span>{repo.one_liner}</span><small>{repo.primary_language} · updated {formatDate(repo.pushed_at)}</small>
-    {repo.low_confidence && <small>Sparse README / low-confidence summary</small>}
   </div>
 }
 
-export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion }: {
+export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion,
+  onCloseRegion, highlightLanguage = null, showConnections = false, hintDismissed = false, onInteraction }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
   onSelect: (repo: AtlasRepo | null, options?: SelectionOptions) => void
   navigationRequest?: MapNavigationRequest | null; onNavigationHandled?: (nonce: number) => void
   highlightRegion?: number | null; onRegion?: (label: string, clickToken?: number) => void
+  onCloseRegion?: () => void; highlightLanguage?: string | null; showConnections?: boolean
+  hintDismissed?: boolean; onInteraction?: () => void
 }) {
   const svgRef = useRef<SVGSVGElement>(null)
   const tooltipRef = useRef<HTMLDivElement>(null)
@@ -230,16 +232,36 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (animate && !reduced) animateTransform(constrained)
     else writeTransform(constrained)
   }, [reduced, size, bounds, cancelCameraAnimation, animateTransform, writeTransform])
+  const focusedCluster = regionByKey(data, view.focusedRegion)
+  const focusedClusterId = focusedCluster?.id ?? (view.focusedRegion === UNCLUSTERED_KEY ? null : undefined)
+  const sheetOpen = Boolean(selected || view.focusedRegion)
   const availableCenter = useCallback((): [number, number] => {
     const rect = svgRef.current?.getBoundingClientRect()
     const top = document.querySelector<HTMLElement>('.detail-panel.populated')?.getBoundingClientRect().top
-    return [size.width / 2, compact && selected && rect ? mobileMapTargetY(rect, top ?? rect.bottom) : (size.height - 48) / 2]
-  }, [compact, selected, size])
+    return [size.width / 2, compact && sheetOpen && rect ? mobileMapTargetY(rect, top ?? rect.bottom) : (size.height - 48) / 2]
+  }, [compact, sheetOpen, size])
   const centerRepo = useCallback((repo: AtlasRepo) => {
     const [x, y] = availableCenter()
     navigated.current = true
     apply(zoomIdentity.translate(x, y).scale(Math.max(fit.k * 2.2, targetTransformRef.current.k)).translate(-pointX(repo), -pointY(repo)), true)
   }, [apply, availableCenter, fit.k, pointX, pointY])
+
+  const centerRegion = useCallback((target: string) => {
+    const cluster = regionByKey(data, target) ?? data.clusters.find(item => item.label === target)
+    const members = data.repos.filter(repo => target === UNCLUSTERED_KEY || target === 'Unclustered'
+      ? repo.cluster_id == null : cluster != null && repo.cluster_id === cluster.id)
+    if (!members.length) return
+    const points: [number, number][] = members.map(repo => [pointX(repo), pointY(repo)])
+    if (data.schema_version === 3 && !view.layoutAlt && cluster) points.push(...cluster.contours.outer.flat())
+    const box = boundsOf(points)
+    const [x, y] = compact ? availableCenter() : [size.width / 2, (size.height - 30) / 2]
+    const availableHeight = compact ? Math.max(84, y * 2) : size.height
+    const next = fitBounds(box, { width: size.width, height: availableHeight }, compact ? 22 : 60, compact ? 16 : 90)
+    const k = Math.min(fit.k * 4, next.k)
+    navigated.current = true
+    const center = compact ? [(box.left + box.right) / 2, (box.top + box.bottom) / 2] : next.invert([x, y])
+    apply(zoomIdentity.translate(x, y).scale(k).translate(-center[0], -center[1]), data.schema_version === 3)
+  }, [data, view.layoutAlt, pointX, pointY, availableCenter, compact, size, fit.k, apply])
 
   useLayoutEffect(() => {
     const node = svgRef.current!
@@ -249,6 +271,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         if (programmaticTransform.current) {
           commitTransform(event.transform)
         } else {
+          onInteraction?.()
           cancelCameraAnimation()
           targetTransformRef.current = event.transform
           navigated.current = true
@@ -268,7 +291,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       if (frame.current != null) cancelAnimationFrame(frame.current)
       frame.current = null
     }
-  }, [cancelClick, cancelCameraAnimation, scheduleTransform, commitTransform, configureZoom, writeTransform])
+  }, [cancelClick, cancelCameraAnimation, scheduleTransform, commitTransform, configureZoom, writeTransform, onInteraction])
 
   useLayoutEffect(() => {
     const node = svgRef.current!
@@ -323,8 +346,10 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   useLayoutEffect(() => {
     if (!viewport.measured || centeredProjection.current === viewport.alt) return
     centeredProjection.current = viewport.alt
-    if (selected && !navigationRequest) centerRepo(selected)
-  }, [viewport.measured, viewport.alt, selected, navigationRequest, centerRepo])
+    if (navigationRequest) return
+    if (selected) centerRepo(selected)
+    else if (view.focusedRegion) centerRegion(view.focusedRegion)
+  }, [viewport.measured, viewport.alt, selected, navigationRequest, centerRepo, centerRegion, view.focusedRegion])
 
   useLayoutEffect(() => {
     if (!navigationRequest || consumedRequest.current === navigationRequest.nonce) return
@@ -334,19 +359,14 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     if (navigationRequest.kind === 'repo') {
       const repo = reposByName.get(navigationRequest.target)
       if (repo) centerRepo(repo)
+    } else if (navigationRequest.kind === 'region') {
+      centerRegion(navigationRequest.target)
     } else {
-      const cluster = data.clusters.find(c => c.label === navigationRequest.target)
-      const members = data.repos.filter(repo => navigationRequest.target === 'Unclustered' ? repo.cluster_id == null : cluster != null && repo.cluster_id === cluster.id)
-      if (members.length) {
-        navigated.current = true
-        const next = fitBounds(boundsOf(members.map(repo => [pointX(repo), pointY(repo)])), size, 60, 90)
-        const k = Math.min(fit.k * 4, next.k)
-        const center = next.invert([size.width / 2, (size.height - 30) / 2])
-        apply(zoomIdentity.translate(size.width / 2, (size.height - 30) / 2).scale(k).translate(-center[0], -center[1]))
-      }
+      navigated.current = false
+      apply(fit, true)
     }
     onNavigationHandled?.(navigationRequest.nonce)
-  }, [navigationRequest, viewportReady, data, reposByName, pointX, pointY, size, fit.k, apply, centerRepo, onNavigationHandled, cancelClick])
+  }, [navigationRequest, viewportReady, reposByName, fit, apply, centerRepo, centerRegion, onNavigationHandled, cancelClick])
 
   useLayoutEffect(() => {
     const old = previousView.current
@@ -356,17 +376,25 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const filtersChanged = old.languages !== view.languages || old.regions !== view.regions || old.since !== view.since
     const ownSelection = gesture.kind === 'repo' && !filtersChanged
       && view.repo === ((gesture.target as AtlasRepo | null)?.full_name ?? null)
-    const ownRegion = gesture.kind === 'region' && view.regions.length === 1 && view.regions[0] === gesture.target
-      && old.languages === view.languages && old.since === view.since
+    const ownRegion = gesture.kind === 'region' && !filtersChanged
+      && (regionByKey(data, view.focusedRegion)?.label
+        ?? (view.focusedRegion === UNCLUSTERED_KEY ? 'Unclustered' : null)) === gesture.target
     if (!gesture.committed || (!ownSelection && !ownRegion)) cancelClick()
-  }, [view, cancelClick])
+  }, [data, view, cancelClick])
 
   useEffect(() => {
     const handler = (event: KeyboardEvent) => {
-      if (!selected || event.defaultPrevented || svgRef.current?.closest('[inert]')) return
+      if ((!selected && !view.focusedRegion) || event.defaultPrevented || svgRef.current?.closest('[inert]')) return
       const target = event.target
       if (target instanceof HTMLElement && (target.isContentEditable || target.matches('input, textarea, select'))) return
-      if (event.key === 'Escape') { event.preventDefault(); cancelClick(); onSelect(null); return }
+      if (event.key === 'Escape') {
+        event.preventDefault()
+        cancelClick()
+        if (selected) onSelect(null)
+        else onCloseRegion?.()
+        return
+      }
+      if (!selected) return
       const direction = { ArrowLeft: -1, ArrowRight: 1 }[event.key]
       if (!direction) return
       const next = nearestRepoInDirection(data.repos, visible, selected, direction, 0, view.layoutAlt)
@@ -384,13 +412,13 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     }
     window.addEventListener('keydown', handler)
     return () => window.removeEventListener('keydown', handler)
-  }, [data.repos, visible, selected, onSelect, view.layoutAlt, cancelClick, dotLookup])
+  }, [data.repos, visible, selected, onSelect, onCloseRegion, view.layoutAlt, view.focusedRegion, cancelClick, dotLookup])
 
   const relativeZoom = transform.k / fit.k
   const activeRepo = hover && visible.has(hover.full_name) ? hover : focused && visible.has(focused.full_name) ? focused : null
   const drawnRadius = useCallback((repo: AtlasRepo) => sizes.radius(repo.file_count) / fit.k * (repo === selected || repo === activeRepo ? 1.3 : 1), [sizes, fit.k, selected, activeRepo])
   const paths = useMemo(() => data.clusters.flatMap(cluster => (view.layoutAlt ? cluster.contours_alt ?? cluster.contours : cluster.contours).outer.map((ring, index) => ({
-    id: cluster.id, key: `${cluster.id}-${index}`, path: `M${smoothRing(ring).map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L')}Z`,
+    id: cluster.id, label: cluster.label, key: `${cluster.id}-${index}`, path: `M${smoothRing(ring).map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L')}Z`,
   }))), [data.clusters, view.layoutAlt])
   const labels = useMemo(() => placeRegionLabels(data, view.layoutAlt, transform, size, count => sizes.radius(count) * relativeZoom, measure, fontSize, preparedLabels), [data, view.layoutAlt, transform, size, sizes, relativeZoom, measure, fontSize, preparedLabels])
   const repoText = useMemo(() => new Map(data.repos.map(repo => {
@@ -405,6 +433,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const grid = new BoxGrid()
     const candidates = [...new Set([activeRepo, selected, ...(relativeZoom >= 1.8 ? data.repos : [])].filter((repo): repo is AtlasRepo => Boolean(repo) && visible.has(repo!.full_name)))]
     for (const repo of candidates) {
+      if (repo !== selected && repo !== activeRepo && focusedClusterId !== undefined && repo.cluster_id !== focusedClusterId) continue
       const [px, py] = transform.apply([pointX(repo), pointY(repo)])
       if (px < 0 || px > size.width || py < 0 || py > size.height - 70) continue
       const { text, width } = repoText.get(repo.full_name)!
@@ -416,7 +445,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       result.push({ repo, text, x, y, box })
     }
     return result
-  }, [activeRepo, selected, relativeZoom, data.repos, visible, transform, pointX, pointY, size, repoText, drawnRadius])
+  }, [activeRepo, selected, relativeZoom, data.repos, visible, focusedClusterId, transform, pointX, pointY, size, repoText, drawnRadius])
   const renderedLabels = useMemo(() => labels.filter(label => !repoLabels.some(other => overlaps(label, other.box))), [labels, repoLabels])
   const renderedLabelIds = new Set(renderedLabels.map(label => label.id))
   if (hoverRegion != null && !renderedLabelIds.has(hoverRegion)) setHoverRegion(null)
@@ -428,6 +457,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     return nearestRepoAtPoint(data.repos, visible, point.x, point.y, 22 * point.unitsPerPixel, view.layoutAlt, drawnRadius, selected?.full_name)
   }
   const changeZoom = (factor: number) => {
+    onInteraction?.()
     cancelClick()
     const current = targetTransformRef.current
     const center = availableCenter()
@@ -437,6 +467,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     apply(zoomIdentity.translate(...center).scale(k).translate(-point[0], -point[1]), true)
   }
   const zoomAtPointer = (clientX: number, clientY: number, current = targetTransformRef.current) => {
+    onInteraction?.()
     const rect = svgRef.current?.getBoundingClientRect()
     if (!rect) return
     const pointer: [number, number] = [clientX - rect.left, clientY - rect.top]
@@ -458,24 +489,48 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     clickGesture.current = gesture
   }
   const selectImmediately = useCallback((repo: AtlasRepo | null) => { cancelClick(); onSelect(repo) }, [cancelClick, onSelect])
-  const mapGeometry = useMemo(() => <>
-    {paths.map(path => <path key={path.key} d={path.path} className={`contour outer ${activeRegion === path.id ? 'active' : ''}`} style={{ fill: colors.get(path.id), stroke: colors.get(path.id) }} />)}
-    {selected?.neighbors.map(neighbor => reposByName.get(neighbor.full_name)).filter((repo): repo is AtlasRepo => Boolean(repo) && visible.has(repo!.full_name)).map(repo => <line key={repo.full_name} className="neighbor-line" x1={pointX(selected)} y1={pointY(selected)} x2={pointX(repo)} y2={pointY(repo)} />)}
-    {data.repos.map(repo => <g key={repo.full_name} transform={`translate(${pointX(repo)} ${pointY(repo)})`}
-      className={`repo-point ${repo === selected ? 'selected' : ''} ${repo.low_confidence ? 'low-confidence' : ''}`}
-      opacity={visible.has(repo.full_name) ? 1 : .1} pointerEvents={visible.has(repo.full_name) ? 'auto' : 'none'}
-      onPointerEnter={event => { setHover(repo); updateTooltipPointer(event.clientX, event.clientY, true) }}
-      onPointerMove={event => updateTooltipPointer(event.clientX, event.clientY)} onPointerLeave={() => setHover(null)}
-      onFocus={() => setFocused(repo)} onBlur={() => setFocused(null)}
-      onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
-      onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
-      <circle className="focus-ring" aria-hidden="true" pointerEvents="none" r={drawnRadius(repo) + 3 / fit.k} />
-      <circle ref={dotLookup.refs.get(repo.full_name)} className="repo-dot" role="button" tabIndex={visible.has(repo.full_name) ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
-        data-full-name={repo.full_name}
-        r={drawnRadius(repo)} fill={repo.low_confidence ? '#07131d' : languageColors.get(repo.primary_language_category)}
-        stroke={repo.low_confidence ? languageColors.get(repo.primary_language_category) : '#06131d'} />
-    </g>)}
-  </>, [paths, activeRegion, colors, selected, reposByName, visible, pointX, pointY, data.repos, drawnRadius, fit.k, languageColors, selectImmediately, dotLookup, updateTooltipPointer])
+  const clickableTerritories = data.schema_version === 3 && !view.layoutAlt
+  const regionOpacity = useCallback((id: number) => focusedClusterId === undefined || focusedClusterId === id ? 1 : .22, [focusedClusterId])
+  const mapGeometry = useMemo(() => {
+    const connections = selected?.neighbors.flatMap(neighbor => {
+      const repo = reposByName.get(neighbor.full_name)
+      return repo && (showConnections || visible.has(repo.full_name)) ? [repo] : []
+    }) ?? []
+    const connectionNames = new Set(connections.map(repo => repo.full_name))
+    return <>
+      {paths.map(path => <path key={path.key} d={path.path} aria-hidden="true"
+        data-territory={clickableTerritories ? path.label : undefined} opacity={regionOpacity(path.id)}
+        className={`contour outer ${clickableTerritories ? 'territory' : ''} ${activeRegion === path.id || focusedClusterId === path.id ? 'active' : ''}`}
+        style={{ fill: colors.get(path.id), stroke: colors.get(path.id) }} />)}
+      {selected && connections.map(repo => <line key={repo.full_name} aria-hidden="true"
+        className={`neighbor-line ${visible.has(repo.full_name) ? '' : 'revealed'}`}
+        x1={pointX(selected)} y1={pointY(selected)} x2={pointX(repo)} y2={pointY(repo)} />)}
+      {data.repos.map(repo => {
+        const matches = visible.has(repo.full_name)
+        const preview = highlightLanguage == null || repo.primary_language_category === highlightLanguage
+        const inRegion = focusedClusterId === undefined || repo.cluster_id === focusedClusterId
+        const isConnected = connectionNames.has(repo.full_name)
+        const opacity = repo === selected ? 1
+          : matches ? (preview && inRegion ? 1 : preview && isConnected ? .7 : .22)
+            : isConnected ? .65 : .1
+        return <g key={repo.full_name} transform={`translate(${pointX(repo)} ${pointY(repo)})`}
+          className={`repo-point ${repo === selected ? 'selected' : ''}`}
+          opacity={opacity} pointerEvents={matches ? 'auto' : 'none'}
+          onPointerEnter={event => { setHover(repo); updateTooltipPointer(event.clientX, event.clientY, true) }}
+          onPointerMove={event => updateTooltipPointer(event.clientX, event.clientY)} onPointerLeave={() => setHover(null)}
+          onFocus={() => setFocused(repo)} onBlur={() => setFocused(null)}
+          onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); selectImmediately(repo) } }}
+          onClick={event => { if (event.detail === 0) { event.stopPropagation(); selectImmediately(repo) } }}>
+          <circle className="focus-ring" aria-hidden="true" pointerEvents="none" r={drawnRadius(repo) + 3 / fit.k} />
+          <circle ref={dotLookup.refs.get(repo.full_name)} className="repo-dot" role="button" tabIndex={matches ? 0 : -1} aria-label={`${repo.name}: ${repo.one_liner}`}
+            data-full-name={repo.full_name} r={drawnRadius(repo)} fill={languageColors.get(repo.primary_language_category)}
+            stroke="#06131d" />
+        </g>
+      })}
+    </>
+  }, [selected, reposByName, showConnections, visible, paths, clickableTerritories, regionOpacity,
+    activeRegion, focusedClusterId, colors, pointX, pointY, data.repos, highlightLanguage, drawnRadius,
+    fit.k, dotLookup, languageColors, selectImmediately, updateTooltipPointer])
   const mapTooltipAnchor = activeRepo && activeRepo !== hover ? (() => {
     const [x, y] = transform.apply([pointX(activeRepo), pointY(activeRepo)])
     const radius = drawnRadius(activeRepo) * transform.k
@@ -525,7 +580,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     }
   }, [positionVisibleTooltip])
   return <div className="map-shell">
-    <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label="Semantic map of public GitHub repositories"
+    <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label={clickableTerritories ? "Territory map of public GitHub repositories" : "Semantic map of public GitHub repositories"}
       onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
       onPointerMove={event => {
         const start = pointerStart.current
@@ -540,7 +595,11 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         if (event.detail > 1) return
         const camera = currentTransform()
         const repo = hitRepo(event.clientX, event.clientY, camera)
-        if (start?.type === 'touch') selectImmediately(repo)
+        const territory = event.target instanceof Element ? event.target.getAttribute('data-territory') : null
+        if (territory) {
+          if (start?.type === 'touch') { cancelClick(); onRegion?.(territory) }
+          else queueClick('region', territory, camera)
+        } else if (start?.type === 'touch') selectImmediately(repo)
         else queueClick('repo', repo, camera)
       }}
       onDoubleClick={event => {
@@ -566,15 +625,15 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
           if (Math.hypot(label.x - x, label.y - y) < 28 || repoLabels.some(other => overlaps(label, other.box))) return null
           const endX = Math.max(label.left + 4, Math.min(label.right - 4, x))
           const endY = Math.max(label.top + 4, Math.min(label.bottom - 4, y))
-          return <line key={label.id} x1={x} y1={y} x2={endX} y2={endY} stroke={colors.get(label.id)} />
+          return <line key={label.id} x1={x} y1={y} x2={endX} y2={endY} stroke={colors.get(label.id)} opacity={regionOpacity(label.id)} />
         })}
       </g>
       <g className="map-labels">
         {renderedLabels.map(label => {
           const cluster = clustersById.get(label.id)!
           return <g key={label.id} className={`cluster-label ${activeRegion === label.id ? 'active' : ''}`}
-            transform={`translate(${label.x} ${label.y})`} opacity={relativeZoom > 2.5 && activeRegion !== label.id ? .3 : 1}
-            role="button" tabIndex={0} aria-label={`Focus region: ${cluster.label}`}
+            transform={`translate(${label.x} ${label.y})`} opacity={regionOpacity(label.id) * (relativeZoom > 2.5 && activeRegion !== label.id && focusedClusterId !== label.id ? .3 : 1)}
+            role="button" tabIndex={0} aria-current={view.focusedRegion === regionKey(cluster) ? true : undefined} aria-label={`Focus region: ${cluster.label}`}
             onPointerDown={event => { pointerStart.current = null; event.stopPropagation() }}
             onClick={event => {
               event.stopPropagation()
@@ -595,9 +654,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
         {repoLabels.map(label => <text key={label.repo.full_name} className="repo-label" x={label.x} y={label.y}>{label.text}</text>)}
       </g>
     </svg>
-    <div className="map-navigation" style={compact && selected ? { bottom: 'calc(60dvh + 12px)' } : undefined}>
-      <p className="map-instructions"><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
-      <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
+    <div className="map-navigation" style={compact && sheetOpen ? { bottom: 'calc(min(60dvh, 68%) + 12px)' } : undefined}>
+      <p className={`map-instructions ${hintDismissed ? 'dismissed' : ''}`} aria-hidden={hintDismissed || undefined}><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
+      <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { onInteraction?.(); cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
     <MapTooltip repo={tooltipRepo} setNode={setTooltipNode} />
   </div>

@@ -1,4 +1,4 @@
-import { atlasMonthRange, knownLanguage, knownRegion, normalizeLanguages, normalizeRegions } from './presentation'
+import { atlasMonthRange, knownLanguage, knownRegionFocus, resolveRegionFilter, normalizeLanguages, normalizeRegions } from './presentation'
 import { monthIndex } from './month'
 import type { AtlasData, AtlasRepo, ViewState } from './types'
 
@@ -62,11 +62,14 @@ export function normalizeAtlasSince(value: string, data: AtlasData): string | nu
 export function validateAtlas(value: unknown): AtlasData {
   if (!isRecord(value)) throw new Error('Atlas data is not an object')
   const data = value as unknown as AtlasData
-  if (data.schema_version !== 2) throw new Error('Unsupported atlas schema')
+  if (data.schema_version !== 2 && data.schema_version !== 3) throw new Error('Unsupported atlas schema')
   requireString(data.generated_at, 'generated_at')
   requireString(data.owner, 'owner')
   if (data.embedding_model !== undefined) requireString(data.embedding_model, 'embedding_model')
-  if (data.layout !== 'umap' && data.layout !== 'force') throw new Error('layout is invalid')
+  const territories = data.schema_version === 3
+  if (territories ? data.layout !== 'territories' : data.layout !== 'umap' && data.layout !== 'force') {
+    throw new Error('layout is invalid')
+  }
   if (data.layout_alt !== 'umap' && data.layout_alt !== 'force') throw new Error('layout_alt is invalid')
   if (!isRecord(data.bounds) || !Array.isArray(data.bounds.x) || !Array.isArray(data.bounds.y)) {
     throw new Error('bounds are malformed')
@@ -95,20 +98,29 @@ export function validateAtlas(value: unknown): AtlasData {
   })
   const clusterIds = new Set<number>()
   const clusterLabels = new Set<string>()
+  const clusterKeys = new Set<string>()
   data.clusters.forEach((cluster, index) => {
     requireFinite(cluster.id, `clusters[${index}].id`)
+    if (!territories) cluster.key = `region-${cluster.id}`
+    if (typeof cluster.key !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(cluster.key)
+      || cluster.key === 'unclustered' || clusterKeys.has(cluster.key)) {
+      throw new Error(`clusters[${index}].key must be a unique region identifier`)
+    }
+    clusterKeys.add(cluster.key)
     requireString(cluster.label, `clusters[${index}].label`)
     if (cluster.label.toLocaleLowerCase() === 'unclustered') {
       throw new Error('Cluster label Unclustered is reserved')
     }
-    if (typeof cluster.gloss !== 'string') throw new Error(`clusters[${index}].gloss must be a string`)
+    if (typeof cluster.gloss !== 'string' || (territories && !cluster.gloss.trim())) {
+      throw new Error(`clusters[${index}].gloss must be a description`)
+    }
     requireFinite(cluster.member_count, `clusters[${index}].member_count`)
     if (clusterIds.has(cluster.id)) throw new Error(`Duplicate cluster ${cluster.id}`)
     if (clusterLabels.has(cluster.label.toLocaleLowerCase())) throw new Error(`Duplicate cluster label ${cluster.label}`)
     clusterIds.add(cluster.id)
     clusterLabels.add(cluster.label.toLocaleLowerCase())
     for (const [name, anchor] of [['label_anchor', cluster.label_anchor], ['label_anchor_alt', cluster.label_anchor_alt]] as const) {
-      if (name === 'label_anchor_alt' && anchor === undefined) continue
+      if (!territories && name === 'label_anchor_alt' && anchor === undefined) continue
       if (!isRecord(anchor)) throw new Error(`clusters[${index}].${name} is malformed`)
       requireFinite(anchor.x, `clusters[${index}].${name}.x`)
       requireFinite(anchor.y, `clusters[${index}].${name}.y`)
@@ -118,8 +130,22 @@ export function validateAtlas(value: unknown): AtlasData {
       if (!isRecord(contours) || !Array.isArray(contours.outer) || !Array.isArray(contours.inner)) {
         throw new Error(`clusters[${index}].${name} is malformed`)
       }
+      if (territories && (contours.inner.length || contours.outer.length !== (name === 'contours' ? 1 : 0))) {
+        throw new Error(`clusters[${index}].${name} has invalid territory geometry`)
+      }
+      if (territories) for (const ring of contours.outer) {
+        if (!Array.isArray(ring) || ring.length < 4 || ring.some(point => !Array.isArray(point)
+          || point.length !== 2 || !point.every(Number.isFinite))
+          || ring[0][0] !== ring.at(-1)![0] || ring[0][1] !== ring.at(-1)![1]) {
+          throw new Error(`clusters[${index}].${name} must contain a closed polygon`)
+        }
+      }
     }
   })
+  if (data.region_aliases !== undefined && (!isRecord(data.region_aliases)
+    || Object.values(data.region_aliases).some(key => !clusterKeys.has(key)))) {
+    throw new Error('region_aliases must point to existing region keys')
+  }
   if (data.fallback_label_ids !== undefined) {
     if (!Array.isArray(data.fallback_label_ids)) throw new Error('fallback_label_ids must be an array')
     const seen = new Set<number>()
@@ -216,9 +242,9 @@ export async function loadAtlas(): Promise<AtlasData> {
 
 export function readViewState(search: string, data: AtlasData): { view: ViewState; unknown: string[] } {
   const params = new URLSearchParams(search)
-  const knownKeys = new Set(['repo', 'lang', 'region', 'since', 'layout'])
+  const knownKeys = new Set(['repo', 'lang', 'region', 'since', 'layout', 'focus'])
   const unknown = [...params.keys()].filter((key) => !knownKeys.has(key))
-  const scalarParameter = (key: 'repo' | 'since' | 'layout', recognized: (value: string) => boolean) => {
+  const scalarParameter = (key: 'repo' | 'since' | 'layout' | 'focus', recognized: (value: string) => boolean) => {
     const [value = null, ...ignored] = params.getAll(key).filter(Boolean)
     if (value === null) return { value, recognized: false as const }
     const valueRecognized = recognized(value)
@@ -245,13 +271,16 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
   }
   const regions: string[] = []
   for (const value of params.getAll('region').filter(Boolean)) {
-    if (knownRegion(data, value)) regions.push(value)
+    const region = resolveRegionFilter(data, value)
+    if (region !== undefined) regions.push(region)
     else unknown.push(`region=${value}`)
   }
+  const focus = scalarParameter('focus', value => knownRegionFocus(data, value))
   const sinceParameter = scalarParameter('since', value => validAtlasMonth(value, data))
   const layoutParameter = scalarParameter('layout', value => value === 'alt')
   const view = {
     repo: repoParameter.recognized ? repoParameter.value : null,
+    ...(focus.recognized ? { focusedRegion: focus.value } : {}),
     languages: normalizeLanguages(languages),
     regions: normalizeRegions(regions),
     since: sinceParameter.recognized ? normalizeAtlasSince(sinceParameter.value, data) : null,
@@ -263,6 +292,7 @@ export function readViewState(search: string, data: AtlasData): { view: ViewStat
 export function writeViewState(state: ViewState): string {
   const params = new URLSearchParams()
   if (state.repo) params.set('repo', state.repo)
+  if (state.focusedRegion) params.set('focus', state.focusedRegion)
   for (const language of normalizeLanguages(state.languages)) params.append('lang', language)
   for (const region of normalizeRegions(state.regions)) params.append('region', region)
   if (state.since) params.set('since', state.since)

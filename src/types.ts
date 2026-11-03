@@ -8,6 +8,7 @@ export interface AtlasLanguage {
 
 export interface AtlasCluster {
   id: number
+  key?: string
   label: string
   gloss: string
   member_count: number
@@ -57,12 +58,13 @@ export interface AtlasRepo {
 }
 
 export interface AtlasData {
-  schema_version: 2
+  schema_version: 2 | 3
+  region_aliases?: Record<string, string>
   generated_at: string
   owner: string
   embedding_model?: string
   fallback_label_ids?: number[]
-  layout: 'umap' | 'force'
+  layout: 'umap' | 'force' | 'territories'
   layout_alt: 'umap' | 'force'
   bounds: { x: [number, number]; y: [number, number] }
   stats: {
@@ -78,6 +80,7 @@ export interface AtlasData {
 
 export interface ViewState {
   repo: string | null
+  focusedRegion?: string | null
   languages: string[]
   regions: string[]
   since: string | null
@@ -99,5 +102,5 @@ declare global {
   interface Document { readonly modelContext?: WebModelContext }
 }
 
-export type MapNavigationRequest = { nonce: number; kind: 'repo' | 'region'; target: string; clickToken?: number }
+export type MapNavigationRequest = { nonce: number; kind: 'repo' | 'region' | 'overview'; target: string; clickToken?: number }
 export type SelectionOptions = { navigate?: boolean; clickToken?: number }
