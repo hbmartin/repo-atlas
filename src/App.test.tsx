@@ -365,7 +365,6 @@ describe('App mobile filters', () => {
     fireEvent.click(reset, { detail: 0 })
 
     expect(document.activeElement).toBe(search)
-    expect(document.activeElement).not.toBe(document.body)
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
@@ -381,7 +380,6 @@ describe('App mobile filters', () => {
     await user.click(screen.getByRole('button', { name: 'Reset link' }))
 
     expect(document.activeElement).toBe(search)
-    expect(document.activeElement).not.toBe(document.body)
     expect(focus).toHaveBeenCalledWith({ preventScroll: true })
   })
 
@@ -823,7 +821,7 @@ it('rejects a stale rollback after the same repository is explicitly reselected'
   expect(currentMap().navigationRequest).toEqual(reselectionNavigation)
 })
 
-it('rejects a stale rollback after WebMCP explicitly reselects the same repository', async () => {
+it.each(['repo', 'background'] as const)('rejects a stale rollback without navigating when WebMCP repeats a %s selection', async kind => {
   const first = makeRepo(), second = makeRepo({ full_name: 'owner/second', name: 'second' })
   const data = makeAtlas([first, second])
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => data }))
@@ -837,18 +835,54 @@ it('rejects a stale rollback after WebMCP explicitly reselects the same reposito
   await screen.findByRole('heading', { name: 'Repo Atlas' })
   await waitFor(() => expect(execute).toBeDefined())
 
-  act(() => currentMap().onSelect(second, { clickToken: 34 }))
-  const clickNavigation = currentMap().navigationRequest!
-  act(() => { execute?.({ repo: second.full_name }) })
-  const reselectionNavigation = currentMap().navigationRequest!
-  expect(reselectionNavigation).toMatchObject({ kind: 'repo', target: second.full_name })
-  expect(reselectionNavigation.clickToken).toBeUndefined()
-  expect(reselectionNavigation.nonce).toBeGreaterThan(clickNavigation.nonce)
+  const selection = kind === 'repo' ? second : null
+  act(() => currentMap().onSelect(selection, { clickToken: 34 }))
+  const clickNavigation = currentMap().navigationRequest
+  act(() => { execute?.({ repo: selection?.full_name ?? null }) })
+  expect(currentMap().navigationRequest).toBe(clickNavigation)
 
   act(() => currentMap().onSelect(first, { navigate: false, clickToken: 34 }))
 
-  expect(currentMap().view.repo).toBe(second.full_name)
-  expect(currentMap().navigationRequest).toEqual(reselectionNavigation)
+  expect(currentMap().view.repo).toBe(selection?.full_name ?? null)
+  expect(currentMap().navigationRequest).toBe(clickNavigation)
+})
+
+it.each([false, true])('does not navigate when WebMCP repeats the selected repo with hiding filters=%s', async hideRepo => {
+  let execute: ((input: unknown) => unknown) | undefined
+  Object.defineProperty(document, 'modelContext', {
+    configurable: true,
+    value: { registerTool(tool: { execute(input: unknown): unknown }) { execute = tool.execute } },
+  })
+  window.history.replaceState(null, '', '/?repo=owner%2Fexample')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+  await waitFor(() => expect(execute).toBeDefined())
+  act(() => currentMap().onNavigationHandled?.(currentMap().navigationRequest!.nonce))
+
+  act(() => { execute?.({ repo: 'owner/example', ...(hideRepo ? { languages: ['Python'] } : {}) }) })
+
+  expect(currentMap().view.repo).toBe('owner/example')
+  expect(currentMap().visible.has('owner/example')).toBe(!hideRepo)
+  expect(currentMap().navigationRequest).toBeNull()
+})
+
+it('rejects a background-click rollback after a no-op region selection', async () => {
+  const first = makeRepo()
+  window.history.replaceState(null, '', '/?repo=owner%2Fexample&region=Developer+Tools')
+  render(<App />)
+  await screen.findByRole('heading', { name: 'Repo Atlas' })
+
+  act(() => currentMap().onSelect(null, { clickToken: 35 }))
+  const backgroundView = currentMap().view
+  act(() => currentMap().onRegion?.('Developer Tools'))
+  expect(currentMap().view).toBe(backgroundView)
+  const regionNavigation = currentMap().navigationRequest!
+  expect(regionNavigation).toMatchObject({ kind: 'region', target: 'Developer Tools' })
+
+  act(() => currentMap().onSelect(first, { navigate: false, clickToken: 35 }))
+
+  expect(currentMap().view).toBe(backgroundView)
+  expect(currentMap().navigationRequest).toBe(regionNavigation)
 })
 
 it('rejects a stale double-click rollback while preserving a newer pending move', async () => {

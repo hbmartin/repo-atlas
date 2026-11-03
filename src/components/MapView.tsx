@@ -484,14 +484,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const mapAnchorX = mapTooltipAnchor?.x ?? 0
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
-  useLayoutEffect(() => {
-    // Preserve the last coherent repo/position pair while viewport inputs are unready.
-    if (viewportReady) {
-      // oxlint-disable-next-line react/set-state-in-effect
-      setLastReadyRepo(current => current === activeRepo ? current : activeRepo)
-    }
-  }, [viewportReady, activeRepo])
-  const tooltipRepo = viewportReady ? activeRepo : lastReadyRepo
+  // Keep the cached repo paired with the last ready tooltip position.
+  if (viewportReady && lastReadyRepo !== activeRepo) setLastReadyRepo(activeRepo)
+  const tooltipRepo = viewportReady || activeRepo === lastReadyRepo ? activeRepo : null
   useLayoutEffect(() => {
     if (!viewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor

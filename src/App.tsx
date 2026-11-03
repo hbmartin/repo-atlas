@@ -33,9 +33,9 @@ const EMPTY_VIEW: ViewState = {
 
 type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
 type ViewUpdate = ViewState | ((current: ViewState) => ViewState)
-type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean }
+type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean; supersedeRollback?: boolean }
 type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: ViewState }
-type RollbackCandidate = { token: number; view: ViewState }
+type RollbackCandidate = { token: number; view: ViewState; navigationSequence: number }
 
 const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'languages', 'regions', 'since', 'layoutAlt'])
 
@@ -157,7 +157,8 @@ export default function App() {
     const rollbackToken = options?.navigate === false ? options.clickToken : undefined
     const pendingNavigation = navigationRequestRef.current
     if (rollbackToken !== undefined
-      && (rollbackCandidate.current?.token !== rollbackToken || rollbackCandidate.current.view !== current)) {
+      && (rollbackCandidate.current?.token !== rollbackToken || rollbackCandidate.current.view !== current
+        || rollbackCandidate.current.navigationSequence !== navigationSequence.current)) {
       return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
     }
     const next = typeof update === 'function' ? update(current) : update
@@ -172,10 +173,6 @@ export default function App() {
     }
     const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
     const committedView = stateChanged ? normalized : current
-    const supersedesRollback = stateChanged || options?.navigate !== undefined || options?.canonicalizeUrl === true
-    if (rollbackToken !== undefined) rollbackCandidate.current = null
-    else if (options?.clickToken !== undefined) rollbackCandidate.current = { token: options.clickToken, view: committedView }
-    else if (supersedesRollback) rollbackCandidate.current = null
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
@@ -184,6 +181,11 @@ export default function App() {
     } else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
       replaceNavigation(null)
     }
+    if (rollbackToken !== undefined) rollbackCandidate.current = null
+    else if (options?.clickToken !== undefined) {
+      // Include the click's own navigation so it does not supersede its rollback.
+      rollbackCandidate.current = { token: options.clickToken, view: committedView, navigationSequence: navigationSequence.current }
+    } else if (stateChanged || options?.supersedeRollback) rollbackCandidate.current = null
     if (stateChanged) {
       viewRef.current = normalized
       setViewState(normalized)
@@ -301,7 +303,7 @@ export default function App() {
             since,
             layoutAlt: value.layoutAlt ?? current.layoutAlt,
           }
-        }, explicitlySelectsRepo ? { navigate: true } : undefined).view
+        }, { supersedeRollback: explicitlySelectsRepo }).view
         return {
           selected_repo: next.repo,
           languages: [...next.languages],
@@ -366,13 +368,13 @@ export default function App() {
   }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
     setHighlightRegion(null)
-    setView(current => ({ ...current, repo: repo?.full_name ?? null }), { ...options, navigate: options?.navigate ?? true })
+    setView(current => ({ ...current, repo: repo?.full_name ?? null }), { ...options, navigate: options?.navigate ?? true, supersedeRollback: true })
   }
   const backgroundInert = mobileFilters || guideOpen ? true : undefined
   const profileUrl = `https://github.com/${encodeURIComponent(data.owner)}`
 
   const chooseRegion = (label: string, clickToken?: number) => {
-    setView(current => ({ ...current, repo: null, regions: [label] }))
+    setView(current => ({ ...current, repo: null, regions: [label] }), { supersedeRollback: true })
     requestNavigation('region', label, clickToken)
     setListMode(false)
     setGuideOpen(false)
@@ -388,8 +390,8 @@ export default function App() {
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
           <button onClick={() => {
-            setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
-            window.requestAnimationFrame(() => focusFilterFallback('dialog'))
+            setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true, supersedeRollback: true })
+            window.requestAnimationFrame(() => focusFilterFallback(mobileFilters ? 'dialog' : 'controls'))
           }}>Reset link</button>
         </div>
       )}
