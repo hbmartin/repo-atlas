@@ -17,7 +17,7 @@ from .models import ClusterLabel
 from .pipeline import STAGES, AtlasPipeline, now
 from .summarizers import SummarizerConfigurationError
 
-app = typer.Typer(help="Build and inspect the Repo Atlas offline data bundle.", no_args_is_help=True)
+app = typer.Typer(help="Build and inspect the Martin's Atlas offline data bundle.", no_args_is_help=True)
 labels_app = typer.Typer(help="Inspect or override generated region labels.")
 cache_app = typer.Typer(help="Inspect and maintain the local pipeline cache.")
 app.add_typer(labels_app, name="labels")
@@ -29,7 +29,7 @@ def project_root() -> Path:
     for candidate in (current, *current.parents):
         if (candidate / "pyproject.toml").exists() and (candidate / "package.json").exists():
             return candidate
-    raise typer.BadParameter("Run atlas from the Repo Atlas project directory.")
+    raise typer.BadParameter("Run atlas from the repo-atlas project directory.")
 
 
 def command_major_version(command: str) -> int | None:
@@ -63,8 +63,8 @@ def main(version: bool = typer.Option(False, "--version", is_eager=True)) -> Non
 def run(
     from_stage: str = typer.Option("discover", "--from", help="First stage to run."),
     only: str | None = typer.Option(None, help="Comma-separated stages to run."),
-    summarizer: str = typer.Option("openai", help="openai, codex, claude, or gemini."),
-    embedder: str = typer.Option("hosted", help="hosted or local."),
+    summarizer: str = typer.Option("openai", help="openai, ollama, codex, claude, or gemini."),
+    embedder: str = typer.Option("hosted", help="hosted, local, or ollama."),
     yes: bool = typer.Option(False, "--yes", help="Deprecated compatibility flag."),
     allow_fallback: bool = typer.Option(
         False,
@@ -139,6 +139,7 @@ def doctor(
             if summarizer == "openai" else shutil.which(summarizer) is not None
         ),
         "OpenAI API key": bool(os.environ.get("OPENAI_API_KEY")) if embedder == "hosted" else True,
+        **({"Ollama CLI": shutil.which("ollama") is not None} if embedder == "ollama" and summarizer != "ollama" else {}),
         "Node.js 24+": node_major is not None and node_major >= 24,
         "pnpm 12+": pnpm_major is not None and pnpm_major >= 12,
     }

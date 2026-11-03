@@ -1,6 +1,6 @@
-# Repo Atlas
+# Martin's Atlas
 
-Repo Atlas turns a public GitHub portfolio into a semantic map. An offline Python pipeline discovers meaningful repositories, normalizes their READMEs through a schema-constrained API call, embeds the summaries, clusters the full-dimensional vectors, compares two deterministic 2D projections, and emits a static data bundle for the React site.
+Martin's Atlas turns a public GitHub portfolio into a semantic map. An offline Python pipeline discovers meaningful repositories, normalizes their READMEs through a schema-constrained API call, embeds the summaries, clusters the full-dimensional vectors, compares two deterministic 2D projections, and emits a static data bundle for the React site.
 
 The deployed site has no backend, API calls, runtime secrets, or user tracking.
 
@@ -20,7 +20,8 @@ pnpm install --frozen-lockfile
 uv run atlas doctor
 ```
 
-Archived repositories are omitted automatically. Create `config/exclude.txt` from the provided example when additional repositories should be omitted. The real file is intentionally ignored.
+Archived repositories and repositories with a missing README or fewer than 40 cleaned words are omitted.
+The tracked exclusions in `config/exclude.default.txt` cover specific scaffolds. Create `config/exclude.txt` from the provided example when additional repositories should be omitted. The real file is intentionally ignored.
 
 ## Build the atlas
 
@@ -30,6 +31,14 @@ pnpm run build
 ```
 
 The default run uses OpenAI's structured-output API for summaries and `text-embedding-3-large` for embeddings. The API summarizer has no filesystem, shell, or browser tools. Local agent CLIs remain available with `--summarizer claude|codex|gemini --allow-agent-summarizer`; that flag is an explicit acknowledgement that an agent CLI may access local files and its provider credentials. The Codex adapter checks CLI compatibility offline, validates the generated exec arguments, and disables all reported active configurable features before sending evidence; it fails if required isolation controls are unavailable. Checks run in an isolated configuration directory and can be cancelled. Successful checks are shared across stages for the same executable; authenticated execution retains the provider environment while ignoring user configuration. These checks verify adapter controls, not every aspect of the CLI runtime. This is defense in depth, not a zero-tools guarantee. Select embedding implementations with `--embedder hosted|local`, and install BGE-M3 with `uv sync --extra local`. Hosted embedding failures fail closed by default. Pass `--allow-fallback` only when deliberately accepting the lower-fidelity deterministic TF-IDF/SVD representation; the generated metadata records `tfidf-svd-v2-fallback` so it cannot be mistaken for hosted embeddings.
+
+To run both model stages on the local Ollama server (port 11434 by default, or set `ATLAS_OLLAMA_PORT`):
+
+```bash
+ollama pull qwen3:4b-instruct-2507-q4_K_M
+ollama pull bge-m3
+uv run atlas run --summarizer ollama --embedder ollama
+```
 
 Runs are resumable and stage-addressable:
 
@@ -54,9 +63,11 @@ The legacy `labels set --lock` spelling remains supported. `labels set --unlock`
 
 ## Method
 
-The pipeline reads repository metadata, the README, and the path-only Git tree. It does not inspect source contents. Cleaned evidence is summarized into a fixed schema, embedded, and clustered in the original vector space. UMAP and a force-directed k-nearest-neighbor layout are both computed with fixed seeds; the winner is chosen by neighbor preservation, contour overlap, and label collisions. Nearest neighbors always come from embedding similarity rather than projected distance.
+The pipeline reads repository metadata, the README, and the path-only Git tree. It does not inspect source contents. Eligible evidence is summarized, embedded, and clustered in the original vector space. The map packs regions into distinct territories while retaining their local projection. Semantic view shows the winning UMAP or force projection. Nearest neighbors always come from embedding similarity.
 
-Low-confidence points have missing or sparse READMEs and are shown as dashed hollow circles. They remain searchable and participate in the complete map. A separately reported tree-truncation notice means GitHub could not provide an exact file count; it does not reduce summary confidence.
+The run report lists README and named exclusions. A later acquisition can admit a repository whose README reaches the threshold. Version-controlled region corrections live in `config/regions.json`. Each stable key can identify a generated group through an `anchor` repo, move explicit `members` into that group, or define a separate region with members alone. Optional `label` and `gloss` fields override the generated name and description together.
+
+Legacy snapshots can contain low-confidence repos. Their repository panel explains confidence. Tree truncation is reported separately and means GitHub could not provide an exact file count.
 
 ## Privacy and generated files
 
@@ -85,16 +96,16 @@ credentials are only needed when regenerating that snapshot locally.
 
 ## Verification
 
-The schema-v2 `atlas.json` keeps each repository's raw GitHub language in
+The schema-v3 `atlas.json` keeps each repository's raw GitHub language in
 `primary_language` and its map/filter group in `primary_language_category`.
 The eight named language groups stay fixed as the corpus changes; every other
 known language is grouped under Other, while missing GitHub language is Unknown.
 Top-level `languages` always contains all ten categories, including zero counts,
-with Tol Light colors for the eight named groups, light grey for Other, and darker
-grey for Unknown. Detail-bar segments use the matching Tol color for those eight
+with the validated map palette for the eight named groups, light grey for Other, and darker
+grey for Unknown. Detail-bar segments use the matching map color for those eight
 languages and a pinned GitHub Linguist color for other raw names; a Linguist
 language without a color uses Other grey. See [third-party notices](THIRD_PARTY_NOTICES.md)
-for the pinned Linguist source. The frontend requires schema v2 and uses category
+for the pinned Linguist source. The frontend adapts legacy schema v2 and uses category
 colors for map dots and filter controls, but shows raw language in repository details.
 `?lang=` and WebMCP language filters accept a category or an exact, case-sensitive
 raw primary-language name present in the snapshot; multiple choices combine with OR.
@@ -110,7 +121,7 @@ snapshot without rerunning the GitHub or analysis stages; it preserves
 `generated_at`, which records the last full atlas-data rebuild. Without `--commit`,
 the Linguist updater uses the packaged table's current `source_commit`. Review
 the diff and third-party notice before committing.
-Region buttons focus one region; the filter checkboxes toggle membership. Mouse
+Region buttons focus one region independently of filter checkboxes. A focused region can be shared using the stable `focus` URL parameter. `layout=alt` opens the semantic projection. Mouse
 selection waits 300 ms to distinguish a click from double-click zoom. Navigation
 requests are consumed once after map measurement; resizing preserves a navigated
 camera, and switching between list and map starts a fresh overview.

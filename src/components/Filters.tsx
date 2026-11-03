@@ -81,13 +81,13 @@ export function Filters({
         />
       </label>
       <details className="filter-popover map-options"><summary>Map options</summary><div className="filter-menu">
-      <p>Switch the projection to explore another arrangement of the same repositories.</p>
+      <p>Compare the territories with the original semantic projection.</p>
       <button
         className={`layout-toggle ${view.layoutAlt ? 'active' : ''}`}
         aria-pressed={view.layoutAlt}
         onClick={() => setView(current => ({ ...current, layoutAlt: nextLayoutAlt }))}
       >
-        Alternate layout
+        Semantic view
       </button>
       </div></details>
     </div>

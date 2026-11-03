@@ -1,0 +1,4 @@
+# Scaffolds with no documented project purpose despite passing the README word threshold.
+hbmartin/fuck-nestle-camera
+hbmartin/gradious
+hbmartin/scavenger-navigation

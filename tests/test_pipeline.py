@@ -68,16 +68,16 @@ def test_primary_language_categories_are_stable_across_counts():
     assert primary_language_category("C++") == "Other"
 
 
-def test_primary_language_palette_uses_paul_tol_light_colors():
+def test_primary_language_palette_matches_frozen_marker_colors():
     expected = {
-        "Python": "#77AADD",
-        "TypeScript": "#EE8866",
-        "Kotlin": "#EEDD88",
-        "JavaScript": "#FFAABB",
-        "Swift": "#99DDFF",
-        "Go": "#44BB99",
-        "Ruby": "#BBCC33",
-        "Rust": "#AAAA00",
+        "Python": "#33C8FA",
+        "TypeScript": "#6F6FFB",
+        "Kotlin": "#D0965D",
+        "JavaScript": "#92FC83",
+        "Swift": "#C87824",
+        "Go": "#E2B69C",
+        "Ruby": "#A5D21E",
+        "Rust": "#36A2E2",
     }
     assert {language: CATEGORY_LANGUAGE_COLORS[language] for language in expected} == expected
     assert all(detail_language_color(language) == color for language, color in expected.items())
@@ -95,7 +95,7 @@ def test_primary_language_palette_uses_paul_tol_light_colors():
 
 
 def assert_atlas_snapshot_invariants(atlas: dict) -> None:
-    assert atlas["schema_version"] == 2
+    assert atlas["schema_version"] in (2, 3)
     bounds = atlas["bounds"]
     for axis in ("x", "y"):
         endpoints = bounds[axis]
@@ -207,12 +207,13 @@ def insert_repo(
     pipeline.cache.execute(
         """INSERT INTO repos(
         full_name,default_branch,languages_json,created_at,pushed_at,archived,fetched_at,
-        readme_present,readme_cleaned,readme_word_count,tree_digest_json,content_hash
-        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?)""",
+        readme_present,readme_cleaned,readme_word_count,tree_digest_json,content_hash,acquire_key
+        ) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             name, "main", json.dumps(languages or {"Python": 100}),
             "2025-01-01T00:00:00Z", "2025-01-01T00:00:00Z", archived, "now",
-            1, "A documented project. " * 10, 40, "{}", "content",
+            1, "A documented project. " * 14, 42, "{}", "content",
+            pipeline_module.content_hash(ACQUIRE_VERSION, "2025-01-01T00:00:00Z", "main"),
         ),
     )
 
@@ -250,9 +251,9 @@ def test_emit_preserves_raw_languages_and_refreshes_timestamp_only_for_changes(t
         "names": names, "coordinates": [[0, 0]] * 3,
         "coordinates_alt": [[1, 1]] * 3, "cluster_ids": [None] * 3,
         "radii": [3.5] * 3, "neighbors": [[]] * 3, "clusters": [],
-        "layout": "umap", "layout_alt": "force",
+        "layout": "territories", "layout_alt": "force",
     }
-    monkeypatch.setattr(pipeline, "_current_summary_rows", lambda: None)
+    monkeypatch.setattr(pipeline, "_current_summary_rows", lambda: [{"full_name": name} for name in names])
     monkeypatch.setattr(pipeline, "_emit_list", lambda _payload: None)
     monkeypatch.setattr(pipeline, "_record_run", lambda _payload, _projected: None)
     times = iter(["2026-09-15T01:00:00Z", "2026-09-15T02:00:00Z", "2026-09-15T03:00:00Z"])
@@ -262,7 +263,7 @@ def test_emit_preserves_raw_languages_and_refreshes_timestamp_only_for_changes(t
     pipeline.emit()
     first = json.loads(output.read_text())
     by_name = {repo["name"]: repo for repo in first["repos"]}
-    assert first["schema_version"] == 2
+    assert first["schema_version"] == 3
     assert first["generated_at"] == "2026-09-15T01:00:00Z"
     assert {name: by_name[name]["primary_language_category"] for name in by_name} == {
         "html": "Other", "java": "Other", "python": "Python",
@@ -1065,7 +1066,7 @@ def test_failed_collision_retry_preserves_model_label(tmp_path, monkeypatch, bes
     assert pipeline.labels[0].label == 'Tooling'
 
 
-def test_label_v2_ignores_suffixes_cached_by_the_old_version(tmp_path, monkeypatch):
+def test_label_ignores_suffixes_cached_by_the_old_version(tmp_path, monkeypatch):
     pipeline = AtlasPipeline(tmp_path, None)
     insert_repo(pipeline, 'owner/repo')
     insert_summary_and_fallback(pipeline, 'owner/repo')
@@ -1085,7 +1086,7 @@ def test_label_v2_ignores_suffixes_cached_by_the_old_version(tmp_path, monkeypat
         pipeline_module, 'get_summarizer', lambda _name: SimpleNamespace(label=label),
     )
     pipeline.label()
-    assert pipeline_module.LABEL_PROMPT_VERSION == 'label-v2'
+    assert pipeline_module.LABEL_PROMPT_VERSION == 'label-v5'
     assert calls == [1]
     assert pipeline.labels[0].label == 'Fresh Tools'
 
@@ -1305,3 +1306,82 @@ def test_same_batch_success_is_persisted_before_fatal_worker_result(tmp_path, mo
     assert pipeline.cache.rows("SELECT * FROM summaries WHERE full_name='owner/a'")
     assert not pipeline.cache.rows("SELECT * FROM summaries WHERE full_name='owner/c'")
     assert not pipeline.cache.rows('SELECT * FROM summary_failures')
+
+
+def test_readme_gate_protects_resumes_and_reconsiders_updated_evidence(tmp_path):
+    (tmp_path / "public").mkdir()
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "exclude.default.txt").write_text("owner/scaffold\n")
+    pipeline = AtlasPipeline(tmp_path, None, allow_fallback=True)
+    for name in ("eligible", "short", "missing", "scaffold"):
+        insert_repo(pipeline, f"owner/{name}")
+        insert_summary_and_fallback(pipeline, f"owner/{name}")
+    pipeline.cache.execute("UPDATE repos SET readme_word_count=40 WHERE full_name='owner/eligible'")
+    pipeline.cache.execute("UPDATE repos SET readme_word_count=39 WHERE full_name='owner/short'")
+    pipeline.cache.execute("UPDATE repos SET readme_present=0 WHERE full_name='owner/missing'")
+
+    pipeline.run(start="cluster")
+    output = tmp_path / "public" / "atlas.json"
+    atlas = json.loads(output.read_text())
+    assert [repo["name"] for repo in atlas["repos"]] == ["eligible"]
+    assert atlas["stats"]["repo_count"] == 1
+    assert "1 public repositories" in (tmp_path / "public" / "atlas-list.html").read_text()
+    report = next((tmp_path / "reports").glob("run-*.md")).read_text()
+    assert "`owner/scaffold`: Named exclusion" in report
+    assert "`owner/missing`: Missing README" in report
+    assert "`owner/short`: README has 39 cleaned words" in report
+
+    resumed = AtlasPipeline(tmp_path, None, allow_fallback=True)
+    resumed.run(only={"emit"})
+    assert json.loads(output.read_text()) == atlas
+
+    pipeline.cache.execute("UPDATE repos SET readme_word_count=40 WHERE full_name='owner/short'")
+    with pytest.raises(RuntimeError, match="No current cluster result"):
+        AtlasPipeline(tmp_path, None, allow_fallback=True).run(only={"emit"})
+    AtlasPipeline(tmp_path, None, allow_fallback=True).run(start="cluster")
+    updated = json.loads(output.read_text())
+    assert [repo["name"] for repo in updated["repos"]] == ["eligible", "short"]
+    assert updated["repos"][0]["neighbors"][0]["full_name"] == "owner/short"
+
+    pipeline.cache.execute("UPDATE repos SET pushed_at='2026-01-01' WHERE full_name='owner/eligible'")
+    with pytest.raises(RuntimeError, match="Run the acquire stage first"):
+        AtlasPipeline(tmp_path, None, allow_fallback=True).run(only={"emit"})
+
+
+def test_territories_separate_overlapping_projection_groups_and_contain_members():
+    from skimage.measure import points_in_poly
+
+    from repo_atlas.layouts import territory_layout
+
+    points = np.asarray([[490., 480.], [500., 510.], [510., 480.],
+                         [490., 480.], [500., 510.], [510., 480.], [510., 480.]])
+    labels = [0, 0, 0, 1, 1, 1, None]
+    xy, territories = territory_layout(points, labels)
+    repeat_xy, repeat_territories = territory_layout(points, labels)
+    np.testing.assert_equal(xy, repeat_xy)
+    assert territories == repeat_territories
+    assert set(territories) == {0, 1}
+    polygons = [np.asarray(region["contours"]["outer"][0]) for region in territories.values()]
+    for cluster, polygon in enumerate(polygons):
+        assert points_in_poly(xy[np.array(labels) == cluster], polygon).all()
+        assert not points_in_poly(xy[np.array(labels) != cluster], polygon).any()
+    assert any(
+        first.max(axis=0)[axis] < second.min(axis=0)[axis]
+        for first, second in (polygons, polygons[::-1]) for axis in range(2)
+    )
+
+
+def test_region_corrections_keep_stable_keys_independent_of_cluster_numbers(tmp_path):
+    config = tmp_path / "config"
+    config.mkdir()
+    (config / "regions.json").write_text(json.dumps({
+        "ldraw": {"members": ["owner/bricks", "owner/models"]},
+        "web-sdks": {"anchor": "owner/sdk", "members": ["owner/client"]},
+    }))
+    pipeline = AtlasPipeline(tmp_path, None)
+    names = ["owner/bricks", "owner/client", "owner/models", "owner/sdk", "owner/website"]
+
+    for raw in ([0, 0, 1, 2, 0], [8, 8, 3, 1, 8]):
+        assignments, keys = pipeline._apply_region_membership(names, np.asarray(raw))
+        assert [keys.get(group) for group in assignments] == ["ldraw", "web-sdks", "ldraw", "web-sdks", None]

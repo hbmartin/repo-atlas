@@ -120,3 +120,83 @@ def density_contours(
         anchor,
         density >= outer_level,
     )
+
+
+def _spread_points(points: np.ndarray) -> np.ndarray:
+    """Separate near-coincident dots, with a spring back to their projected positions."""
+    if len(points) < 2:
+        return points
+    angles = np.arange(len(points)) * 2.39996323
+    positions = points + np.column_stack((np.cos(angles), np.sin(angles))) * .2
+    for _ in range(36):
+        offsets = positions[:, None, :] - positions[None, :, :]
+        distances = np.linalg.norm(offsets, axis=2)
+        shortfall = np.maximum(0, 15 - distances)
+        strength = np.divide(shortfall, distances, out=np.zeros_like(distances), where=distances > 1e-6)
+        positions += (offsets * strength[:, :, None]).sum(axis=1) * .22 + (points - positions) * .045
+    return positions - positions.mean(axis=0)
+
+
+def territory_layout(
+    semantic: np.ndarray, labels: list[int | None],
+) -> tuple[np.ndarray, dict[int, dict]]:
+    """Pack padded hulls around local projections without changing membership."""
+    from scipy.spatial import ConvexHull
+
+    groups: dict[int | None, list[int]] = {}
+    for index, label in enumerate(labels):
+        groups.setdefault(label, []).append(index)
+    offsets = np.column_stack((np.cos(np.arange(16) * np.pi / 8),
+                               np.sin(np.arange(16) * np.pi / 8))) * 16
+    coordinates = np.empty_like(semantic)
+    territories: dict[int, tuple[np.ndarray, np.ndarray]] = {}
+    occupied: list[tuple[np.ndarray, np.ndarray]] = []
+    gap = 14
+    # Larger regions take their preferred position first. Candidate edges leave
+    # the same minimum gap regardless of the shape of the hull inside each box.
+    for label, indices in sorted(groups.items(), key=lambda item: (-len(item[1]), item[1][0])):
+        points = semantic[indices]
+        center = points.mean(axis=0)
+        span = np.ptp(points, axis=0)
+        local = _spread_points((points - center) / max(float(span.max()), 1) * (36 * np.sqrt(len(points))))
+        padded = (local[:, None, :] + offsets).reshape(-1, 2)
+        hull = padded[ConvexHull(padded).vertices]
+        low, high = hull.min(axis=0), hull.max(axis=0)
+        preferred = (center - 500) * .65
+        axes = [[preferred[i], *(edge for start, end in occupied
+                                 for edge in (start[i] - high[i] - gap, end[i] - low[i] + gap))]
+                for i in range(2)]
+        candidates = []
+        for x in axes[0]:
+            for y in axes[1]:
+                shift = np.array([x, y])
+                start, end = low + shift, high + shift
+                if any(np.all(start < other_end + gap - 1e-7)
+                       and np.all(end > other_start - gap + 1e-7)
+                       for other_start, other_end in occupied):
+                    continue
+                candidates.append((float(np.sum((shift - preferred) ** 2)), x, y))
+        _, x, y = min(candidates)
+        shift = np.array([x, y])
+        occupied.append((low + shift, high + shift))
+        coordinates[indices] = local + shift
+        if label is not None:
+            territories[label] = (hull + shift, shift)
+
+    low = np.min([box[0] for box in occupied], axis=0)
+    high = np.max([box[1] for box in occupied], axis=0)
+    scale = 900 / float(max(high - low))
+    midpoint = (low + high) / 2
+
+    def normalize(values: np.ndarray) -> np.ndarray:
+        return np.round((values - midpoint) * scale + 500, 2)
+
+    result = {}
+    for label, (hull, anchor) in territories.items():
+        ring = normalize(hull).tolist()
+        x, y = normalize(anchor).tolist()
+        result[label] = {
+            "label_anchor": {"x": x, "y": y},
+            "contours": {"outer": [[*ring, ring[0]]], "inner": []},
+        }
+    return normalize(coordinates), result

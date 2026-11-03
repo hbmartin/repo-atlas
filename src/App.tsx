@@ -9,6 +9,7 @@ import {
   writeViewState,
 } from './data'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from './types'
+import { RegionPanel } from './components/RegionPanel'
 import { DetailPanel } from './components/DetailPanel'
 import { ActiveFilters } from './components/ActiveFilters'
 import { activeFilterEntries, type ActiveFilterRemoval } from './active-filters'
@@ -20,7 +21,7 @@ import { SearchBox } from './components/SearchBox'
 import { COMPACT_MEDIA_QUERY, formatDate, setIncluded, useMediaQuery } from './view-utils'
 import { AtlasGuide } from './components/AtlasGuide'
 import { GuideDialog } from './components/GuideDialog'
-import { atlasPresentation, knownLanguage, knownRegion, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues, type AtlasPresentation } from './presentation'
+import { atlasPresentation, knownLanguage, knownRegionFocus, regionByKey, regionKey, resolveRegionFilter, UNCLUSTERED_KEY, languageFilterNames, matchesLanguageFilter, normalizeLanguages, normalizeRegions, preserveValues, sameValues, type AtlasPresentation } from './presentation'
 import './App.css'
 
 const EMPTY_VIEW: ViewState = {
@@ -37,7 +38,7 @@ type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean; superse
 type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: ViewState }
 type RollbackCandidate = { token: number; view: ViewState; navigationSequence: number }
 
-const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'languages', 'regions', 'since', 'layoutAlt'])
+const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'focusedRegion', 'languages', 'regions', 'since', 'layoutAlt'])
 
 function validateToolViewUpdate(input: unknown, data: AtlasData, presentation: AtlasPresentation): Partial<ViewState> {
   if (!input || typeof input !== 'object' || Array.isArray(input)) throw new Error('Input must be an object.')
@@ -55,6 +56,12 @@ function validateToolViewUpdate(input: unknown, data: AtlasData, presentation: A
     }
     update.repo = value.repo as string | null
   }
+  if ('focusedRegion' in value) {
+    if (value.focusedRegion !== null && (typeof value.focusedRegion !== 'string' || !knownRegionFocus(data, value.focusedRegion))) {
+      throw new Error('focusedRegion must be an existing region key or null.')
+    }
+    update.focusedRegion = value.focusedRegion
+  }
   if ('languages' in value) {
     if (!Array.isArray(value.languages)) throw new Error('languages must be an array.')
     if (!value.languages.every(name => typeof name === 'string' && knownLanguage(data, name))) {
@@ -64,10 +71,10 @@ function validateToolViewUpdate(input: unknown, data: AtlasData, presentation: A
   }
   if ('regions' in value) {
     if (!Array.isArray(value.regions)) throw new Error('regions must be an array.')
-    if (!value.regions.every(name => typeof name === 'string' && knownRegion(data, name))) {
+    if (!value.regions.every(name => typeof name === 'string' && resolveRegionFilter(data, name) !== undefined)) {
       throw new Error('Unknown region filter.')
     }
-    update.regions = value.regions as string[]
+    update.regions = (value.regions as string[]).map(name => resolveRegionFilter(data, name)!)
   }
   if ('since' in value) {
     if (value.since !== null && (typeof value.since !== 'string' || !validAtlasMonth(value.since, data))) {
@@ -81,6 +88,8 @@ function validateToolViewUpdate(input: unknown, data: AtlasData, presentation: A
   }
   return update
 }
+
+const HINT_STORAGE_KEY = 'martins-atlas:map-hint-dismissed'
 
 const FOCUSABLE = [
   'a[href]',
@@ -105,6 +114,18 @@ export default function App() {
   const [view, setViewState] = useState<ViewState>(EMPTY_VIEW)
   const [listMode, setListMode] = useState(false)
   const [guideOpen, setGuideOpen] = useState(false)
+  const [highlightLanguage, setHighlightLanguage] = useState<string | null>(null)
+  const [showConnections, setShowConnections] = useState(false)
+  const [hintDismissed, setHintDismissed] = useState(() => {
+    try { return sessionStorage.getItem(HINT_STORAGE_KEY) === '1' } catch { return false }
+  })
+  const hintWritten = useRef(hintDismissed)
+  const dismissHint = useCallback(() => {
+    if (hintWritten.current) return
+    hintWritten.current = true
+    setHintDismissed(true)
+    try { sessionStorage.setItem(HINT_STORAGE_KEY, '1') } catch { /* storage may be unavailable */ }
+  }, [])
   const [highlightRegion, setHighlightRegion] = useState<number | null>(null)
   const [navigationRequest, setNavigationRequest] = useState<MapNavigationRequest | null>(null)
   const [mobileFilters, setMobileFilters] = useState(false)
@@ -117,7 +138,7 @@ export default function App() {
     navigationRequestRef.current = request
     setNavigationRequest(request)
   }, [])
-  const requestNavigation = useCallback((kind: 'repo' | 'region', target: string, clickToken?: number) => {
+  const requestNavigation = useCallback((kind: MapNavigationRequest['kind'], target: string, clickToken?: number) => {
     replaceNavigation({ kind, target, clickToken, nonce: ++navigationSequence.current })
   }, [replaceNavigation])
   const acknowledgeNavigation = useCallback((nonce: number) => {
@@ -147,6 +168,7 @@ export default function App() {
         viewRef.current = initial
         setViewState(initial)
         if (initial.repo) requestNavigation('repo', initial.repo)
+        else if (initial.focusedRegion) requestNavigation('region', initial.focusedRegion)
         setUrlWarning(unknown)
       })
       .catch((reason) => setError(reason instanceof Error ? reason : new Error(String(reason))))
@@ -171,14 +193,21 @@ export default function App() {
       languages: preserveValues(current.languages, nextLanguages),
       regions: preserveValues(current.regions, nextRegions),
     }
-    const stateChanged = filtersChanged || normalized.repo !== current.repo || normalized.layoutAlt !== current.layoutAlt
+    const focusChanged = (normalized.focusedRegion ?? null) !== (current.focusedRegion ?? null)
+    const repoChanged = normalized.repo !== current.repo
+    const stateChanged = filtersChanged || repoChanged || focusChanged || normalized.layoutAlt !== current.layoutAlt
     const committedView = stateChanged ? normalized : current
+    const samePendingRegion = !focusChanged && pendingNavigation?.kind === 'region'
+      && pendingNavigation.target === normalized.focusedRegion
     const navigationTarget = options?.navigate !== false && normalized.repo
       && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
     if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
     else if (rollbackToken !== undefined) {
       if (pendingNavigation?.clickToken === rollbackToken) replaceNavigation(null)
-    } else if (options?.navigate === false || (stateChanged && (!normalized.repo || filtersChanged))) {
+    } else if (options?.navigate !== false && !normalized.repo && (focusChanged || (repoChanged && normalized.focusedRegion))) {
+      if (normalized.focusedRegion) requestNavigation('region', normalized.focusedRegion)
+      else requestNavigation('overview', '')
+    } else if (options?.navigate === false || (stateChanged && !samePendingRegion && (!normalized.repo || filtersChanged))) {
       replaceNavigation(null)
     }
     if (rollbackToken !== undefined) rollbackCandidate.current = null
@@ -187,6 +216,8 @@ export default function App() {
       rollbackCandidate.current = { token: options.clickToken, view: committedView, navigationSequence: navigationSequence.current }
     } else if (stateChanged || options?.supersedeRollback) rollbackCandidate.current = null
     if (stateChanged) {
+      if (filtersChanged || repoChanged || focusChanged) setShowConnections(false)
+      dismissHint()
       viewRef.current = normalized
       setViewState(normalized)
     }
@@ -195,7 +226,7 @@ export default function App() {
       window.history.replaceState(null, '', writeViewState(normalized))
     }
     return { stateChanged, filtersChanged, view: normalized } satisfies ViewUpdateResult
-  }, [replaceNavigation, requestNavigation])
+  }, [dismissHint, replaceNavigation, requestNavigation])
 
   useLayoutEffect(() => {
     const request = pendingFilterFocus.current
@@ -214,9 +245,13 @@ export default function App() {
     const restore = () => {
       rollbackCandidate.current = null
       const { view: restored, unknown } = readViewState(window.location.search, data)
+      const previousFocus = viewRef.current.focusedRegion
+      setShowConnections(false)
       viewRef.current = restored
       setViewState(restored)
       if (restored.repo) requestNavigation('repo', restored.repo)
+      else if (restored.focusedRegion) requestNavigation('region', restored.focusedRegion)
+      else if (previousFocus) requestNavigation('overview', '')
       else replaceNavigation(null)
       setUrlWarning(unknown)
     }
@@ -270,14 +305,15 @@ export default function App() {
     const latestMonth = monthValue(presentation.maxMonth)
     const registration = document.modelContext.registerTool({
       name: 'configure_atlas_view',
-      title: 'Configure Repo Atlas view',
-      description: 'Select a public repository and/or filter Repo Atlas by map language category or exact raw primary language, semantic region, date, or alternate layout. Language filters are combined with OR.',
+      title: "Configure Martin's Atlas view",
+      description: "Select a public repository, focus a region, or filter Martin's Atlas by language, region, and date. Language filters combine with OR. The alternate layout shows the semantic projection.",
       inputSchema: {
         type: 'object',
         additionalProperties: false,
         properties: {
           repo: { type: ['string', 'null'], minLength: 1, description: 'Exact owner/name, or null to clear selection.' },
           languages: { type: 'array', description: 'Case-sensitive map categories or raw primary-language names currently in the atlas.', items: { type: 'string', enum: languageFilterNames(data) } },
+          focusedRegion: { enum: [null, ...data.clusters.map(regionKey), ...(data.stats.noise_count ? [UNCLUSTERED_KEY] : [])], description: 'Stable region key or null to clear focus.' },
           regions: { type: 'array', items: { type: 'string' } },
           since: {
             type: ['string', 'null'],
@@ -294,10 +330,12 @@ export default function App() {
         const next = setView((current) => {
           const languages = value.languages ?? current.languages
           const regions = value.regions ?? current.regions
-          const repo = value.repo === undefined ? current.repo : value.repo
+          const repo = value.repo === undefined ? (value.focusedRegion ? null : current.repo) : value.repo
+          const focusedRegion = value.focusedRegion === undefined ? current.focusedRegion : value.focusedRegion
           const since = value.since === undefined ? current.since : value.since
           return {
             repo,
+            ...(focusedRegion === undefined ? {} : { focusedRegion }),
             languages,
             regions,
             since,
@@ -306,6 +344,7 @@ export default function App() {
         }, { supersedeRollback: explicitlySelectsRepo }).view
         return {
           selected_repo: next.repo,
+          focusedRegion: next.focusedRegion ?? null,
           languages: [...next.languages],
           regions: [...next.regions],
           since: next.since,
@@ -344,10 +383,14 @@ export default function App() {
   const { visible, matchingRegions, matchingUnclustered } = derived
   const { minMonth, maxMonth, reposByName } = presentation
   const selected = view.repo ? (reposByName.get(view.repo) ?? null) : null
+  const focusedCluster = regionByKey(data, view.focusedRegion)
+  const hasRegion = Boolean(focusedCluster) || view.focusedRegion === UNCLUSTERED_KEY
+  const regionMembers = hasRegion ? data.repos.filter(repo => repo.cluster_id === (focusedCluster?.id ?? null)) : []
+  const hiddenConnections = selected?.neighbors.filter(neighbor => !visible.has(neighbor.full_name)).length ?? 0
   const filterCount = view.languages.length + view.regions.length + Number(Boolean(view.since))
-  const clearFilters = (scope: FilterFocusRequest['scope']) => {
-    pendingFilterFocus.current = { scope, index: null }
-    if (!setView(current => ({ ...EMPTY_VIEW, repo: current.repo, layoutAlt: current.layoutAlt })).filtersChanged) pendingFilterFocus.current = null
+  const clearFilters = (scope?: FilterFocusRequest['scope']) => {
+    pendingFilterFocus.current = scope ? { scope, index: null } : null
+    if (!setView(current => ({ ...current, languages: [], regions: [], since: null })).filtersChanged) pendingFilterFocus.current = null
   }
   const removeActiveFilter = (filter: ActiveFilterRemoval, scope: FilterFocusRequest['scope']) => {
     pendingFilterFocus.current = null
@@ -367,22 +410,32 @@ export default function App() {
     if (!result.filtersChanged) pendingFilterFocus.current = null
   }
   const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
+    dismissHint()
     setHighlightRegion(null)
+    setHighlightLanguage(null)
     setView(current => ({ ...current, repo: repo?.full_name ?? null }), { ...options, navigate: options?.navigate ?? true, supersedeRollback: true })
   }
   const backgroundInert = mobileFilters || guideOpen ? true : undefined
   const profileUrl = `https://github.com/${encodeURIComponent(data.owner)}`
 
   const chooseRegion = (label: string, clickToken?: number) => {
-    setView(current => ({ ...current, repo: null, regions: [label] }), { supersedeRollback: true })
-    requestNavigation('region', label, clickToken)
+    const cluster = data.clusters.find(item => item.label === label)
+    const key = cluster ? regionKey(cluster) : UNCLUSTERED_KEY
+    dismissHint()
+    setView(current => ({ ...current, repo: null, focusedRegion: key }), { navigate: false, supersedeRollback: true })
+    requestNavigation('region', key, clickToken)
     setListMode(false)
     setGuideOpen(false)
     setHighlightRegion(null)
+    setHighlightLanguage(null)
+  }
+  const closeRegion = () => {
+    setView(current => ({ ...current, focusedRegion: null }))
+    window.requestAnimationFrame(() => focusElement(searchInput.current))
   }
   const guide = <AtlasGuide data={data} presentation={presentation} view={view}
     onLanguage={(name, included) => setView(current => ({ ...current, languages: setIncluded(current.languages, name, included) }))}
-    onRegion={chooseRegion} onHighlight={setHighlightRegion} />
+    onRegion={chooseRegion} onHighlight={setHighlightRegion} onLanguagePreview={setHighlightLanguage} />
 
   return (
     <div className="app">
@@ -399,7 +452,7 @@ export default function App() {
         <div className="brand">
           <span className="brand-mark" aria-hidden="true"><i /><i /><i /></span>
           <div>
-            <h1>Repo Atlas</h1>
+            <h1>Martin's Atlas</h1>
             <p aria-live="polite">{filterCount
               ? <>{visible.size} matching / {data.stats.repo_count} repositories · {matchingRegions} matching / {data.stats.cluster_count} regions{data.stats.noise_count > 0 && ` · ${matchingUnclustered} unclustered matches`}</>
               : <>{data.stats.repo_count} repositories · {data.stats.cluster_count} regions · rebuilt {formatDate(data.generated_at.slice(0, 10))}</>}</p>
@@ -407,7 +460,7 @@ export default function App() {
         </div>
         <a href={profileUrl} target="_blank" rel="noreferrer">{data.owner.toLocaleUpperCase()} / GITHUB ↗</a>
       </header>
-      <section className="controls" inert={backgroundInert}>
+      <section className="controls" inert={backgroundInert} onInputCapture={dismissHint}>
         <SearchBox repos={data.repos} onSelect={selectRepo} inputRef={searchInput} />
         <div className="desktop-filters">
           <Filters data={data} view={view} setView={setView} minMonth={minMonth} maxMonth={maxMonth} />
@@ -428,7 +481,7 @@ export default function App() {
         <ActiveFilters view={view} groupRef={controlsChips}
           onRemove={filter => removeActiveFilter(filter, 'controls')} />
       </section>
-      {guideOpen && <GuideDialog onClose={() => { setGuideOpen(false); setHighlightRegion(null) }}>{guide}</GuideDialog>}
+      {guideOpen && <GuideDialog onClose={() => { setGuideOpen(false); setHighlightRegion(null); setHighlightLanguage(null) }}>{guide}</GuideDialog>}
       {mobileFilters && (
         <div ref={filterDialog} className="mobile-filters" role="dialog" aria-modal="true" aria-labelledby="mobile-filter-title">
           <div>
@@ -445,13 +498,15 @@ export default function App() {
           </div>
         </div>
       )}
-      <div className={`workspace ${selected ? 'has-selection' : ''}`} inert={backgroundInert}>
+      <div className={`workspace ${selected || hasRegion ? 'has-selection' : ''}`} inert={backgroundInert}>
         {listMode ? (
           <ListView data={data} visible={visible} onSelect={(repo) => { selectRepo(repo); setListMode(false) }} />
         ) : (
-          <MapView data={data} presentation={presentation} view={view} visible={visible} selected={selected} onSelect={selectRepo} navigationRequest={navigationRequest} onNavigationHandled={acknowledgeNavigation} highlightRegion={highlightRegion} onRegion={chooseRegion} />
+          <MapView data={data} presentation={presentation} view={view} visible={visible} selected={selected} onSelect={selectRepo} navigationRequest={navigationRequest} onNavigationHandled={acknowledgeNavigation} highlightRegion={highlightRegion} onRegion={chooseRegion}
+            onCloseRegion={closeRegion} highlightLanguage={highlightLanguage} showConnections={showConnections}
+            hintDismissed={hintDismissed} onInteraction={dismissHint} />
         )}
-        {visible.size === 0 && (
+        {visible.size === 0 && !hasRegion && (
           <div className="no-results" role="status">No repositories match.{' '}<button onClick={() => clearFilters('controls')}>Clear filters</button></div>
         )}
         {selected ? <DetailPanel
@@ -462,6 +517,12 @@ export default function App() {
           onSelect={selectRepo}
           onRegion={chooseRegion}
           onClose={() => selectRepo(null)}
+          hiddenConnections={hiddenConnections} showConnections={showConnections}
+          onShowConnections={() => setShowConnections(current => !current)}
+        /> : hasRegion ? <RegionPanel cluster={focusedCluster} members={regionMembers} visible={visible}
+          presentation={presentation} onClose={closeRegion} onSelect={selectRepo}
+          onClear={() => clearFilters()}
+          fallbackLabel={focusedCluster != null && (data.fallback_label_ids ?? []).includes(focusedCluster.id)}
         /> : <aside className="guide-panel">{guide}</aside>}
       </div>
 

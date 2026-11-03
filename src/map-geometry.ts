@@ -156,6 +156,9 @@ export function fitOverview(data: AtlasData, alt: boolean, size: Size, radius: (
   const bounds = atlasBounds(data, alt)
   const first = fitBounds(bounds, size, 44, 84)
   const labels = placeRegionLabels(data, alt, first, size, radius, measure, fontSize, prepared)
+  // The first fit already reserves room for labels. Avoid shrinking complete
+  // territories into a tighter configuration that can lose a placed label.
+  if (data.layout === 'territories' && !alt && labels.length === prepared.length) return first
   const corners: Point[] = labels.flatMap(label => [first.invert([label.left, label.top]), first.invert([label.right, label.bottom])])
   return fitBounds(boundsOf([[bounds.left, bounds.top], [bounds.right, bounds.bottom], ...corners]), size, 44, 84)
 }
