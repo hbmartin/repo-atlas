@@ -130,10 +130,10 @@ export function validateAtlas(value: unknown): AtlasData {
       if (!isRecord(contours) || !Array.isArray(contours.outer) || !Array.isArray(contours.inner)) {
         throw new Error(`clusters[${index}].${name} is malformed`)
       }
-      if (territories && (contours.inner.length || contours.outer.length !== (name === 'contours' ? 1 : 0))) {
+      if (territories && name === 'contours' && (contours.inner.length || contours.outer.length !== 1)) {
         throw new Error(`clusters[${index}].${name} has invalid territory geometry`)
       }
-      if (territories) for (const ring of contours.outer) {
+      if (territories) for (const ring of [...contours.outer, ...contours.inner]) {
         if (!Array.isArray(ring) || ring.length < 4 || ring.some(point => !Array.isArray(point)
           || point.length !== 2 || !point.every(Number.isFinite))
           || ring[0][0] !== ring.at(-1)![0] || ring[0][1] !== ring.at(-1)![1]) {

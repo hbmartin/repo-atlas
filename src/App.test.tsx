@@ -1015,6 +1015,22 @@ it('keeps presentation and visibility stable on selection and projection updates
   expect(currentMap().view.languages).toBe(before.view.languages)
 })
 
+it('switches projection directly by keyboard and preserves a linked repo and filter', async () => {
+  const user = userEvent.setup()
+  media.set({ compact: false })
+  window.history.replaceState(null, '', '/?repo=owner%2Fexample&lang=TypeScript&layout=alt')
+  render(<App />)
+  const toggle = await screen.findByRole('button', { name: 'Semantic view', pressed: true })
+  toggle.focus()
+  await user.keyboard('[Space]')
+  expect(toggle.getAttribute('aria-pressed')).toBe('false')
+  expect(new URLSearchParams(window.location.search).get('layout')).toBeNull()
+  expect(currentMap().view).toMatchObject({ repo: 'owner/example', languages: ['TypeScript'] })
+  await user.keyboard('[Enter]')
+  expect(toggle.getAttribute('aria-pressed')).toBe('true')
+  expect(new URLSearchParams(window.location.search).get('layout')).toBe('alt')
+})
+
 it('focuses a guide region independently of filters and returns from its repository', async () => {
   window.history.replaceState(null, '', '/?lang=Python')
   render(<App />)

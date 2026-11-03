@@ -26,6 +26,11 @@ describe('atlas data utilities', () => {
       view: { regions: ['Developer Tools'], focusedRegion: 'developer-tools', layoutAlt: true },
       unknown: [],
     })
+    delete data.clusters[0].contours_alt
+    expect(validateAtlas(data).clusters[0].contours_alt).toBeUndefined()
+    data.clusters[0].contours_alt = { outer: [[[400, 400], [600, 400], [600, 600]]], inner: [] }
+    expect(() => validateAtlas(data)).toThrow('contours_alt must contain a closed polygon')
+    delete data.clusters[0].contours_alt
     data.clusters[0].contours.outer[0].pop()
     expect(() => validateAtlas(data)).toThrow('closed polygon')
   })

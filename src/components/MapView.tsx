@@ -4,7 +4,7 @@ import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } f
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
 import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
 import { regionByKey, regionKey, UNCLUSTERED_KEY, type AtlasPresentation } from '../presentation'
-import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, type Box, type Size } from '../map-geometry'
+import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareMapOutlines, prepareRegionLabels, resizeTransform, type Box, type Size } from '../map-geometry'
 
 const PLACEHOLDER_SIZE = { width: 1000, height: 700 }
 const TOOLTIP_WIDTH = 270
@@ -101,7 +101,8 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     return (text: string) => context?.measureText(text).width ?? text.length * 6.6
   }, [])
   const bounds = useMemo(() => atlasBounds(data, view.layoutAlt), [data, view.layoutAlt])
-  const preparedLabels = useMemo(() => prepareRegionLabels(data, view.layoutAlt, measure, fontSize), [data, view.layoutAlt, measure, fontSize])
+  const outlines = useMemo(() => prepareMapOutlines(data, view.layoutAlt), [data, view.layoutAlt])
+  const preparedLabels = useMemo(() => prepareRegionLabels(data, view.layoutAlt, measure, fontSize, outlines), [data, view.layoutAlt, measure, fontSize, outlines])
   const [viewport, setViewport] = useState<Viewport>(() => {
     const fit = fitOverview(data, view.layoutAlt, PLACEHOLDER_SIZE, sizes.radius, measure, fontSize, preparedLabels)
     return { size: PLACEHOLDER_SIZE, fit, transform: fit, measured: false, alt: view.layoutAlt, layoutToken: preparedLabels }
@@ -417,9 +418,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const relativeZoom = transform.k / fit.k
   const activeRepo = hover && visible.has(hover.full_name) ? hover : focused && visible.has(focused.full_name) ? focused : null
   const drawnRadius = useCallback((repo: AtlasRepo) => sizes.radius(repo.file_count) / fit.k * (repo === selected || repo === activeRepo ? 1.3 : 1), [sizes, fit.k, selected, activeRepo])
-  const paths = useMemo(() => data.clusters.flatMap(cluster => (view.layoutAlt ? cluster.contours_alt ?? cluster.contours : cluster.contours).outer.map((ring, index) => ({
-    id: cluster.id, label: cluster.label, key: `${cluster.id}-${index}`, path: `M${smoothRing(ring).map(([x, y]) => `${x.toFixed(2)},${y.toFixed(2)}`).join('L')}Z`,
-  }))), [data.clusters, view.layoutAlt])
+  const paths = useMemo(() => data.clusters.flatMap(cluster => (outlines.get(cluster.id) ?? []).map(({ path }, index) => ({
+    id: cluster.id, label: cluster.label, key: `${cluster.id}-${index}`, path,
+  }))), [data.clusters, outlines])
   const labels = useMemo(() => placeRegionLabels(data, view.layoutAlt, transform, size, count => sizes.radius(count) * relativeZoom, measure, fontSize, preparedLabels), [data, view.layoutAlt, transform, size, sizes, relativeZoom, measure, fontSize, preparedLabels])
   const repoText = useMemo(() => new Map(data.repos.map(repo => {
     let text = repo.name

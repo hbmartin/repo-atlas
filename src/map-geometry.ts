@@ -1,5 +1,5 @@
 import { zoomIdentity, type ZoomTransform } from 'd3-zoom'
-import type { AtlasData, Point } from './types'
+import type { AtlasCluster, AtlasData, Point } from './types'
 
 export interface Size { width: number; height: number }
 export interface Box { left: number; top: number; right: number; bottom: number }
@@ -20,10 +20,14 @@ export function resizeTransform(current: ZoomTransform, oldSize: Size, size: Siz
   const center = current.invert([oldSize.width / 2, oldSize.height / 2])
   return zoomIdentity.translate(size.width / 2, size.height / 2).scale(current.k / oldFit.k * fit.k).translate(-center[0], -center[1])
 }
+function outerRings(data: AtlasData, cluster: AtlasCluster, alt: boolean): Point[][] {
+  if (!alt) return cluster.contours.outer
+  return cluster.contours_alt?.outer ?? (data.schema_version === 2 ? cluster.contours.outer : [])
+}
 export function atlasBounds(data: AtlasData, alt: boolean): Box {
   return boundsOf([
     ...data.repos.map((r): Point => alt ? [r.x_alt, r.y_alt] : [r.x, r.y]),
-    ...data.clusters.flatMap(c => (alt ? c.contours_alt ?? c.contours : c.contours).outer.flat()),
+    ...data.clusters.flatMap(c => outerRings(data, c, alt).flat()),
   ])
 }
 export function smoothRing(ring: Point[]): Point[] {
@@ -34,6 +38,79 @@ export function smoothRing(ring: Point[]): Point[] {
     return [[.75 * x + .25 * nx, .75 * y + .25 * ny], [.25 * x + .75 * nx, .25 * y + .75 * ny]]
   })
 }
+const mix = ([x, y]: Point, [nx, ny]: Point, t: number): Point => [x + (nx - x) * t, y + (ny - y) * t]
+const distance = (a: Point, b: Point) => Math.hypot(b[0] - a[0], b[1] - a[1])
+const cross = (a: Point, b: Point, p: Point) => (b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])
+const svgPoint = ([x, y]: Point) => `${x.toFixed(3)},${y.toFixed(3)}`
+
+function territoryOutline(ring: Point[], members: Point[]) {
+  const distinct = ring.slice(0, -1).filter((p, i) => i === 0 || distance(p, ring[i - 1]) > 0)
+  const vertices = distinct.filter((p, i) => cross(distinct.at(i - 1)!, p, distinct[(i + 1) % distinct.length]) !== 0)
+  const center: Point = [
+    vertices.reduce((sum, p) => sum + p[0], 0) / vertices.length,
+    vertices.reduce((sum, p) => sum + p[1], 0) / vertices.length,
+  ]
+  const edges = vertices.map((a, i) => {
+    const b = vertices[(i + 1) % vertices.length]
+    return { a, b, length: distance(a, b) }
+  })
+  const winding = Math.sign(edges.reduce((area, { a, b }) => area + cross(a, b, center), 0))
+  const clearance = Math.min(...edges.map(({ a, b, length }) =>
+    Math.min(...(members.length ? members : [center]).map(p => winding * cross(a, b, p) / length))))
+  if (vertices.length < 3 || !(clearance > 0)) {
+    return { path: `M${ring.map(svgPoint).join('L')}Z`, ring }
+  }
+
+  // Each control point moves less than half the member clearance. Corner
+  // controls lie on the hull and side controls move toward its center.
+  const maxInset = clearance / 2
+  const trims = edges.map(({ a, b, length }) => {
+    const t = Math.min(.25, maxInset / length)
+    return { start: mix(a, b, t), end: mix(b, a, t) }
+  })
+  const start = trims.at(-1)!.end
+  const commands = [`M${svgPoint(start)}`]
+  const samples = [start]
+  let current = start
+  const cubic = (handle1: Point, handle2: Point, end: Point) => {
+    commands.push(`C${svgPoint(handle1)} ${svgPoint(handle2)} ${svgPoint(end)}`)
+    for (let i = 1; i <= 8; i++) {
+      const t = i / 8
+      const a = mix(current, handle1, t), b = mix(handle1, handle2, t), c = mix(handle2, end, t)
+      samples.push(mix(mix(a, b, t), mix(b, c, t), t))
+    }
+    current = end
+  }
+  edges.forEach(({ a }, i) => {
+    const { start: sideStart, end: sideEnd } = trims[i]
+    // A rounded corner, expressed as a cubic, is tangent to both sides.
+    cubic(mix(current, a, 2 / 3), mix(sideStart, a, 2 / 3), sideStart)
+
+    // Two cubics meet at a bowed midpoint, with parallel tangents at the
+    // midpoint and ends. All their controls stay inside the padded hull.
+    const left = mix(sideStart, sideEnd, .34)
+    const right = mix(sideStart, sideEnd, .66)
+    const span = distance(sideStart, sideEnd)
+    const inset = Math.min(maxInset, span * .09 * Math.min(1, span / clearance))
+    const t = Math.min(.3, inset / Math.max(distance(left, center), distance(right, center)))
+    const bowedLeft = mix(left, center, t), bowedRight = mix(right, center, t)
+    cubic(mix(sideStart, sideEnd, .16), bowedLeft, mix(bowedLeft, bowedRight, .5))
+    cubic(bowedRight, mix(sideStart, sideEnd, .84), sideEnd)
+  })
+  return { path: `${commands.join('')}Z`, ring: samples }
+}
+
+export function prepareMapOutlines(data: AtlasData, alt: boolean) {
+  const territories = data.schema_version === 3 && !alt
+  return new Map(data.clusters.map(cluster => [cluster.id, outerRings(data, cluster, alt).map(ring => {
+    if (territories) {
+      const members = data.repos.filter(repo => repo.cluster_id === cluster.id).map(({ x, y }): Point => [x, y])
+      return territoryOutline(ring, members)
+    }
+    return { path: `M${smoothRing(ring).map(svgPoint).join('L')}Z`, ring }
+  })]))
+}
+
 function inside(point: Point, ring: Point[]) {
   let result = false
   for (let i = 0, j = ring.length - 1; i < ring.length; j = i++) {
@@ -102,13 +179,14 @@ function cachedHullMembership(label: PreparedLabel, offsetIndex: number, scale: 
   cached.values[offsetIndex] = value
   return value
 }
-export function prepareRegionLabels(data: AtlasData, alt: boolean, measure: (text: string) => number, fontSize: number): PreparedLabel[] {
+export function prepareRegionLabels(data: AtlasData, alt: boolean, measure: (text: string) => number, fontSize: number,
+  outlines = prepareMapOutlines(data, alt)): PreparedLabel[] {
   return data.clusters.toSorted((a, b) => a.id - b.id).map(cluster => {
     const lines = wrapLabel(cluster.label, measure)
     return { id: cluster.id, lines, width: Math.max(...lines.map(measure)) + 8,
       height: lines.length * (fontSize + 3) + 4,
       anchor: alt ? cluster.label_anchor_alt ?? cluster.label_anchor : cluster.label_anchor,
-      rings: (alt ? cluster.contours_alt ?? cluster.contours : cluster.contours).outer }
+      rings: outlines.get(cluster.id)?.map(({ ring }) => ring) ?? [] }
   })
 }
 export function placeRegionLabels(data: AtlasData, alt: boolean, transform: ZoomTransform, size: Size,

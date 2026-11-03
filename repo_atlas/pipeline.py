@@ -45,6 +45,7 @@ PROMPT_VERSION = "summary-v2"
 LABEL_PROMPT_VERSION = "label-v5"
 TEMPLATE_VERSION = "embed-v1"
 ALGORITHM_VERSION = "analysis-v3"
+PROJECTION_VERSION = "projection-v2"
 MIN_README_WORDS = 40
 ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
@@ -1045,7 +1046,7 @@ class AtlasPipeline:
     def _project_cache_key(self, vector_key: str, names: list[str]) -> tuple[str, list[int | None]]:
         label_key = {cluster_id: label.model_dump() for cluster_id, label in self.labels.items()}
         file_counts = self._file_counts(names)
-        parts = (vector_key, label_key, file_counts)
+        parts = (PROJECTION_VERSION, vector_key, label_key, file_counts)
         if self.fallback_label_ids:
             parts += (sorted(self.fallback_label_ids),)
         return content_hash(*parts), file_counts
@@ -1164,13 +1165,13 @@ class AtlasPipeline:
         selected_contours = contours_by_layout[chosen]
         for cluster_id, label in sorted(self.labels.items()):
             members = [name for name, value in zip(names, labels, strict=True) if value == cluster_id]
-            _rings, anchor, _mask = selected_contours[cluster_id]
+            rings, anchor, _mask = selected_contours[cluster_id]
             clusters.append({
                 "id": cluster_id, "label": label.label,
                 "gloss": label.gloss or "These repositories share a technical theme.",
                 "key": analysis.get("region_keys", {}).get(str(cluster_id), self._region_key(members[0])),
                 "member_count": len(members), **territories[cluster_id],
-                "label_anchor_alt": anchor, "contours_alt": {"outer": [], "inner": []},
+                "label_anchor_alt": anchor, "contours_alt": rings,
             })
         self.final_payload = {
             "analysis_key": key, "layout": "territories", "layout_alt": chosen,
