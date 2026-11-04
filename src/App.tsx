@@ -155,6 +155,7 @@ export default function App() {
   const searchInput = useRef<HTMLInputElement>(null)
   const regionOpener = useRef<RegionOpener | null>(null)
   const resetViewButton = useRef<HTMLButtonElement>(null)
+  const listViewButton = useRef<HTMLButtonElement>(null)
   const filterButton = useRef<HTMLButtonElement>(null)
   const filterDialog = useRef<HTMLDivElement>(null)
   const doneButton = useRef<HTMLButtonElement>(null)
@@ -409,7 +410,7 @@ export default function App() {
           .find(button => button.dataset.regionOpener === guideKey)
         : null
       if (restored && !restored.closest('[inert], [hidden]')) restored.focus({ preventScroll: true })
-      if (!restored || document.activeElement !== restored) focusElement(resetViewButton.current)
+      if (!restored || document.activeElement !== restored) focusElement(resetViewButton.current ?? listViewButton.current)
     })
   }, [setView])
 
@@ -506,7 +507,7 @@ export default function App() {
         </button>
         <div className="view-switch" role="group" aria-label="View mode">
           <button aria-pressed={!listMode} className={!listMode ? 'active' : ''} onClick={() => setListMode(false)}>Map</button>
-          <button aria-pressed={listMode} className={listMode ? 'active' : ''} onClick={() => setListMode(true)}>List</button>
+          <button ref={listViewButton} aria-pressed={listMode} className={listMode ? 'active' : ''} onClick={() => setListMode(true)}>List</button>
         </div>
         <button className="guide-trigger" onClick={() => setGuideOpen(true)}>Atlas guide</button>
         {filterCount > 0 && (
@@ -551,7 +552,7 @@ export default function App() {
           fallbackLabel={selected.cluster_id != null && (data.fallback_label_ids ?? []).includes(selected.cluster_id)}
           reposByName={reposByName}
           onSelect={selectRepo}
-          onRegion={(label, opener) => chooseRegion(label, undefined, opener)}
+          onRegion={chooseRegion}
           onClose={() => selectRepo(null)}
           hiddenConnections={hiddenConnections} showConnections={showConnections}
           onShowConnections={() => setShowConnections(current => !current)}

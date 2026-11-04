@@ -11,12 +11,12 @@ it('validates the committed deployable atlas before build', () => {
   expect(atlas.layout).toBe('territories')
   expect(snapshot.languages).toHaveLength(10)
   const semantic = prepareMapOutlines(atlas, true)
-  expect([...semantic.values()].flat().length).toBeGreaterThan(0)
   const territories = prepareMapOutlines(atlas, false)
   const territoryBounds: Box[] = []
   for (const cluster of atlas.clusters) {
     expect(cluster.contours_alt).toEqual({ outer: [], inner: [] })
     if (cluster.member_count < 3) expect(semantic.get(cluster.id)).toHaveLength(0)
+    else expect(semantic.get(cluster.id)?.length, cluster.label).toBeGreaterThan(0)
     const outlines = territories.get(cluster.id)!
     expect(outlines).toHaveLength(1)
     const [{ path, ring }] = outlines

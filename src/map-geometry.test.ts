@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 import { zoomIdentity, type ZoomTransform } from 'd3-zoom'
-import { BoxGrid, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareRegionLabels, resizeTransform, smoothRing, wrapLabel, type Label, type Size } from './map-geometry'
+import { BoxGrid, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareMapOutlines, prepareRegionLabels, resizeTransform, smoothRing, wrapLabel, type Label, type Size } from './map-geometry'
 import { makeAtlas, makeRepo } from './test-fixtures'
 import { pointerToMapPoint } from './view-utils'
 import { fileSizeScale } from './presentation'
@@ -75,6 +75,17 @@ function exhaustivePlacement(
 }
 
 describe('map geometry', () => {
+  it('keeps the same curved territory when the closing vertex is repeated', () => {
+    const data = makeAtlas()
+    data.schema_version = 3
+    data.layout = 'territories'
+    const ring: Point[] = [[400, 400], [600, 400], [600, 600], [400, 600], [400, 400]]
+    data.clusters[0].contours.outer = [ring]
+    const outline = prepareMapOutlines(data, false).get(0)
+    expect(outline?.[0].path).toMatch(/^M[^CL]+C[^L]+Z$/)
+    data.clusters[0].contours.outer = [[...ring, ring[0]]]
+    expect(prepareMapOutlines(data, false).get(0)).toEqual(outline)
+  })
   it('fits a wide dataset inside a rectangular viewport with HUD clearance', () => {
     const box = { left: -20, right: 1500, top: 100, bottom: 950 }
     const size = { width: 944, height: 574 }
