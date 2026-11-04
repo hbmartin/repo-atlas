@@ -50,13 +50,22 @@ function Harness({ initial = null }: { initial?: AtlasRepo | null }) {
   const [selected, setSelected] = useState(initial)
   const [request, setRequest] = useState<MapNavigationRequest | null>(null)
   const sequence = useRef(0)
+  const clickSelection = useRef<{ token: number; previous: AtlasRepo | null } | null>(null)
   const view = useMemo(() => ({ ...empty, repo: selected?.full_name ?? null }), [selected])
   return <><output data-testid="selected">{selected?.full_name ?? 'none'}</output>
     <MapView {...props} view={view} selected={selected} navigationRequest={request}
       onNavigationHandled={nonce => setRequest(current => current?.nonce === nonce ? null : current)}
+      onRollbackClick={token => {
+        if (clickSelection.current?.token !== token) return false
+        setSelected(clickSelection.current.previous)
+        clickSelection.current = null
+        setRequest(null)
+        return true
+      }}
       onSelect={(repo, options) => {
+        clickSelection.current = options?.clickToken === undefined ? null : { token: options.clickToken, previous: selected }
         setSelected(repo)
-        setRequest(repo && options?.navigate !== false ? { kind: 'repo', target: repo.full_name, nonce: ++sequence.current, clickToken: options?.clickToken } : null)
+        setRequest(repo ? { kind: 'repo', target: repo.full_name, nonce: ++sequence.current, clickToken: options?.clickToken } : null)
       }} /></>
 }
 function click(svg: SVGSVGElement, point: [number, number], detail = 1) {
@@ -73,6 +82,21 @@ function mouse(target: Element | Window, type: string, clientX: number, clientY:
 }
 
 describe('measured camera navigation', () => {
+  it('fits the semantic outer ring as well as the region members', () => {
+    stubMedia({ compact: false, reduced: true })
+    const semantic = structuredClone(data)
+    semantic.clusters[0].semantic_outer = [[[80, 120], [430, 120], [430, 380], [80, 380], [80, 120]]]
+    const request = { kind: 'region' as const, target: 'Developer Tools', nonce: 1 }
+    const { container } = render(<MapView {...props} data={semantic} presentation={atlasPresentation(semantic)}
+      view={{ ...empty, layoutAlt: true }} navigationRequest={request} />)
+    const camera = zoomTransform(container.querySelector('svg')!)
+    const [left, top] = camera.apply([80, 120])
+    const [right, bottom] = camera.apply([430, 380])
+    expect(left).toBeGreaterThanOrEqual(59)
+    expect(top).toBeGreaterThanOrEqual(59)
+    expect(right).toBeLessThanOrEqual(width - 59)
+    expect(bottom).toBeLessThanOrEqual(height - 89)
+  })
   it('fits a request present on mount exactly as one sent after measurement', () => {
     width = 390; height = 668
     const request = { kind: 'region' as const, target: 'Developer Tools', nonce: 1 }
@@ -300,7 +324,9 @@ describe('click sequences', () => {
   })
   it('passes the committed click token when rolling back a late double-click', () => {
     const onSelect = vi.fn()
-    const { container } = render(<MapView {...props} view={{ ...empty, repo: first.full_name }} selected={first} onSelect={onSelect} />)
+    const onRollbackClick = vi.fn(() => false)
+    const { container } = render(<MapView {...props} view={{ ...empty, repo: first.full_name }} selected={first} onSelect={onSelect}
+      onRollbackClick={onRollbackClick} />)
     const svg = container.querySelector('svg')!
     const point = zoomTransform(svg).apply([second.x, second.y])
     click(svg, point)
@@ -311,7 +337,8 @@ describe('click sequences', () => {
     click(svg, point, 2)
     fireEvent.doubleClick(svg, { clientX: point[0], clientY: point[1], detail: 2 })
 
-    expect(onSelect).toHaveBeenLastCalledWith(first, { navigate: false, clickToken })
+    expect(onRollbackClick).toHaveBeenCalledExactlyOnceWith(clickToken)
+    expect(onSelect).toHaveBeenCalledTimes(1)
   })
   it('interrupts animated selection with a late double-click from the original camera basis', () => {
     stubMedia({ compact: false, reduced: false })
@@ -404,7 +431,7 @@ describe('click sequences', () => {
     fireEvent.pointerMove(svg, { clientX: 500, clientY: 200, pointerType: 'mouse', buttons: 0 })
     fireEvent.click(label, { detail: 1 })
     act(() => vi.advanceTimersByTime(300))
-    expect(onRegion).toHaveBeenCalledExactlyOnceWith('Developer Tools', expect.any(Number))
+    expect(onRegion).toHaveBeenCalledExactlyOnceWith('Developer Tools', expect.any(Number), label)
   })
   it('does not treat pointer movement with no active button as a drag', () => {
     const { container } = render(<Harness />)
@@ -770,7 +797,7 @@ it('holds the same active repo tooltip and position until a redraw is ready', as
   expect(mutations).toHaveLength(2)
 })
 
-it.each(['blur', 'pointer leave', 'filter', 'focus change'])('hides an unready redraw tooltip after %s and recovers after measurement', action => {
+it.each(['blur', 'refocus', 'pointer leave', 'filter', 'focus change'])('hides an unready redraw tooltip after %s and recovers after measurement', action => {
   stubMedia({ compact: false, reduced: true })
   const { container, rerender } = render(<MapView {...props} />)
   const svg = container.querySelector('svg')!
@@ -783,7 +810,8 @@ it.each(['blur', 'pointer leave', 'filter', 'focus change'])('hides an unready r
   width = 0; height = 0
   const nextView = { ...empty, layoutAlt: true }
   rerender(<MapView {...props} view={nextView} />)
-  if (action === 'blur') fireEvent.blur(dots[0])
+  if (action === 'blur' || action === 'refocus') fireEvent.blur(dots[0])
+  if (action === 'refocus') fireEvent.focus(dots[0])
   if (action === 'pointer leave') fireEvent.pointerLeave(points[0])
   if (action === 'filter') rerender(<MapView {...props} view={{ ...nextView, languages: ['Python'] }} visible={new Set()} />)
   if (action === 'focus change') fireEvent.focus(dots[1])
@@ -791,9 +819,9 @@ it.each(['blur', 'pointer leave', 'filter', 'focus change'])('hides an unready r
 
   width = 1000; height = 700
   resizeObserver.notify(svg)
-  if (action === 'focus change') {
+  if (action === 'focus change' || action === 'refocus') {
     const tooltip = screen.getByRole('tooltip')
-    expect(tooltip.textContent).toContain(second.name)
+    expect(tooltip.textContent).toContain(action === 'refocus' ? first.name : second.name)
     expect(tooltip.style.left).not.toBe('')
     expect(tooltip.style.top).not.toBe('')
   } else expect(screen.queryByRole('tooltip')).toBeNull()

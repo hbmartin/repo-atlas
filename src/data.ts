@@ -125,21 +125,28 @@ export function validateAtlas(value: unknown): AtlasData {
       requireFinite(anchor.x, `clusters[${index}].${name}.x`)
       requireFinite(anchor.y, `clusters[${index}].${name}.y`)
     }
-    for (const [name, contours] of [['contours', cluster.contours], ['contours_alt', cluster.contours_alt]] as const) {
-      if (name === 'contours_alt' && contours === undefined) continue
-      if (!isRecord(contours) || !Array.isArray(contours.outer) || !Array.isArray(contours.inner)) {
-        throw new Error(`clusters[${index}].${name} is malformed`)
-      }
-      if (territories && (contours.inner.length || contours.outer.length !== (name === 'contours' ? 1 : 0))) {
-        throw new Error(`clusters[${index}].${name} has invalid territory geometry`)
-      }
-      if (territories) for (const ring of contours.outer) {
+    const requireClosedRings = (rings: unknown[], name: string) => {
+      for (const ring of rings) {
         if (!Array.isArray(ring) || ring.length < 4 || ring.some(point => !Array.isArray(point)
           || point.length !== 2 || !point.every(Number.isFinite))
           || ring[0][0] !== ring.at(-1)![0] || ring[0][1] !== ring.at(-1)![1]) {
           throw new Error(`clusters[${index}].${name} must contain a closed polygon`)
         }
       }
+    }
+    if (cluster.semantic_outer !== undefined) {
+      if (!Array.isArray(cluster.semantic_outer)) throw new Error(`clusters[${index}].semantic_outer is malformed`)
+      requireClosedRings(cluster.semantic_outer, 'semantic_outer')
+    }
+    for (const [name, contours] of [['contours', cluster.contours], ['contours_alt', cluster.contours_alt]] as const) {
+      if (name === 'contours_alt' && contours === undefined) continue
+      if (!isRecord(contours) || !Array.isArray(contours.outer) || !Array.isArray(contours.inner)) {
+        throw new Error(`clusters[${index}].${name} is malformed`)
+      }
+      if (territories && name === 'contours' && (contours.inner.length || contours.outer.length !== 1)) {
+        throw new Error(`clusters[${index}].${name} has invalid territory geometry`)
+      }
+      if (territories) requireClosedRings([...contours.outer, ...contours.inner], name)
     }
   })
   if (data.region_aliases !== undefined && (!isRecord(data.region_aliases)

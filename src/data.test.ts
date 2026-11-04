@@ -3,6 +3,7 @@ import { monthIndex, monthValue, readViewState, searchRepos, validMonth, validat
 import type { AtlasData, AtlasRepo } from './types'
 import { makeAtlas, makeRepo } from './test-fixtures'
 import { formatDate } from './view-utils'
+import { outerRings } from './map-geometry'
 
 const repo = {
   full_name: 'hbmartin/graphviz2drawio', name: 'graphviz2drawio', one_liner: 'Converts Graphviz diagrams', techniques: ['parsing'],
@@ -26,6 +27,17 @@ describe('atlas data utilities', () => {
       view: { regions: ['Developer Tools'], focusedRegion: 'developer-tools', layoutAlt: true },
       unknown: [],
     })
+    delete data.clusters[0].contours_alt
+    expect(validateAtlas(data).clusters[0].contours_alt).toBeUndefined()
+    expect(outerRings(data.clusters[0], true)).toEqual([])
+    data.clusters[0].semantic_outer = [[[-30, 400], [60, 400], [60, 600], [-30, 400]]]
+    expect(outerRings(validateAtlas(data).clusters[0], true)).toEqual(data.clusters[0].semantic_outer)
+    data.clusters[0].semantic_outer[0].pop()
+    expect(() => validateAtlas(data)).toThrow('semantic_outer must contain a closed polygon')
+    delete data.clusters[0].semantic_outer
+    data.clusters[0].contours_alt = { outer: [[[400, 400], [600, 400], [600, 600]]], inner: [] }
+    expect(() => validateAtlas(data)).toThrow('contours_alt must contain a closed polygon')
+    delete data.clusters[0].contours_alt
     data.clusters[0].contours.outer[0].pop()
     expect(() => validateAtlas(data)).toThrow('closed polygon')
   })

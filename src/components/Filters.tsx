@@ -80,16 +80,14 @@ export function Filters({
           }}
         />
       </label>
-      <details className="filter-popover map-options"><summary>Map options</summary><div className="filter-menu">
-      <p>Compare the territories with the original semantic projection.</p>
       <button
+        type="button"
         className={`layout-toggle ${view.layoutAlt ? 'active' : ''}`}
         aria-pressed={view.layoutAlt}
         onClick={() => setView(current => ({ ...current, layoutAlt: nextLayoutAlt }))}
       >
         Semantic view
       </button>
-      </div></details>
     </div>
   )
 }

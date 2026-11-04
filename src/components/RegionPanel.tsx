@@ -1,3 +1,4 @@
+import { useRef } from 'react'
 import type { AtlasCluster, AtlasRepo } from '../types'
 import type { AtlasPresentation } from '../presentation'
 import { formatDate } from '../view-utils'
@@ -8,6 +9,7 @@ export function RegionPanel({ cluster, members, visible, presentation, onClose, 
   cluster?: AtlasCluster; members: AtlasRepo[]; visible: Set<string>; presentation: AtlasPresentation
   onClose: () => void; onSelect: (repo: AtlasRepo) => void; onClear: () => void; fallbackLabel: boolean
 }) {
+  const heading = useRef<HTMLHeadingElement>(null)
   const label = cluster?.label ?? 'Unclustered'
   const matching = members.filter(repo => visible.has(repo.full_name))
   const ordered = members.toSorted((a, b) => b.pushed_at.localeCompare(a.pushed_at) || a.full_name.localeCompare(b.full_name))
@@ -18,12 +20,12 @@ export function RegionPanel({ cluster, members, visible, presentation, onClose, 
 
   return <DetailSheet label={`${label} region details`} onClose={onClose}>
     <span className="eyebrow">REGION</span>
-    <h2 className="region-title">{label}</h2>
+    <h2 ref={heading} tabIndex={-1} className="region-title">{label}</h2>
     <p className="description">{cluster?.gloss ?? 'These repositories sit outside the named semantic regions.'}</p>
     {fallbackLabel && <p><FallbackLabel /> {FALLBACK_LABEL_EXPLANATION}</p>}
     <p className="region-count" aria-live="polite">{matching.length} matching / {members.length} repositories</p>
     {matching.length === 0 && <p className="notice">No repositories in this region match the current filters.{' '}
-      <button onClick={onClear}>Clear filters</button></p>}
+      <button onClick={() => { onClear(); heading.current?.focus({ preventScroll: true }) }}>Clear filters</button></p>}
     {earliest && ordered[0] && <p className="region-activity">
       Activity: {formatDate(earliest)} – {formatDate(ordered[0].pushed_at)}
     </p>}

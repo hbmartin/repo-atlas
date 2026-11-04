@@ -16,6 +16,7 @@ export interface AtlasCluster {
   contours: { outer: Point[][]; inner: Point[][] }
   label_anchor_alt?: { x: number; y: number }
   contours_alt?: { outer: Point[][]; inner: Point[][] }
+  semantic_outer?: Point[][]
 }
 
 export interface Neighbor {
@@ -103,4 +104,4 @@ declare global {
 }
 
 export type MapNavigationRequest = { nonce: number; kind: 'repo' | 'region' | 'overview'; target: string; clickToken?: number }
-export type SelectionOptions = { navigate?: boolean; clickToken?: number }
+export type SelectionOptions = { clickToken?: number }

@@ -6,7 +6,7 @@ import { FallbackLabel, FALLBACK_LABEL_EXPLANATION } from './FallbackLabel'
 export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onHighlight, onLanguagePreview }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; onLanguage: (name: string, included: boolean) => void
   onLanguagePreview?: (name: string | null) => void
-  onRegion: (name: string) => void; onHighlight: (id: number | null) => void
+  onRegion: (name: string, opener: HTMLButtonElement) => void; onHighlight: (id: number | null) => void
 }) {
   const { languages, sizes, colors } = presentation
   const preview = useRef<{ pointer: string | null; focus: string | null }>({ pointer: null, focus: null })
@@ -43,7 +43,7 @@ export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onH
       {clusteredRegions.map(region => {
         const cluster = region.cluster!
         return <div key={cluster.id}>
-        <button aria-current={view.focusedRegion === regionKey(cluster) ? 'true' : undefined} onClick={() => onRegion(cluster.label)}
+        <button data-region-opener={regionKey(cluster)} aria-current={view.focusedRegion === regionKey(cluster) ? 'true' : undefined} onClick={event => onRegion(cluster.label, event.currentTarget)}
           onPointerEnter={() => onHighlight(cluster.id)}
           onPointerLeave={() => onHighlight(null)}
           onFocus={() => onHighlight(cluster.id)}
@@ -55,7 +55,7 @@ export function AtlasGuide({ data, presentation, view, onLanguage, onRegion, onH
         </p>
       </div>
       })}
-      {unclustered && <button onClick={() => onRegion(unclustered.label)} aria-current={view.focusedRegion === UNCLUSTERED_KEY ? 'true' : undefined}>{unclustered.label} <small>{unclustered.count}</small></button>}
+      {unclustered && <button data-region-opener={UNCLUSTERED_KEY} onClick={event => onRegion(unclustered.label, event.currentTarget)} aria-current={view.focusedRegion === UNCLUSTERED_KEY ? 'true' : undefined}>{unclustered.label} <small>{unclustered.count}</small></button>}
     </section>
     <details className="guide-method"><summary>How this map works</summary>
       <p>Each README is normalized to a fixed schema, embedded by meaning, clustered in full-dimensional space, then projected here. Territories separate groups for readability. The semantic view shows the original projection, and nearest neighbors come from the embeddings.</p>
