@@ -1,18 +1,23 @@
-import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState, type Ref } from 'react'
 import { select } from 'd3-selection'
 import { ZoomTransform, zoom, zoomIdentity, zoomTransform, type ZoomBehavior } from 'd3-zoom'
 import type { AtlasData, AtlasRepo, MapNavigationRequest, SelectionOptions, ViewState } from '../types'
 import { COMPACT_MEDIA_QUERY, MAP_TRANSITION_DURATION, formatDate, mobileMapTargetY, nearestRepoAtPoint, nearestRepoInDirection, pointerToMapPoint, useMediaQuery, useReducedMotion } from '../view-utils'
 import { regionByKey, regionKey, UNCLUSTERED_KEY, type AtlasPresentation } from '../presentation'
-import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, overlaps, placeRegionLabels, prepareMapOutlines, prepareRegionLabels, resizeTransform, type Box, type Size } from '../map-geometry'
+import { atlasBounds, boundsOf, BoxGrid, constrainMapTransform, fitBounds, fitOverview, outerRings, overlaps, placeRegionLabels, prepareMapOutlines, prepareRegionLabels, resizeTransform, type Box, type Size } from '../map-geometry'
 
 const PLACEHOLDER_SIZE = { width: 1000, height: 700 }
 const TOOLTIP_WIDTH = 270
 const TOOLTIP_FALLBACK_SIZE = { width: TOOLTIP_WIDTH, height: 160 }
+const CLICK_DELAY = 300
+const HIT_RADIUS = 22
 const easeCubicInOut = (value: number) => ((value *= 2) <= 1 ? value ** 3 : (value -= 2) * value ** 2 + 2) / 2
+type ClickTarget = { kind: 'repo'; repo: AtlasRepo | null }
+  | { kind: 'territory' | 'label'; label: string; opener?: SVGElement }
 type ClickGesture = {
-  token: number; kind: 'repo' | 'region'; target: AtlasRepo | string | null
-  selection: AtlasRepo | null; camera: ZoomTransform; committed: boolean
+  token: number; target: ClickTarget
+  camera: ZoomTransform; committed: boolean
+  tap?: { x: number; y: number }
   timer?: ReturnType<typeof setTimeout>
 }
 type Viewport = {
@@ -34,17 +39,18 @@ type MapTooltipProps = {
 }
 function MapTooltip({ repo, setNode }: MapTooltipProps) {
   if (!repo) return null
-  return <div ref={setNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH }}>
+  return <div ref={setNode} className="tooltip" role="tooltip" style={{ width: TOOLTIP_WIDTH, visibility: 'hidden' }}>
     <strong>{repo.name}</strong><span>{repo.one_liner}</span><small>{repo.primary_language} · updated {formatDate(repo.pushed_at)}</small>
   </div>
 }
 
 export function MapView({ data, presentation, view, visible, selected, onSelect, navigationRequest = null, onNavigationHandled, highlightRegion = null, onRegion,
-  onCloseRegion, highlightLanguage = null, showConnections = false, hintDismissed = false, onInteraction }: {
+  onCloseRegion, onRollbackClick, resetViewRef, highlightLanguage = null, showConnections = false, hintDismissed = false, onInteraction }: {
   data: AtlasData; presentation: AtlasPresentation; view: ViewState; visible: Set<string>; selected: AtlasRepo | null
   onSelect: (repo: AtlasRepo | null, options?: SelectionOptions) => void
   navigationRequest?: MapNavigationRequest | null; onNavigationHandled?: (nonce: number) => void
-  highlightRegion?: number | null; onRegion?: (label: string, clickToken?: number) => void
+  highlightRegion?: number | null; onRegion?: (label: string, clickToken?: number, opener?: SVGElement) => void
+  onRollbackClick?: (clickToken: number) => boolean; resetViewRef?: Ref<HTMLButtonElement>
   onCloseRegion?: () => void; highlightLanguage?: string | null; showConnections?: boolean
   hintDismissed?: boolean; onInteraction?: () => void
 }) {
@@ -55,7 +61,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const navigated = useRef(false)
   const [hover, setHover] = useState<AtlasRepo | null>(null)
   const [focused, setFocused] = useState<AtlasRepo | null>(null)
-  const [lastReadyRepo, setLastReadyRepo] = useState<AtlasRepo | null>(null)
   const [hoverRegion, setHoverRegion] = useState<number | null>(null)
   const [focusedRegion, setFocusedRegion] = useState<number | null>(null)
   const svgOrigin = useRef({ left: 0, top: 0 })
@@ -68,7 +73,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const tooltipOriginDirty = useRef(false)
   const consumedRequest = useRef<number | null>(null)
   const previousView = useRef(view)
-  const pointerStart = useRef<{ x: number; y: number; type: string; dragged: boolean } | null>(null)
+  const pointerStart = useRef<{ id: number; x: number; y: number; type: string; dragged: boolean } | null>(null)
+  const touchPointers = useRef(new Set<number>())
+  const pointerType = useRef('')
   const clickGesture = useRef<ClickGesture | null>(null)
   const clickSequence = useRef(0)
   const frame = useRef<number | null>(null)
@@ -134,6 +141,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const next = positionTooltip(point, tooltipSize.current, viewportRef.current.size)
     node.style.left = `${next.left}px`
     node.style.top = `${next.top}px`
+    if (node.style.visibility) node.style.visibility = ''
   }, [refreshSvgOrigin])
   const scheduleTooltipPosition = useCallback((refreshOrigin = false, immediate = false) => {
     if (refreshOrigin) tooltipOriginDirty.current = true
@@ -253,7 +261,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       ? repo.cluster_id == null : cluster != null && repo.cluster_id === cluster.id)
     if (!members.length) return
     const points: [number, number][] = members.map(repo => [pointX(repo), pointY(repo)])
-    if (data.schema_version === 3 && !view.layoutAlt && cluster) points.push(...cluster.contours.outer.flat())
+    if (cluster) points.push(...outerRings(cluster, view.layoutAlt).flat())
     const box = boundsOf(points)
     const [x, y] = compact ? availableCenter() : [size.width / 2, (size.height - 30) / 2]
     const availableHeight = compact ? Math.max(84, y * 2) : size.height
@@ -375,11 +383,11 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
     const gesture = clickGesture.current
     if (!gesture || old === view) return
     const filtersChanged = old.languages !== view.languages || old.regions !== view.regions || old.since !== view.since
-    const ownSelection = gesture.kind === 'repo' && !filtersChanged
-      && view.repo === ((gesture.target as AtlasRepo | null)?.full_name ?? null)
-    const ownRegion = gesture.kind === 'region' && !filtersChanged
+    const ownSelection = gesture.target.kind === 'repo' && !filtersChanged
+      && view.repo === (gesture.target.repo?.full_name ?? null)
+    const ownRegion = gesture.target.kind !== 'repo' && !filtersChanged
       && (regionByKey(data, view.focusedRegion)?.label
-        ?? (view.focusedRegion === UNCLUSTERED_KEY ? 'Unclustered' : null)) === gesture.target
+        ?? (view.focusedRegion === UNCLUSTERED_KEY ? 'Unclustered' : null)) === gesture.target.label
     if (!gesture.committed || (!ownSelection && !ownRegion)) cancelClick()
   }, [data, view, cancelClick])
 
@@ -455,7 +463,7 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const currentTransform = () => svgRef.current ? zoomTransform(svgRef.current) : viewportRef.current.transform
   const hitRepo = (clientX: number, clientY: number, camera: ZoomTransform) => {
     const point = pointerToMapPoint(clientX, clientY, svgRef.current!.getBoundingClientRect(), camera)
-    return nearestRepoAtPoint(data.repos, visible, point.x, point.y, 22 * point.unitsPerPixel, view.layoutAlt, drawnRadius, selected?.full_name)
+    return nearestRepoAtPoint(data.repos, visible, point.x, point.y, HIT_RADIUS * point.unitsPerPixel, view.layoutAlt, drawnRadius, selected?.full_name)
   }
   const changeZoom = (factor: number) => {
     onInteraction?.()
@@ -480,14 +488,32 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const commitClick = (gesture: ClickGesture) => {
     gesture.committed = true
     gesture.timer = undefined
-    if (gesture.kind === 'repo') onSelect(gesture.target as AtlasRepo | null, { clickToken: gesture.token })
-    else onRegion?.(gesture.target as string, gesture.token)
+    if (gesture.target.kind === 'repo') onSelect(gesture.target.repo, { clickToken: gesture.token })
+    else onRegion?.(gesture.target.label, gesture.token, gesture.target.opener)
   }
-  const queueClick = (kind: 'repo' | 'region', target: AtlasRepo | string | null, camera = currentTransform()) => {
+  const queueClick = (target: ClickTarget, camera: ZoomTransform, tap?: ClickGesture['tap']) => {
     cancelClick()
-    const gesture: ClickGesture = { token: ++clickSequence.current, kind, target, selection: selected, camera, committed: false }
-    gesture.timer = setTimeout(() => commitClick(gesture), 300)
+    const gesture: ClickGesture = { token: ++clickSequence.current, target, camera, tap, committed: false }
+    gesture.timer = setTimeout(() => commitClick(gesture), CLICK_DELAY)
     clickGesture.current = gesture
+  }
+  const queueMapClick = (element: EventTarget, x: number, y: number, tap?: ClickGesture['tap']) => {
+    const camera = currentTransform()
+    const repo = hitRepo(x, y, camera)
+    const territory = element instanceof Element ? element.getAttribute('data-territory') : null
+    queueClick(!repo && territory ? { kind: 'territory', label: territory } : { kind: 'repo', repo }, camera, tap)
+  }
+  const doubleClickMap = (x: number, y: number) => {
+    const gesture = clickGesture.current
+    cancelClick()
+    // A label can move after focus, causing the browser to dispatch the
+    // second click on the map instead of on the label.
+    if (gesture?.target.kind === 'label') {
+      if (!gesture.committed) commitClick(gesture)
+      return
+    }
+    const useSavedCamera = gesture && (!gesture.committed || onRollbackClick?.(gesture.token))
+    zoomAtPointer(x, y, useSavedCamera ? gesture.camera : undefined)
   }
   const selectImmediately = useCallback((repo: AtlasRepo | null) => { cancelClick(); onSelect(repo) }, [cancelClick, onSelect])
   const clickableTerritories = data.schema_version === 3 && !view.layoutAlt
@@ -540,9 +566,6 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   const mapAnchorX = mapTooltipAnchor?.x ?? 0
   const mapAnchorY = mapTooltipAnchor?.y ?? 0
   const usesPointerAnchor = Boolean(activeRepo && activeRepo === hover)
-  // Keep the cached repo paired with the last ready tooltip position.
-  if (viewportReady && lastReadyRepo !== activeRepo) setLastReadyRepo(activeRepo)
-  const tooltipRepo = viewportReady || activeRepo === lastReadyRepo ? activeRepo : null
   useLayoutEffect(() => {
     if (!viewportReady) return
     tooltipUsesPointer.current = usesPointerAnchor
@@ -582,39 +605,46 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
   }, [positionVisibleTooltip])
   return <div className="map-shell">
     <svg ref={svgRef} className="atlas-map" viewBox={`0 0 ${size.width} ${size.height}`} role="group" aria-label={clickableTerritories ? "Territory map of public GitHub repositories" : "Semantic map of public GitHub repositories"}
-      onPointerDown={event => { pointerStart.current = { x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false } }}
+      onPointerDownCapture={event => {
+        pointerType.current = event.pointerType
+        if (event.pointerType === 'touch') {
+          touchPointers.current.add(event.pointerId)
+          if (touchPointers.current.size > 1) {
+            pointerStart.current = null
+            cancelClick()
+            return
+          }
+        }
+        pointerStart.current = { id: event.pointerId, x: event.clientX, y: event.clientY, type: event.pointerType, dragged: false }
+      }}
       onPointerMove={event => {
         const start = pointerStart.current
-        if (start && event.buttons !== 0 && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) { start.dragged = true; cancelClick() }
+        if (start && (start.type === 'touch' || event.buttons !== 0) && Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) { start.dragged = true; cancelClick() }
+      }}
+      onPointerUp={event => {
+        if (event.pointerType !== 'touch') return
+        touchPointers.current.delete(event.pointerId)
+        const start = pointerStart.current
+        pointerStart.current = null
+        if (!start || start.id !== event.pointerId || start.dragged || touchPointers.current.size
+          || Math.hypot(event.clientX - start.x, event.clientY - start.y) > 6) return
+        const { clientX: x, clientY: y } = event
+        const previous = clickGesture.current
+        if (previous?.tap && !previous.committed && Math.hypot(x - previous.tap.x, y - previous.tap.y) <= HIT_RADIUS) {
+          doubleClickMap(x, y)
+        } else queueMapClick(event.target, x, y, { x, y })
       }}
       onPointerLeave={() => { setHover(null); setHoverRegion(null) }}
-      onPointerCancel={() => { pointerStart.current = null; cancelClick() }}
+      onPointerCancel={event => { touchPointers.current.delete(event.pointerId); pointerStart.current = null; cancelClick() }}
       onClick={event => {
-        if (event.detail === 0) return
+        if (event.detail !== 1 || pointerType.current === 'touch') return
         const start = pointerStart.current; pointerStart.current = null
         if (start?.dragged) return
-        if (event.detail > 1) return
-        const camera = currentTransform()
-        const repo = hitRepo(event.clientX, event.clientY, camera)
-        const territory = event.target instanceof Element ? event.target.getAttribute('data-territory') : null
-        if (territory) {
-          if (start?.type === 'touch') { cancelClick(); onRegion?.(territory) }
-          else queueClick('region', territory, camera)
-        } else if (start?.type === 'touch') selectImmediately(repo)
-        else queueClick('repo', repo, camera)
+        queueMapClick(event.target, event.clientX, event.clientY)
       }}
       onDoubleClick={event => {
         event.preventDefault()
-        const gesture = clickGesture.current
-        cancelClick()
-        // A completed region focus may move the label out from under the second
-        // click, making the browser dispatch dblclick on its SVG ancestor.
-        if (gesture?.kind === 'region') {
-          if (!gesture.committed) onRegion?.(gesture.target as string)
-          return
-        }
-        if (gesture?.kind === 'repo' && gesture.committed) onSelect(gesture.selection, { navigate: false, clickToken: gesture.token })
-        zoomAtPointer(event.clientX, event.clientY, gesture?.kind === 'repo' ? gesture.camera : undefined)
+        if (pointerType.current !== 'touch') doubleClickMap(event.clientX, event.clientY)
       }}>
       <rect width={size.width} height={size.height} className="map-bg" />
       <g transform={transform.toString()} className="map-geometry">{mapGeometry}</g>
@@ -635,19 +665,19 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
           return <g key={label.id} className={`cluster-label ${activeRegion === label.id ? 'active' : ''}`}
             transform={`translate(${label.x} ${label.y})`} opacity={regionOpacity(label.id) * (relativeZoom > 2.5 && activeRegion !== label.id && focusedClusterId !== label.id ? .3 : 1)}
             role="button" tabIndex={0} aria-current={view.focusedRegion === regionKey(cluster) ? true : undefined} aria-label={`Focus region: ${cluster.label}`}
-            onPointerDown={event => { pointerStart.current = null; event.stopPropagation() }}
+            onPointerDown={event => { pointerType.current = event.pointerType; pointerStart.current = null; event.stopPropagation() }}
             onClick={event => {
               event.stopPropagation()
-              if (event.detail === 0) { cancelClick(); onRegion?.(cluster.label) }
-              else if (event.detail === 1) queueClick('region', cluster.label)
+              if (event.detail === 0) { cancelClick(); onRegion?.(cluster.label, undefined, event.currentTarget) }
+              else if (event.detail === 1) queueClick({ kind: 'label', label: cluster.label, opener: event.currentTarget }, currentTransform())
             }}
             onDoubleClick={event => {
               event.preventDefault(); event.stopPropagation()
               const gesture = clickGesture.current
               cancelClick()
-              if (!gesture?.committed) onRegion?.(cluster.label)
+              if (!gesture?.committed) onRegion?.(cluster.label, undefined, event.currentTarget)
             }}
-            onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cancelClick(); onRegion?.(cluster.label) } }}
+            onKeyDown={event => { if (event.key === 'Enter' || event.key === ' ') { event.preventDefault(); cancelClick(); onRegion?.(cluster.label, undefined, event.currentTarget) } }}
             onPointerEnter={() => setHoverRegion(label.id)} onPointerLeave={() => setHoverRegion(null)} onFocus={() => setFocusedRegion(label.id)} onBlur={() => setFocusedRegion(null)}>
             <text style={{ fontSize }}>{label.lines.map((line, i) => <tspan x="0" y={(i - (label.lines.length - 1) / 2) * (fontSize + 3) + fontSize * .35} key={i}>{line}</tspan>)}</text>
           </g>
@@ -656,9 +686,9 @@ export function MapView({ data, presentation, view, visible, selected, onSelect,
       </g>
     </svg>
     <div className="map-navigation" style={compact && sheetOpen ? { bottom: 'calc(min(60dvh, 68%) + 12px)' } : undefined}>
-      <p className={`map-instructions ${hintDismissed ? 'dismissed' : ''}`} aria-hidden={hintDismissed || undefined}><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch to zoom</span></p>
-      <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button onClick={() => { onInteraction?.(); cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
+      <p className={`map-instructions ${hintDismissed ? 'dismissed' : ''}`} aria-hidden={hintDismissed || undefined}><span className="desktop-hint">Hover to preview · Click to explore · Scroll or double-click to zoom</span><span className="touch-hint">Tap to explore · Drag to pan · Pinch or double-tap to zoom</span></p>
+      <div className="map-hud"><button aria-label="Zoom out" onClick={() => changeZoom(1 / 1.25)}>−</button><span aria-label="Zoom level">{Math.round(relativeZoom * 100)}%</span><button aria-label="Zoom in" onClick={() => changeZoom(1.25)}>+</button><button ref={resetViewRef} onClick={() => { onInteraction?.(); cancelClick(); navigated.current = false; apply(fit, true) }}>Reset view</button></div>
     </div>
-    <MapTooltip repo={tooltipRepo} setNode={setTooltipNode} />
+    <MapTooltip key={activeRepo?.full_name} repo={activeRepo} setNode={setTooltipNode} />
   </div>
 }

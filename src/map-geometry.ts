@@ -20,14 +20,14 @@ export function resizeTransform(current: ZoomTransform, oldSize: Size, size: Siz
   const center = current.invert([oldSize.width / 2, oldSize.height / 2])
   return zoomIdentity.translate(size.width / 2, size.height / 2).scale(current.k / oldFit.k * fit.k).translate(-center[0], -center[1])
 }
-function outerRings(data: AtlasData, cluster: AtlasCluster, alt: boolean): Point[][] {
+export function outerRings(cluster: AtlasCluster, alt: boolean): Point[][] {
   if (!alt) return cluster.contours.outer
-  return cluster.contours_alt?.outer ?? (data.schema_version === 2 ? cluster.contours.outer : [])
+  return cluster.semantic_outer ?? cluster.contours_alt?.outer ?? []
 }
 export function atlasBounds(data: AtlasData, alt: boolean): Box {
   return boundsOf([
     ...data.repos.map((r): Point => alt ? [r.x_alt, r.y_alt] : [r.x, r.y]),
-    ...data.clusters.flatMap(c => outerRings(data, c, alt).flat()),
+    ...data.clusters.flatMap(c => outerRings(c, alt).flat()),
   ])
 }
 export function smoothRing(ring: Point[]): Point[] {
@@ -45,6 +45,7 @@ const svgPoint = ([x, y]: Point) => `${x.toFixed(3)},${y.toFixed(3)}`
 
 function territoryOutline(ring: Point[], members: Point[]) {
   const distinct = ring.slice(0, -1).filter((p, i) => i === 0 || distance(p, ring[i - 1]) > 0)
+  if (distinct.length > 1 && distance(distinct[0], distinct.at(-1)!) === 0) distinct.pop()
   const vertices = distinct.filter((p, i) => cross(distinct.at(i - 1)!, p, distinct[(i + 1) % distinct.length]) !== 0)
   const center: Point = [
     vertices.reduce((sum, p) => sum + p[0], 0) / vertices.length,
@@ -102,7 +103,7 @@ function territoryOutline(ring: Point[], members: Point[]) {
 
 export function prepareMapOutlines(data: AtlasData, alt: boolean) {
   const territories = data.schema_version === 3 && !alt
-  return new Map(data.clusters.map(cluster => [cluster.id, outerRings(data, cluster, alt).map(ring => {
+  return new Map(data.clusters.map(cluster => [cluster.id, outerRings(cluster, alt).map(ring => {
     if (territories) {
       const members = data.repos.filter(repo => repo.cluster_id === cluster.id).map(({ x, y }): Point => [x, y])
       return territoryOutline(ring, members)

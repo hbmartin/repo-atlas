@@ -20,7 +20,7 @@ export function DetailPanel({
   fallbackLabel?: boolean
   reposByName: Map<string, AtlasRepo>
   onSelect: (repo: AtlasRepo) => void
-  onRegion: (label: string) => void
+  onRegion: (label: string, opener: HTMLButtonElement) => void
   onClose: () => void
   hiddenConnections?: number
   showConnections?: boolean
@@ -66,7 +66,7 @@ export function DetailPanel({
         </div>
       )}
       {cluster && (
-        <button className="region-card" onClick={() => onRegion(cluster.label)}>
+        <button className="region-card" onClick={event => onRegion(cluster.label, event.currentTarget)}>
           <small>Region</small><strong>{cluster.label}</strong><span>{cluster.gloss}</span>
           {fallbackLabel && <><FallbackLabel /><span>{FALLBACK_LABEL_EXPLANATION}</span></>}
         </button>

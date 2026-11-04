@@ -295,6 +295,22 @@ def test_projection_neighbor_counts_are_valid_for_small_datasets():
         assert trust_k < count / 2
 
 
+def test_semantic_contours_extend_past_original_grid_without_changing_mask_size():
+    import numpy as np
+
+    from repo_atlas.layouts import density_contours
+
+    points = np.asarray([[986.0, 410.0], [990.0, 420.0], [991.0, 425.0]])
+    rings, anchor, mask = density_contours(points)
+    assert mask.shape == (256, 256)
+    assert mask[:, -1].any()
+    assert 980 < anchor["x"] < 1000
+    assert rings
+    assert all(ring[0] == ring[-1] for ring in rings)
+    assert max(x for ring in rings for x, _ in ring) > 1010
+    assert density_contours(points[:2])[0] == []
+
+
 @pytest.mark.parametrize("count", [1, 3, 20])
 def test_project_handles_small_datasets(tmp_path, monkeypatch, count):
     pipeline = AtlasPipeline(tmp_path, None)

@@ -45,7 +45,7 @@ PROMPT_VERSION = "summary-v2"
 LABEL_PROMPT_VERSION = "label-v5"
 TEMPLATE_VERSION = "embed-v1"
 ALGORITHM_VERSION = "analysis-v3"
-PROJECTION_VERSION = "projection-v2"
+PROJECTION_VERSION = "projection-v3"
 MIN_README_WORDS = 40
 ACQUIRE_VERSION = "acquire-v2"
 R_MIN, R_MAX = 3.5, 14.0
@@ -1101,7 +1101,7 @@ class AtlasPipeline:
                 for a, b in zip(high_knn, low_knn, strict=True)
             ]))
 
-        contours_by_layout: dict[str, dict[int, tuple[dict, dict, np.ndarray]]] = {}
+        contours_by_layout: dict[str, dict[int, tuple[list, dict, np.ndarray]]] = {}
         metric_values = {}
         for layout, xy in (("umap", umap_xy), ("force", force_xy)):
             contour_data = {}
@@ -1171,7 +1171,8 @@ class AtlasPipeline:
                 "gloss": label.gloss or "These repositories share a technical theme.",
                 "key": analysis.get("region_keys", {}).get(str(cluster_id), self._region_key(members[0])),
                 "member_count": len(members), **territories[cluster_id],
-                "label_anchor_alt": anchor, "contours_alt": rings,
+                "label_anchor_alt": anchor, "contours_alt": {"outer": [], "inner": []},
+                "semantic_outer": rings,
             })
         self.final_payload = {
             "analysis_key": key, "layout": "territories", "layout_alt": chosen,

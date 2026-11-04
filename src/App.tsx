@@ -34,9 +34,15 @@ const EMPTY_VIEW: ViewState = {
 
 type FilterFocusRequest = { scope: 'controls' | 'dialog'; index: number | null }
 type ViewUpdate = ViewState | ((current: ViewState) => ViewState)
-type ViewUpdateOptions = SelectionOptions & { canonicalizeUrl?: boolean; supersedeRollback?: boolean }
+type ViewUpdateOptions = SelectionOptions & { navigate?: false; canonicalizeUrl?: boolean; selection?: 'repo' | 'region' }
 type ViewUpdateResult = { stateChanged: boolean; filtersChanged: boolean; view: ViewState }
-type RollbackCandidate = { token: number; view: ViewState; navigationSequence: number }
+type RegionOpener = HTMLElement | SVGElement
+type RollbackCandidate = {
+  token: number
+  repo: ViewState['repo']
+  focusedRegion: ViewState['focusedRegion']
+  opener: RegionOpener | null
+}
 
 const TOOL_VIEW_KEYS = new Set<keyof ViewState>(['repo', 'focusedRegion', 'languages', 'regions', 'since', 'layoutAlt'])
 
@@ -139,6 +145,7 @@ export default function App() {
     setNavigationRequest(request)
   }, [])
   const requestNavigation = useCallback((kind: MapNavigationRequest['kind'], target: string, clickToken?: number) => {
+    if (clickToken === undefined) rollbackCandidate.current = null
     replaceNavigation({ kind, target, clickToken, nonce: ++navigationSequence.current })
   }, [replaceNavigation])
   const acknowledgeNavigation = useCallback((nonce: number) => {
@@ -146,6 +153,8 @@ export default function App() {
   }, [replaceNavigation])
   const viewRef = useRef(view)
   const searchInput = useRef<HTMLInputElement>(null)
+  const regionOpener = useRef<RegionOpener | null>(null)
+  const resetViewButton = useRef<HTMLButtonElement>(null)
   const filterButton = useRef<HTMLButtonElement>(null)
   const filterDialog = useRef<HTMLDivElement>(null)
   const doneButton = useRef<HTMLButtonElement>(null)
@@ -176,13 +185,7 @@ export default function App() {
 
   const setView = useCallback((update: ViewUpdate, options?: ViewUpdateOptions) => {
     const current = viewRef.current
-    const rollbackToken = options?.navigate === false ? options.clickToken : undefined
     const pendingNavigation = navigationRequestRef.current
-    if (rollbackToken !== undefined
-      && (rollbackCandidate.current?.token !== rollbackToken || rollbackCandidate.current.view !== current
-        || rollbackCandidate.current.navigationSequence !== navigationSequence.current)) {
-      return { stateChanged: false, filtersChanged: false, view: current } satisfies ViewUpdateResult
-    }
     const next = typeof update === 'function' ? update(current) : update
     const nextLanguages = normalizeLanguages(next.languages)
     const nextRegions = normalizeRegions(next.regions)
@@ -196,25 +199,27 @@ export default function App() {
     const focusChanged = (normalized.focusedRegion ?? null) !== (current.focusedRegion ?? null)
     const repoChanged = normalized.repo !== current.repo
     const stateChanged = filtersChanged || repoChanged || focusChanged || normalized.layoutAlt !== current.layoutAlt
-    const committedView = stateChanged ? normalized : current
-    const samePendingRegion = !focusChanged && pendingNavigation?.kind === 'region'
-      && pendingNavigation.target === normalized.focusedRegion
-    const navigationTarget = options?.navigate !== false && normalized.repo
-      && (normalized.repo !== current.repo || options?.navigate === true) ? normalized.repo : null
-    if (navigationTarget) requestNavigation('repo', navigationTarget, options?.clickToken)
-    else if (rollbackToken !== undefined) {
-      if (pendingNavigation?.clickToken === rollbackToken) replaceNavigation(null)
-    } else if (options?.navigate !== false && !normalized.repo && (focusChanged || (repoChanged && normalized.focusedRegion))) {
-      if (normalized.focusedRegion) requestNavigation('region', normalized.focusedRegion)
-      else requestNavigation('overview', '')
-    } else if (options?.navigate === false || (stateChanged && !samePendingRegion && (!normalized.repo || filtersChanged))) {
-      replaceNavigation(null)
+    if (options?.navigate !== false) {
+      const clickToken = options?.clickToken
+      const samePendingTarget = normalized.repo
+        ? pendingNavigation?.kind === 'repo' && pendingNavigation.target === normalized.repo
+        : normalized.focusedRegion
+          ? pendingNavigation?.kind === 'region' && pendingNavigation.target === normalized.focusedRegion
+          : pendingNavigation?.kind === 'overview'
+      if (normalized.repo && (repoChanged || options?.selection === 'repo')) {
+        requestNavigation('repo', normalized.repo, clickToken)
+      } else if (!normalized.repo && normalized.focusedRegion && (focusChanged || repoChanged || options?.selection === 'region')) {
+        requestNavigation('region', normalized.focusedRegion, clickToken)
+      } else if (!normalized.repo && !normalized.focusedRegion && focusChanged) {
+        requestNavigation('overview', '', clickToken)
+      } else if (pendingNavigation && !samePendingTarget) replaceNavigation(null)
+
+      if (clickToken !== undefined) {
+        rollbackCandidate.current = {
+          token: clickToken, repo: current.repo, focusedRegion: current.focusedRegion, opener: regionOpener.current,
+        }
+      } else if (stateChanged || options?.selection) rollbackCandidate.current = null
     }
-    if (rollbackToken !== undefined) rollbackCandidate.current = null
-    else if (options?.clickToken !== undefined) {
-      // Include the click's own navigation so it does not supersede its rollback.
-      rollbackCandidate.current = { token: options.clickToken, view: committedView, navigationSequence: navigationSequence.current }
-    } else if (stateChanged || options?.supersedeRollback) rollbackCandidate.current = null
     if (stateChanged) {
       if (filtersChanged || repoChanged || focusChanged) setShowConnections(false)
       dismissHint()
@@ -227,6 +232,20 @@ export default function App() {
     }
     return { stateChanged, filtersChanged, view: normalized } satisfies ViewUpdateResult
   }, [dismissHint, replaceNavigation, requestNavigation])
+
+  const rollbackClick = useCallback((token: number) => {
+    const previous = rollbackCandidate.current
+    if (!previous || previous.token !== token) return false
+    rollbackCandidate.current = null
+    regionOpener.current = previous.opener
+    if (navigationRequestRef.current?.clickToken === token) replaceNavigation(null)
+    setView(current => ({
+      ...current,
+      repo: previous.repo,
+      focusedRegion: previous.focusedRegion,
+    }), { navigate: false })
+    return true
+  }, [replaceNavigation, setView])
 
   useLayoutEffect(() => {
     const request = pendingFilterFocus.current
@@ -244,6 +263,7 @@ export default function App() {
     if (!data) return
     const restore = () => {
       rollbackCandidate.current = null
+      regionOpener.current = null
       const { view: restored, unknown } = readViewState(window.location.search, data)
       const previousFocus = viewRef.current.focusedRegion
       setShowConnections(false)
@@ -326,7 +346,9 @@ export default function App() {
       annotations: { readOnlyHint: false, untrustedContentHint: true },
       execute(input) {
         const value = validateToolViewUpdate(input, data, presentation)
-        const explicitlySelectsRepo = value.repo !== undefined
+        if (value.focusedRegion !== undefined && value.focusedRegion !== viewRef.current.focusedRegion) {
+          regionOpener.current = null
+        }
         const next = setView((current) => {
           const languages = value.languages ?? current.languages
           const regions = value.regions ?? current.regions
@@ -341,7 +363,7 @@ export default function App() {
             since,
             layoutAlt: value.layoutAlt ?? current.layoutAlt,
           }
-        }, { supersedeRollback: explicitlySelectsRepo }).view
+        }, { selection: value.repo !== undefined ? 'repo' : undefined }).view
         return {
           selected_repo: next.repo,
           focusedRegion: next.focusedRegion ?? null,
@@ -369,6 +391,27 @@ export default function App() {
     const matchingUnclustered = data.repos.filter(repo => visible.has(repo.full_name) && repo.cluster_id == null).length
     return { visible, matchingRegions, matchingUnclustered }
   }, [data, presentation, view.languages, view.regions, view.since])
+
+  const selectRepo = useCallback((repo: AtlasRepo | null, options?: SelectionOptions) => {
+    dismissHint()
+    setHighlightRegion(null)
+    setHighlightLanguage(null)
+    setView(current => ({ ...current, repo: repo?.full_name ?? null }), { ...options, selection: 'repo' })
+  }, [dismissHint, setView])
+  const closeRegion = useCallback(() => {
+    const opener = regionOpener.current
+    const guideKey = opener?.closest('.guide-panel') && opener.getAttribute('data-region-opener')
+    regionOpener.current = null
+    setView(current => ({ ...current, focusedRegion: null }))
+    window.requestAnimationFrame(() => {
+      const restored = opener?.isConnected ? opener : guideKey
+        ? [...document.querySelectorAll<HTMLButtonElement>('.guide-panel [data-region-opener]')]
+          .find(button => button.dataset.regionOpener === guideKey)
+        : null
+      if (restored && !restored.closest('[inert], [hidden]')) restored.focus({ preventScroll: true })
+      if (!restored || document.activeElement !== restored) focusElement(resetViewButton.current)
+    })
+  }, [setView])
 
   if (error) return (
     <main className="fatal">
@@ -409,33 +452,23 @@ export default function App() {
     })
     if (!result.filtersChanged) pendingFilterFocus.current = null
   }
-  const selectRepo = (repo: AtlasRepo | null, options?: SelectionOptions) => {
-    dismissHint()
-    setHighlightRegion(null)
-    setHighlightLanguage(null)
-    setView(current => ({ ...current, repo: repo?.full_name ?? null }), { ...options, navigate: options?.navigate ?? true, supersedeRollback: true })
-  }
   const backgroundInert = mobileFilters || guideOpen ? true : undefined
   const profileUrl = `https://github.com/${encodeURIComponent(data.owner)}`
 
-  const chooseRegion = (label: string, clickToken?: number) => {
+  const chooseRegion = (label: string, clickToken?: number, opener?: RegionOpener) => {
     const cluster = data.clusters.find(item => item.label === label)
     const key = cluster ? regionKey(cluster) : UNCLUSTERED_KEY
     dismissHint()
-    setView(current => ({ ...current, repo: null, focusedRegion: key }), { navigate: false, supersedeRollback: true })
-    requestNavigation('region', key, clickToken)
+    setView(current => ({ ...current, repo: null, focusedRegion: key }), { selection: 'region', clickToken })
+    regionOpener.current = opener ?? null
     setListMode(false)
     setGuideOpen(false)
     setHighlightRegion(null)
     setHighlightLanguage(null)
   }
-  const closeRegion = () => {
-    setView(current => ({ ...current, focusedRegion: null }))
-    window.requestAnimationFrame(() => focusElement(searchInput.current))
-  }
   const guide = <AtlasGuide data={data} presentation={presentation} view={view}
     onLanguage={(name, included) => setView(current => ({ ...current, languages: setIncluded(current.languages, name, included) }))}
-    onRegion={chooseRegion} onHighlight={setHighlightRegion} onLanguagePreview={setHighlightLanguage} />
+    onRegion={(label, opener) => chooseRegion(label, undefined, opener)} onHighlight={setHighlightRegion} onLanguagePreview={setHighlightLanguage} />
 
   return (
     <div className="app">
@@ -443,7 +476,10 @@ export default function App() {
         <div className="url-warning" role="status">
           Some URL state was not recognized: {urlWarning.join(', ')}.{' '}
           <button onClick={() => {
-            setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true, supersedeRollback: true })
+            rollbackCandidate.current = null
+            regionOpener.current = null
+            replaceNavigation(null)
+            setView(EMPTY_VIEW, { navigate: false, canonicalizeUrl: true })
             window.requestAnimationFrame(() => focusFilterFallback(mobileFilters ? 'dialog' : 'controls'))
           }}>Reset link</button>
         </div>
@@ -503,7 +539,7 @@ export default function App() {
           <ListView data={data} visible={visible} onSelect={(repo) => { selectRepo(repo); setListMode(false) }} />
         ) : (
           <MapView data={data} presentation={presentation} view={view} visible={visible} selected={selected} onSelect={selectRepo} navigationRequest={navigationRequest} onNavigationHandled={acknowledgeNavigation} highlightRegion={highlightRegion} onRegion={chooseRegion}
-            onCloseRegion={closeRegion} highlightLanguage={highlightLanguage} showConnections={showConnections}
+            onRollbackClick={rollbackClick} resetViewRef={resetViewButton} onCloseRegion={closeRegion} highlightLanguage={highlightLanguage} showConnections={showConnections}
             hintDismissed={hintDismissed} onInteraction={dismissHint} />
         )}
         {visible.size === 0 && !hasRegion && (
@@ -515,7 +551,7 @@ export default function App() {
           fallbackLabel={selected.cluster_id != null && (data.fallback_label_ids ?? []).includes(selected.cluster_id)}
           reposByName={reposByName}
           onSelect={selectRepo}
-          onRegion={chooseRegion}
+          onRegion={(label, opener) => chooseRegion(label, undefined, opener)}
           onClose={() => selectRepo(null)}
           hiddenConnections={hiddenConnections} showConnections={showConnections}
           onShowConnections={() => setShowConnections(current => !current)}

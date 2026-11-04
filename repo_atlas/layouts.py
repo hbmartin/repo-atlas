@@ -65,8 +65,8 @@ def force_layout(vectors: np.ndarray) -> np.ndarray:
 
 def density_contours(
     points: np.ndarray,
-) -> tuple[dict[str, list], dict[str, float], np.ndarray]:
-    """Create density rings, a label anchor, and an overlap mask for a cluster."""
+) -> tuple[list[list[list[float]]], dict[str, float], np.ndarray]:
+    """Trace outer density rings while scoring overlap on the original grid."""
     from skimage.measure import approximate_polygon, find_contours
     from sklearn.metrics import pairwise_distances
     from sklearn.neighbors import KernelDensity
@@ -76,7 +76,7 @@ def density_contours(
             "x": round(float(points[:, 0].mean()), 2),
             "y": round(float(points[:, 1].mean()), 2),
         }
-        return {"outer": [], "inner": []}, anchor, np.zeros((256, 256), dtype=bool)
+        return [], anchor, np.zeros((256, 256), dtype=bool)
     distances = pairwise_distances(points)
     distances[distances == 0] = np.inf
     nearest = np.min(distances, axis=1)
@@ -86,40 +86,35 @@ def density_contours(
         0.6 * float(np.mean(finite_nearest)) if len(finite_nearest) else 20.0,
     )
     axis = np.linspace(0, 1000, 256)
-    xx, yy = np.meshgrid(axis, axis)
-    samples = np.column_stack([xx.ravel(), yy.ravel()])
-    density = np.exp(
-        KernelDensity(bandwidth=bandwidth).fit(points).score_samples(samples)
-    ).reshape(256, 256)
+    kde = KernelDensity(bandwidth=bandwidth).fit(points)
+
+    def evaluate(grid: np.ndarray) -> np.ndarray:
+        xx, yy = np.meshgrid(grid, grid)
+        return np.exp(kde.score_samples(np.column_stack([xx.ravel(), yy.ravel()]))).reshape(xx.shape)
+
+    density = evaluate(axis)
     peak = np.unravel_index(int(np.argmax(density)), density.shape)
     anchor = {
         "x": round(float(axis[peak[1]]), 2),
         "y": round(float(axis[peak[0]]), 2),
     }
 
-    def rings(level: float) -> list[list[list[float]]]:
-        result = []
-        for contour in find_contours(density, level):
-            simplified = approximate_polygon(contour, tolerance=0.51)
-            ring = [
-                [
-                    round(float(axis[min(255, max(0, round(col)))]), 2),
-                    round(float(axis[min(255, max(0, round(row)))]), 2),
-                ]
-                for row, col in simplified
-            ]
-            if len(ring) >= 4:
-                if ring[0] != ring[-1]:
-                    ring.append(ring[0])
-                result.append(ring)
-        return result
-
     outer_level = float(density.max() * 0.18)
-    return (
-        {"outer": rings(outer_level), "inner": rings(float(density.max() * 0.42))},
-        anchor,
-        density >= outer_level,
-    )
+    mask = density >= outer_level
+    step = float(axis[1] - axis[0])
+    display = density
+    padding = 0
+    while np.max(display[[0, -1], :]) >= outer_level or np.max(display[:, [0, -1]]) >= outer_level:
+        padding = padding * 2 if padding else max(1, int(np.ceil(3 * bandwidth / step)))
+        display = evaluate(np.arange(-padding, len(axis) + padding) * step)
+    rings = []
+    for contour in find_contours(display, outer_level):
+        simplified = approximate_polygon(contour, tolerance=0.51)
+        ring = [[round((col - padding) * step, 2), round((row - padding) * step, 2)]
+                for row, col in simplified]
+        if len(ring) >= 4 and ring[0] == ring[-1]:
+            rings.append(ring)
+    return rings, anchor, mask
 
 
 def _spread_points(points: np.ndarray) -> np.ndarray:
