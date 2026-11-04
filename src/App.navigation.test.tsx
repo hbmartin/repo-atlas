@@ -225,3 +225,15 @@ it('focuses Reset view after closing a region without an opener on mobile', asyn
   advanceCameraBy(20)
   expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Reset view' }))
 })
+
+it.each([false, true])('focuses List after closing a region in List mode (compact=%s)', async compact => {
+  stubMedia({ compact, reduced: true })
+  await mount('/?focus=developer-tools', territories())
+  const list = screen.getByRole('button', { name: 'List' })
+  fireEvent.click(list)
+  const close = screen.getByRole('button', { name: 'Close details' })
+  close.focus()
+  fireEvent.click(close)
+  advanceCameraBy(20)
+  expect(document.activeElement).toBe(list)
+})
